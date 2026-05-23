@@ -165,7 +165,8 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     let share_service = app_state.share_service.clone();
     let favorites_service = app_state.favorites_service.clone();
     let recent_service = app_state.recent_service.clone();
-    let authorization = app_state.authorization.clone();
+    // authorization is no longer extracted separately — the grants router now
+    // uses app_state directly so handlers can access all services.
 
     // Initialize the batch operations service
     let mut batch_service_builder = BatchOperationService::default(
@@ -302,7 +303,10 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
         Router::new()
     };
 
-    // Create routes for ReBAC grants (/api/grants) — single state: the authz engine.
+    // Create routes for ReBAC grants (/api/grants).
+    // State is Arc<AppState> so that the new list_shared_with_me handler can
+    // access file/folder services. Existing handlers still extract
+    // State<Arc<PgAclEngine>> via the FromRef impl in di.rs.
     let grants_router = {
         use crate::interfaces::api::handlers::grant_handler;
         Router::new()
@@ -311,8 +315,12 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
             .route("/{id}", delete(grant_handler::revoke_grant))
             .route("/role", put(grant_handler::set_role))
             .route("/incoming", get(grant_handler::list_incoming))
+            .route(
+                "/incoming/resources",
+                get(grant_handler::list_shared_with_me),
+            )
             .route("/outgoing", get(grant_handler::list_outgoing))
-            .with_state(authorization.clone())
+            .with_state(app_state.clone())
     };
 
     // Create a router without the i18n routes

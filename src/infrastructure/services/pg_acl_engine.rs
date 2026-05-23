@@ -35,7 +35,9 @@ use sqlx::PgPool;
 
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::common::errors::DomainError;
-use crate::domain::services::authorization::{Grant, Permission, Resource, Subject};
+use crate::domain::services::authorization::{
+    Grant, GrantCursor, IncomingGrantSummary, Permission, Resource, ResourceKind, Subject,
+};
 use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
 use crate::infrastructure::repositories::pg::folder_db_repository::FolderDbRepository;
 
@@ -289,6 +291,107 @@ impl AuthorizationEngine for PgAclEngine {
         .map_err(|e| DomainError::internal_error("PgAcl", format!("list incoming: {e}")))?;
 
         rows.into_iter().map(Self::row_to_grant).collect()
+    }
+
+    async fn list_incoming_resources_paged(
+        &self,
+        subject: Subject,
+        kinds: &[ResourceKind],
+        limit: u32,
+        cursor: Option<GrantCursor>,
+    ) -> Result<(Vec<IncomingGrantSummary>, Option<GrantCursor>), DomainError> {
+        // Build kind filter array — NULL means "all kinds".
+        let kind_strs: Option<Vec<&str>> = if kinds.is_empty() {
+            None
+        } else {
+            Some(kinds.iter().map(|k| k.as_str()).collect())
+        };
+
+        let cursor_at = cursor.as_ref().map(|c| c.granted_at);
+        let cursor_id = cursor.as_ref().map(|c| c.resource_id);
+
+        // Fetch limit+1 rows so we can detect whether a next page exists.
+        let fetch_limit = (limit as i64) + 1;
+
+        // Each row: (resource_type, resource_id, permissions_text_array,
+        //             granted_at, granted_by)
+        type Row = (
+            String,
+            Uuid,
+            Vec<String>,
+            chrono::DateTime<chrono::Utc>,
+            Uuid,
+        );
+
+        let rows: Vec<Row> = sqlx::query_as(
+            r#"
+            WITH agg AS (
+                SELECT
+                    resource_type,
+                    resource_id,
+                    array_agg(DISTINCT permission ORDER BY permission) AS permissions,
+                    MIN(granted_at)                                    AS granted_at,
+                    (array_agg(granted_by ORDER BY granted_at))[1]    AS granted_by
+                FROM storage.access_grants
+                WHERE subject_type = $1
+                  AND subject_id   = $2
+                  AND ($3::text[] IS NULL OR resource_type = ANY($3))
+                GROUP BY resource_type, resource_id
+            )
+            SELECT resource_type, resource_id, permissions, granted_at, granted_by
+            FROM agg
+            WHERE (  $4::timestamptz IS NULL
+                  OR granted_at < $4
+                  OR (granted_at = $4 AND resource_id < $5::uuid))
+            ORDER BY granted_at DESC, resource_id DESC
+            LIMIT $6
+            "#,
+        )
+        .bind(subject.type_str())
+        .bind(subject.id())
+        .bind(kind_strs)
+        .bind(cursor_at)
+        .bind(cursor_id)
+        .bind(fetch_limit)
+        .fetch_all(self.pool.as_ref())
+        .await
+        .map_err(|e| {
+            DomainError::internal_error("PgAcl", format!("list_incoming_resources_paged: {e}"))
+        })?;
+
+        let has_next = rows.len() > limit as usize;
+        let rows: Vec<Row> = rows.into_iter().take(limit as usize).collect();
+
+        // Determine the next cursor from the last item we're actually returning.
+        let next_cursor = if has_next {
+            rows.last().map(|r| GrantCursor {
+                granted_at: r.3,
+                resource_id: r.1,
+            })
+        } else {
+            None
+        };
+
+        // Convert rows into domain summaries.
+        let summaries = rows
+            .into_iter()
+            .filter_map(|(rt, rid, perms_str, granted_at, granted_by)| {
+                let resource_type = ResourceKind::parse(&rt)?;
+                let permissions = perms_str
+                    .iter()
+                    .filter_map(|s| Permission::parse(s))
+                    .collect();
+                Some(IncomingGrantSummary {
+                    resource_type,
+                    resource_id: rid,
+                    permissions,
+                    granted_at,
+                    granted_by,
+                })
+            })
+            .collect();
+
+        Ok((summaries, next_cursor))
     }
 
     async fn list_grants_on_resource(&self, resource: Resource) -> Result<Vec<Grant>, DomainError> {

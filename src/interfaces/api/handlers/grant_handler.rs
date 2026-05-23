@@ -11,22 +11,31 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
+use futures::future::join_all;
 use serde::Deserialize;
 use std::sync::Arc;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use utoipa::IntoParams;
 use uuid::Uuid;
 
 use crate::application::dtos::grant_dto::{
-    CreateGrantDto, GrantDto, PermissionDto, ResourceDto, ResourceTypeDto, SubjectDto,
-    UpdateRoleDto,
+    CreateGrantDto, GrantDto, PermissionDto, ResourceDto, ResourceTypeDto, SharedWithMeDto,
+    SharedWithMeItemDto, SharedWithMeQuery, SubjectDto, UpdateRoleDto,
 };
 use crate::application::ports::authorization_ports::AuthorizationEngine;
+use crate::application::ports::file_ports::FileRetrievalUseCase;
+use crate::application::ports::folder_ports::FolderUseCase;
+use crate::common::di::AppState;
+#[allow(unused_imports)]
 use crate::common::errors::DomainError;
-use crate::domain::services::authorization::{Permission, Resource, Subject};
-use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
+use crate::domain::errors::ErrorKind;
+use crate::domain::services::authorization::{
+    GrantCursor, IncomingGrantSummary, Permission, Resource, ResourceKind, Subject,
+};
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::AuthUser;
+
+type AppStateRef = Arc<AppState>;
 
 // ════════════════════════════════════════════════════════════════════════════
 // POST /api/grants
@@ -44,10 +53,11 @@ use crate::interfaces::middleware::auth::AuthUser;
     tag = "grants"
 )]
 pub async fn create_grant(
-    State(authz): State<Arc<PgAclEngine>>,
+    State(state): State<AppStateRef>,
     auth_user: AuthUser,
     Json(dto): Json<CreateGrantDto>,
 ) -> impl IntoResponse {
+    let authz = &state.authorization;
     let caller_id = auth_user.id;
 
     // Validate: exactly one of permissions/role
@@ -118,10 +128,11 @@ pub async fn create_grant(
     tag = "grants"
 )]
 pub async fn revoke_grant(
-    State(authz): State<Arc<PgAclEngine>>,
+    State(state): State<AppStateRef>,
     auth_user: AuthUser,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
+    let authz = &state.authorization;
     let caller_id = auth_user.id;
     let grant_id = match Uuid::parse_str(&id) {
         Ok(u) => u,
@@ -129,7 +140,7 @@ pub async fn revoke_grant(
     };
 
     // Look up the grant to find the underlying resource (and granter).
-    let on_resource = match find_grant_resource(&authz, grant_id).await {
+    let on_resource = match authz.find_grant_by_id(grant_id).await {
         Ok(Some((res, granter))) => (res, granter),
         Ok(None) => return StatusCode::NO_CONTENT.into_response(), // idempotent
         Err(e) => return AppError::from(e).into_response(),
@@ -151,16 +162,6 @@ pub async fn revoke_grant(
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// Look up a grant by id and return (resource, granted_by) so the caller-auth
-/// check in revoke_grant can determine if the caller is the granter or needs
-/// the Share permission on the resource. Returns `Ok(None)` if no such grant.
-async fn find_grant_resource(
-    authz: &PgAclEngine,
-    grant_id: Uuid,
-) -> Result<Option<(Resource, Uuid)>, DomainError> {
-    authz.find_grant_by_id(grant_id).await
-}
-
 // ════════════════════════════════════════════════════════════════════════════
 // PUT /api/grants/role
 // ════════════════════════════════════════════════════════════════════════════
@@ -176,10 +177,11 @@ async fn find_grant_resource(
     tag = "grants"
 )]
 pub async fn set_role(
-    State(authz): State<Arc<PgAclEngine>>,
+    State(state): State<AppStateRef>,
     auth_user: AuthUser,
     Json(dto): Json<UpdateRoleDto>,
 ) -> impl IntoResponse {
+    let authz = &state.authorization;
     let caller_id = auth_user.id;
     let subject: Subject = dto.subject.into();
     let resource: Resource = dto.resource.into();
@@ -262,12 +264,13 @@ pub struct IncomingQuery {
     tag = "grants"
 )]
 pub async fn list_incoming(
-    State(authz): State<Arc<PgAclEngine>>,
+    State(state): State<AppStateRef>,
     auth_user: AuthUser,
     Query(q): Query<IncomingQuery>,
 ) -> impl IntoResponse {
     let caller_id = auth_user.id;
-    match authz
+    match state
+        .authorization
         .list_incoming_grants(Subject::User(caller_id), q.permission.map(Into::into))
         .await
     {
@@ -277,6 +280,170 @@ pub async fn list_incoming(
         }
         Err(e) => AppError::from(e).into_response(),
     }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// GET /api/grants/incoming/resources
+// ════════════════════════════════════════════════════════════════════════════
+
+#[utoipa::path(
+    get,
+    path = "/api/grants/incoming/resources",
+    params(SharedWithMeQuery),
+    responses(
+        (status = 200,
+         description = "Cursor-paginated resources shared with the caller. \
+                        Each item carries the full file or folder details plus \
+                        aggregated permissions. `next_cursor` is absent on the \
+                        last page.",
+         body = SharedWithMeDto),
+    ),
+    tag = "grants"
+)]
+pub async fn list_shared_with_me(
+    State(state): State<AppStateRef>,
+    auth_user: AuthUser,
+    Query(q): Query<SharedWithMeQuery>,
+) -> impl IntoResponse {
+    let caller_id = auth_user.id;
+    let subject = Subject::User(caller_id);
+
+    // Parse resource_types filter (unknown values silently ignored).
+    let kinds: Vec<ResourceKind> = q
+        .resource_types
+        .as_deref()
+        .map(|s| {
+            s.split(',')
+                .filter_map(|t| ResourceKind::parse(t.trim()))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    // Clamp limit to 1–200.
+    let limit = q.limit.clamp(1, 200);
+
+    // Decode cursor (treat invalid cursor as "start from top").
+    let cursor = q.cursor.as_deref().and_then(GrantCursor::decode);
+
+    // Fetch paged summaries from the ACL engine.
+    let (summaries, next_cursor) = match state
+        .authorization
+        .list_incoming_resources_paged(subject, &kinds, limit, cursor)
+        .await
+    {
+        Ok(r) => r,
+        Err(e) => return AppError::from(e).into_response(),
+    };
+
+    // Split summaries by resource kind for parallel resolution.
+    let file_summaries: Vec<&IncomingGrantSummary> = summaries
+        .iter()
+        .filter(|s| matches!(s.resource_type, ResourceKind::File))
+        .collect();
+    let folder_summaries: Vec<&IncomingGrantSummary> = summaries
+        .iter()
+        .filter(|s| matches!(s.resource_type, ResourceKind::Folder))
+        .collect();
+
+    let file_service = &state.applications.file_retrieval_service;
+    let folder_service = &state.applications.folder_service_concrete;
+
+    // Pre-compute ID strings to avoid temporaries inside async closures.
+    let file_ids: Vec<String> = file_summaries
+        .iter()
+        .map(|s| s.resource_id.to_string())
+        .collect();
+    let folder_ids: Vec<String> = folder_summaries
+        .iter()
+        .map(|s| s.resource_id.to_string())
+        .collect();
+
+    // Resolve resource details concurrently (files and folders in parallel).
+    let (file_results, folder_results) = tokio::join!(
+        join_all(file_ids.iter().map(|id| file_service.get_file(id))),
+        join_all(folder_ids.iter().map(|id| folder_service.get_folder(id)))
+    );
+
+    // Build the unified item list in original grant order (newest first).
+    // We iterate summaries in order and pick the resolved result from the
+    // appropriate typed bucket.
+    let mut file_idx = 0usize;
+    let mut folder_idx = 0usize;
+
+    let mut items: Vec<SharedWithMeItemDto> = Vec::with_capacity(summaries.len());
+
+    for summary in &summaries {
+        match summary.resource_type {
+            ResourceKind::File => {
+                let result = &file_results[file_idx];
+                file_idx += 1;
+                match result {
+                    Ok(file_dto) => {
+                        items.push(SharedWithMeItemDto {
+                            resource_type: ResourceTypeDto::File,
+                            permissions: summary.permissions.iter().map(|p| (*p).into()).collect(),
+                            granted_at: summary.granted_at,
+                            granted_by: summary.granted_by,
+                            file: Some(file_dto.clone()),
+                            folder: None,
+                        });
+                    }
+                    Err(e) if e.kind == ErrorKind::NotFound => {
+                        // Stale grant (file deleted, trigger not yet fired) — skip silently.
+                        warn!(
+                            "Skipping stale file grant for resource_id={}: not found",
+                            summary.resource_id
+                        );
+                    }
+                    Err(e) => {
+                        return AppError::internal_error(format!(
+                            "Failed to fetch file {}: {e}",
+                            summary.resource_id
+                        ))
+                        .into_response();
+                    }
+                }
+            }
+            ResourceKind::Folder => {
+                let result = &folder_results[folder_idx];
+                folder_idx += 1;
+                match result {
+                    Ok(folder_dto) => {
+                        items.push(SharedWithMeItemDto {
+                            resource_type: ResourceTypeDto::Folder,
+                            permissions: summary.permissions.iter().map(|p| (*p).into()).collect(),
+                            granted_at: summary.granted_at,
+                            granted_by: summary.granted_by,
+                            file: None,
+                            folder: Some(folder_dto.clone()),
+                        });
+                    }
+                    Err(e) if e.kind == ErrorKind::NotFound => {
+                        warn!(
+                            "Skipping stale folder grant for resource_id={}: not found",
+                            summary.resource_id
+                        );
+                    }
+                    Err(e) => {
+                        return AppError::internal_error(format!(
+                            "Failed to fetch folder {}: {e}",
+                            summary.resource_id
+                        ))
+                        .into_response();
+                    }
+                }
+            }
+        }
+    }
+
+    (
+        StatusCode::OK,
+        Json(SharedWithMeDto {
+            items,
+            next_cursor: next_cursor.map(|c| c.encode()),
+        }),
+    )
+        .into_response()
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -292,11 +459,11 @@ pub async fn list_incoming(
     tag = "grants"
 )]
 pub async fn list_outgoing(
-    State(authz): State<Arc<PgAclEngine>>,
+    State(state): State<AppStateRef>,
     auth_user: AuthUser,
 ) -> impl IntoResponse {
     let caller_id = auth_user.id;
-    match authz.list_outgoing_grants(caller_id).await {
+    match state.authorization.list_outgoing_grants(caller_id).await {
         Ok(grants) => {
             let dtos: Vec<GrantDto> = grants.into_iter().map(Into::into).collect();
             (StatusCode::OK, Json(dtos)).into_response()
@@ -327,10 +494,11 @@ pub struct OnResourceQuery {
     tag = "grants"
 )]
 pub async fn list_on_resource(
-    State(authz): State<Arc<PgAclEngine>>,
+    State(state): State<AppStateRef>,
     auth_user: AuthUser,
     Query(q): Query<OnResourceQuery>,
 ) -> impl IntoResponse {
+    let authz = &state.authorization;
     let caller_id = auth_user.id;
     let resource: Resource = ResourceDto {
         kind: q.resource_type,

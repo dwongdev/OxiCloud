@@ -5,6 +5,7 @@
 //! `AuthorizationEngine` port consumes them and the `PgAclEngine` implementation
 //! maps them to / from `storage.access_grants` rows.
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use std::fmt;
 use uuid::Uuid;
 
@@ -199,6 +200,84 @@ pub struct Grant {
     pub permission: Permission,
     pub granted_by: Uuid,
     pub granted_at: chrono::DateTime<chrono::Utc>,
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// ResourceKind — type-only discriminator (no id), used for filtering queries
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Resource type without an id — used to filter paginated grant queries by
+/// type. Mirrors the `resource_type` column values in `storage.access_grants`.
+/// Add new variants here when new resource types are supported.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ResourceKind {
+    File,
+    Folder,
+    // Future: Calendar, AddressBook, Playlist, …
+}
+
+impl ResourceKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ResourceKind::File => "file",
+            ResourceKind::Folder => "folder",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        match s {
+            "file" => Some(ResourceKind::File),
+            "folder" => Some(ResourceKind::Folder),
+            _ => None,
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// IncomingGrantSummary — aggregated across multiple permission rows
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Multiple `access_grants` rows for the same `(subject, resource)` collapsed
+/// into one record. Used by `list_incoming_resources_paged` to avoid sending
+/// duplicate resource items to the caller.
+#[derive(Debug, Clone)]
+pub struct IncomingGrantSummary {
+    pub resource_type: ResourceKind,
+    pub resource_id: Uuid,
+    /// All permissions held on this resource (aggregated).
+    pub permissions: Vec<Permission>,
+    /// Earliest `granted_at` across all permission rows.
+    pub granted_at: chrono::DateTime<chrono::Utc>,
+    /// Granter of the earliest grant.
+    pub granted_by: Uuid,
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// GrantCursor — opaque pagination cursor for list_incoming_resources_paged
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Encodes the position of the last seen item in a cursor-paginated grant
+/// listing. The encoding is opaque to API callers — only the backend
+/// decodes it. Change the encoding algorithm in a major version bump.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GrantCursor {
+    pub granted_at: chrono::DateTime<chrono::Utc>,
+    pub resource_id: Uuid,
+}
+
+impl GrantCursor {
+    /// Encode as a URL-safe base64 JSON string (no padding).
+    pub fn encode(&self) -> String {
+        let json = serde_json::to_vec(self).unwrap_or_default();
+        URL_SAFE_NO_PAD.encode(&json)
+    }
+
+    /// Decode from a URL-safe base64 JSON string. Returns `None` on any
+    /// parse failure — callers treat a bad cursor as "start from the top".
+    pub fn decode(s: &str) -> Option<Self> {
+        let bytes = URL_SAFE_NO_PAD.decode(s).ok()?;
+        serde_json::from_slice(&bytes).ok()
+    }
 }
 
 #[cfg(test)]

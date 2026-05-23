@@ -11,7 +11,9 @@
 use uuid::Uuid;
 
 use crate::common::errors::DomainError;
-use crate::domain::services::authorization::{Grant, Permission, Resource, Subject};
+use crate::domain::services::authorization::{
+    Grant, GrantCursor, IncomingGrantSummary, Permission, Resource, ResourceKind, Subject,
+};
 
 pub trait AuthorizationEngine: Send + Sync + 'static {
     /// Returns true if `subject` has `permission` on `resource`, considering
@@ -66,6 +68,24 @@ pub trait AuthorizationEngine: Send + Sync + 'static {
         subject: Subject,
         permission_filter: Option<Permission>,
     ) -> Result<Vec<Grant>, DomainError>;
+
+    /// Cursor-paginated list of resources explicitly granted to `subject`,
+    /// optionally filtered by resource kind. Multiple permission rows for the
+    /// same resource are collapsed into one `IncomingGrantSummary`.
+    ///
+    /// Ordered by `MIN(granted_at) DESC, resource_id DESC` — stable across
+    /// concurrent inserts because the cursor encodes both fields.
+    ///
+    /// Pass `kinds = &[]` to return all resource kinds.
+    /// Returns `(summaries, next_cursor)` — `next_cursor` is `None` when the
+    /// last page has been reached.
+    async fn list_incoming_resources_paged(
+        &self,
+        subject: Subject,
+        kinds: &[ResourceKind],
+        limit: u32,
+        cursor: Option<GrantCursor>,
+    ) -> Result<(Vec<IncomingGrantSummary>, Option<GrantCursor>), DomainError>;
 
     /// All grants on a specific resource (for "Manage sharing" UI). Caller
     /// must verify the caller has `Share` on the resource before invoking.

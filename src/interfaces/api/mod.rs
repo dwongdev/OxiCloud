@@ -20,6 +20,10 @@ use crate::application::dtos::folder_dto::{
     CreateFolderDto, FolderDto, MoveFolderDto, RenameFolderDto,
 };
 use crate::application::dtos::folder_listing_dto::FolderListingDto;
+use crate::application::dtos::grant_dto::{
+    CreateGrantDto, GrantDto, PermissionDto, ResourceDto, ResourceTypeDto, Role, SharedWithMeDto,
+    SharedWithMeItemDto, SubjectDto, SubjectTypeDto, UpdateRoleDto,
+};
 use crate::application::dtos::i18n_dto::{
     LocaleDto, TranslationErrorDto, TranslationRequestDto, TranslationResponseDto,
 };
@@ -51,10 +55,6 @@ use crate::interfaces::api::handlers::contacts_handler::{
 };
 use crate::interfaces::api::handlers::dedup_handler::{
     DedupUploadResponse, HashCheckResponse, StatsResponse,
-};
-use crate::application::dtos::grant_dto::{
-    CreateGrantDto, GrantDto, PermissionDto, ResourceDto, ResourceTypeDto, Role, SubjectDto,
-    SubjectTypeDto, UpdateRoleDto,
 };
 use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
 
@@ -211,6 +211,7 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
         handlers::grant_handler::revoke_grant,
         handlers::grant_handler::set_role,
         handlers::grant_handler::list_incoming,
+        handlers::grant_handler::list_shared_with_me,
         handlers::grant_handler::list_outgoing,
         handlers::grant_handler::list_on_resource,
     ),
@@ -296,6 +297,8 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
             CreateGrantDto,
             UpdateRoleDto,
             GrantDto,
+            SharedWithMeDto,
+            SharedWithMeItemDto,
         )
     ),
     tags(
