@@ -119,6 +119,21 @@ impl From<FileDto> for File {
 }
 
 impl FileDto {
+    /// Returns a copy of this DTO with the `path` field cleared.
+    ///
+    /// Used when a file is returned to a share recipient: `path` reveals the
+    /// full folder hierarchy above the file which the recipient may not have
+    /// access to.  `folder_id` and `owner_id` are intentionally kept — the
+    /// former is needed for sub-folder navigation (covered by the cascade
+    /// grant), and the latter is harmless metadata.
+    #[must_use]
+    pub fn without_hierarchy_info(self) -> Self {
+        Self {
+            path: String::new(),
+            ..self
+        }
+    }
+
     /// Creates an empty file DTO for stub implementations
     pub fn empty() -> Self {
         Self {

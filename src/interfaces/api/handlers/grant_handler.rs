@@ -384,7 +384,7 @@ pub async fn list_shared_with_me(
                             permissions: summary.permissions.iter().map(|p| (*p).into()).collect(),
                             granted_at: summary.granted_at,
                             granted_by: summary.granted_by,
-                            file: Some(file_dto.clone()),
+                            file: Some(file_dto.clone().without_hierarchy_info()),
                             folder: None,
                         });
                     }
@@ -415,7 +415,7 @@ pub async fn list_shared_with_me(
                             granted_at: summary.granted_at,
                             granted_by: summary.granted_by,
                             file: None,
-                            folder: Some(folder_dto.clone()),
+                            folder: Some(folder_dto.clone().without_hierarchy_info()),
                         });
                     }
                     Err(e) if e.kind == ErrorKind::NotFound => {
