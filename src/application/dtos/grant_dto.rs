@@ -133,9 +133,9 @@ impl From<Permission> for PermissionDto {
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     Viewer,
-    Commenter,
+    //Commenter,
     Editor,
-    Manager,
+    //Manager,
     Admin,
 }
 
@@ -146,13 +146,16 @@ impl Role {
     pub fn expand(self) -> &'static [Permission] {
         match self {
             Role::Viewer => &[Permission::Read],
+            /* reserved for future
             Role::Commenter => &[Permission::Read, Permission::Comment],
+            */
             Role::Editor => &[
                 Permission::Read,
                 Permission::Comment,
                 Permission::Create,
                 Permission::Update,
             ],
+            /* reserved for future
             Role::Manager => &[
                 Permission::Read,
                 Permission::Comment,
@@ -160,6 +163,7 @@ impl Role {
                 Permission::Update,
                 Permission::Share,
             ],
+            */
             Role::Admin => &[
                 Permission::Read,
                 Permission::Comment,
