@@ -7,10 +7,10 @@ import { installFetchInterceptor } from '../core/fetchWrapper.js';
 
 installFetchInterceptor();
 
+import { Modal } from '../components/modal.js';
 import { formatFileSize, formatQuotaSize } from '../core/formatters.js';
 import { i18n } from '../core/i18n.js';
 import { oxiIconsInit } from '../core/icons.js';
-import { Modal } from '../components/modal.js';
 import { fileOps } from '../features/files/fileOperations.js';
 import { multiSelect } from '../features/files/multiSelect.js';
 import { favorites } from '../features/library/favorites.js';

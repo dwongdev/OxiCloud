@@ -5,10 +5,12 @@ use tokio::sync::Semaphore;
 use uuid::Uuid;
 
 use crate::domain::repositories::folder_repository::FolderRepository;
+use crate::domain::services::authorization::{Permission, Resource, Subject};
 use crate::infrastructure::repositories::pg::SharePgRepository;
 use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
 use crate::infrastructure::repositories::pg::folder_db_repository::FolderDbRepository;
 use crate::infrastructure::services::password_hasher::Argon2PasswordHasher;
+use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
 use crate::{
     application::{
         dtos::{
@@ -17,6 +19,7 @@ use crate::{
         },
         ports::{
             auth_ports::PasswordHasherPort,
+            authorization_ports::AuthorizationEngine,
             share_ports::{ShareStoragePort, ShareUseCase},
             storage_ports::FileReadPort,
         },
@@ -78,6 +81,9 @@ pub struct ShareService {
     file_repository: Arc<FileBlobReadRepository>,
     folder_repository: Arc<FolderDbRepository>,
     password_hasher: Arc<Argon2PasswordHasher>,
+    /// ReBAC engine — used to create/revoke token grants that mirror public
+    /// share links so that `GET /api/grants/outgoing` reflects them.
+    authorization: Arc<PgAclEngine>,
     /// Bounds the number of in-flight Argon2 password hashes to avoid
     /// saturating the blocking thread pool and consuming excessive RAM.
     hash_semaphore: Arc<Semaphore>,
@@ -90,6 +96,7 @@ impl ShareService {
         file_repository: Arc<FileBlobReadRepository>,
         folder_repository: Arc<FolderDbRepository>,
         password_hasher: Arc<Argon2PasswordHasher>,
+        authorization: Arc<PgAclEngine>,
     ) -> Self {
         Self {
             config,
@@ -97,6 +104,7 @@ impl ShareService {
             file_repository,
             folder_repository,
             password_hasher,
+            authorization,
             hash_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_HASHES)),
         }
     }
@@ -255,6 +263,50 @@ impl ShareUseCase for ShareService {
             .save_share(&share)
             .await
             .map_err(|e| ShareServiceError::Repository(e.to_string()))?;
+
+        // Mirror the share permissions as ReBAC token grants so that
+        // `GET /api/grants/outgoing` picks them up and the UI can show the
+        // share badge without a separate `/api/shares` round-trip.
+        // The DELETE trigger `trg_cleanup_grants_token` handles cleanup when
+        // the share is later removed — no extra service-layer code needed there.
+        {
+            let share_id = saved_share.id();
+            let item_id_uuid = Uuid::parse_str(saved_share.item_id())
+                .map_err(|_| ShareServiceError::Validation("Invalid item UUID".to_string()))?;
+
+            let resource = match saved_share.item_type() {
+                ShareItemType::File => Resource::File(item_id_uuid),
+                ShareItemType::Folder => Resource::Folder(item_id_uuid),
+            };
+            let subject = Subject::Token(share_id);
+            let perms = saved_share.permissions();
+
+            // Read is always granted
+            self.authorization
+                .grant(user_id, subject, Permission::Read, resource)
+                .await
+                .map_err(|e| ShareServiceError::Repository(e.to_string()))?;
+
+            // Write permission → Create + Update
+            if perms.write() {
+                self.authorization
+                    .grant(user_id, subject, Permission::Create, resource)
+                    .await
+                    .map_err(|e| ShareServiceError::Repository(e.to_string()))?;
+                self.authorization
+                    .grant(user_id, subject, Permission::Update, resource)
+                    .await
+                    .map_err(|e| ShareServiceError::Repository(e.to_string()))?;
+            }
+
+            // Reshare permission → Share
+            if perms.reshare() {
+                self.authorization
+                    .grant(user_id, subject, Permission::Share, resource)
+                    .await
+                    .map_err(|e| ShareServiceError::Repository(e.to_string()))?;
+            }
+        }
 
         // Convert the entity to DTO for the response
         Ok(ShareDto::from_entity(&saved_share, &self.config.base_url()))

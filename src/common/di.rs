@@ -514,6 +514,7 @@ impl AppServiceFactory {
         &self,
         repos: &RepositoryServices,
         db_pool: &Arc<PgPool>,
+        authorization: &Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>,
     ) -> Option<Arc<ShareService>> {
         if !self.config.features.enable_file_sharing {
             tracing::info!("File sharing service is disabled in configuration");
@@ -537,6 +538,7 @@ impl AppServiceFactory {
             repos.file_read_repository.clone(),
             repos.folder_repository.clone(),
             password_hasher,
+            authorization.clone(),
         ));
 
         tracing::info!("File sharing service initialized");
@@ -652,7 +654,7 @@ impl AppServiceFactory {
             self.create_application_services(&core, &repos, trash_service.clone(), &authorization);
 
         // 5. Share service
-        let share_service = self.create_share_service(&repos, &pool);
+        let share_service = self.create_share_service(&repos, &pool, &authorization);
         apps.share_service = share_service.clone();
 
         let share_browse_service = share_service.as_ref().map(|s| {

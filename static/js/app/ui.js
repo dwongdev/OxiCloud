@@ -5,6 +5,7 @@
 
 // @ts-check
 
+import { shareModal } from '../components/shareModal.js';
 import { escapeHtml, formatDateTime, formatFileSize } from '../core/formatters.js';
 import { i18n } from '../core/i18n.js';
 import { OxiIcons } from '../core/icons.js';
@@ -15,7 +16,6 @@ import { multiSelect } from '../features/files/multiSelect.js';
 import { wopiEditor } from '../features/files/wopiEditor.js';
 import { favorites } from '../features/library/favorites.js';
 import { recent } from '../features/library/recent.js';
-import { fileSharing } from '../features/sharing/fileSharing.js';
 import { thumbnail } from '../features/thumbnail.js';
 import { grants } from '../model/grants.js';
 import { loadFiles } from './filesView.js';
@@ -146,115 +146,7 @@ const ui = {
             document.body.appendChild(moveDialog);
         }
 
-        // Share dialog
-        if (!document.getElementById('share-dialog')) {
-            const shareDialog = document.createElement('div');
-            shareDialog.classList.add('share-dialog', 'hidden');
-            shareDialog.id = 'share-dialog';
-            shareDialog.innerHTML = `
-                <div class="share-dialog-content">
-                    <div class="share-dialog-header">
-                        <i class="fas fa-oxiexport dialog-header-icon"></i>
-                        <span data-i18n="dialogs.share_file">Share file</span>
-                    </div>
-                    <div class="shared-item-info">
-                        <strong>Item:</strong> <span id="shared-item-name"></span>
-                    </div>
-
-                    <div id="existing-shares-section" class="share-section hidden">
-                        <h3 data-i18n="dialogs.existing_shares">Existing shared links</h3>
-                        <div id="existing-shares-container"></div>
-                    </div>
-
-                    <div class="share-options">
-                        <h3 data-i18n="dialogs.share_options">Share options</h3>
-
-                        <div class="form-group">
-                            <label for="share-password" data-i18n="dialogs.password">Password (optional):</label>
-                            <input type="password" id="share-password" placeholder="Protect with password">
-                        </div>
-
-                        <div class="form-group">
-                            <label for="share-expiration" data-i18n="dialogs.expiration">Expiration date (optional):</label>
-                            <input type="date" id="share-expiration">
-                        </div>
-
-                        <div class="form-group">
-                            <label data-i18n="dialogs.permissions">Permissions:</label>
-                            <div class="permission-options">
-                                <div class="permission-option">
-                                    <input type="checkbox" id="share-permission-read" checked>
-                                    <label for="share-permission-read" data-i18n="permissions.read">Read</label>
-                                </div>
-                                <div class="permission-option">
-                                    <input type="checkbox" id="share-permission-write">
-                                    <label for="share-permission-write" data-i18n="permissions.write">Write</label>
-                                </div>
-                                <div class="permission-option">
-                                    <input type="checkbox" id="share-permission-reshare">
-                                    <label for="share-permission-reshare" data-i18n="permissions.reshare">Allow sharing</label>
-                                </div>
-                            </div>
-                        </div>
-                        <button class="btn btn-primary btn-small" id="share-confirm-btn" data-i18n="actions.share">Share</button>
-                    </div>
-
-                    <div id="new-share-section" class="share-section hidden">
-                        <h3 data-i18n="dialogs.generated_link">Generated link</h3>
-                        <div class="form-group">
-                            <input type="text" id="generated-share-url" readonly>
-                            <div class="share-link-actions">
-                                <button class="btn btn-small" id="copy-share-btn">
-                                    <i class="fas fa-copy"></i> <span data-i18n="actions.copy">Copy</span>
-                                </button>
-                                <button class="btn btn-small" id="notify-share-btn">
-                                    <i class="fas fa-envelope"></i> <span data-i18n="actions.notify">Notify</span>
-                                </button>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div class="share-dialog-buttons">
-                        <button class="btn btn-secondary" id="share-close-btn" data-i18n="actions.close">Close</button>
-                    </div>
-                </div>
-            `;
-            i18n.translateElement(shareDialog);
-            document.body.appendChild(shareDialog);
-
-            // Add event listeners for share dialog
-            document.getElementById('share-close-btn')?.addEventListener('click', () => {
-                contextMenus.closeShareDialog();
-            });
-
-            document.getElementById('share-confirm-btn')?.addEventListener('click', async () => {
-                await contextMenus.createSharedLink();
-            });
-
-            document.getElementById('copy-share-btn')?.addEventListener('click', async () => {
-                const shareUrl = /** @type {HTMLInputElement | null} */ (document.getElementById('generated-share-url'))?.value;
-                if (shareUrl) await fileSharing.copyLinkToClipboard(shareUrl);
-            });
-
-            document.getElementById('notify-share-btn')?.addEventListener('click', () => {
-                const shareUrl = /** @type {HTMLInputElement | null} */ (document.getElementById('generated-share-url'))?.value;
-                if (shareUrl) contextMenus.showEmailNotificationDialog(shareUrl);
-            });
-
-            // FIXME make generic function (close all dialog / etc)
-            document.addEventListener('keydown', (e) => {
-                const dialog = document.getElementById('share-dialog');
-                if (e.key === 'Escape' && !dialog?.classList.contains('hidden')) {
-                    contextMenus.closeShareDialog();
-                }
-            });
-
-            shareDialog.addEventListener('click', (e) => {
-                if (e.target === shareDialog) {
-                    contextMenus.closeShareDialog();
-                }
-            });
-        }
+        // Share dialog is now handled by shareModal (components/shareModal.js)
 
         // Notification dialog
         if (!document.getElementById('notification-dialog')) {
@@ -1245,15 +1137,14 @@ const ui = {
             const itemType = itemElement.dataset.fileId ? 'file' : 'folder';
             const itemName = itemElement.dataset.fileId ? itemElement.dataset.fileName : itemElement.dataset.folderName;
 
-            // TODO corrently dirty
-            const item = /** @type {unknown} */ ({
-                id: itemId,
-                item_id: itemId,
-                item_type: itemType,
-                item_name: itemName
-            });
+            const item = /** @type {FileItem|FolderItem} */ (
+                /** @type {unknown} */ ({
+                    id: itemId,
+                    name: itemName
+                })
+            );
 
-            contextMenus.showShareDialog(/** @type {FileItem} */ (item), itemType);
+            shareModal.open(item, /** @type {'file'|'folder'} */ (itemType));
         });
     },
 

@@ -271,7 +271,7 @@
  */
 
 /**
- * @typedef {'user'|'group'|'external'} SubjectTypeEnum
+ * @typedef {'user'|'group'|'token'|'external'} SubjectTypeEnum
  */
 
 /**
@@ -353,5 +353,36 @@
  * @property {boolean}      is_system
  * @property {string}       created_at   - ISO-8601
  * @property {string}       updated_at   - ISO-8601
+ */
+
+// ------------------- share modal
+
+/**
+ * Share roles (DTO-layer sugar for the ReBAC permission sets).
+ * @typedef {'viewer'|'editor'|'admin'} ShareRoleEnum
+ */
+
+/**
+ * One collaborator row in the share modal's People section.
+ * @typedef {Object} MemberEntry
+ * @property {Grant}         grant  - The underlying grant (id, subject, resource, etc.)
+ * @property {ShareRoleEnum} role   - Derived role label shown in the UI.
+ * @property {'keep'|'remove'|'change'|'new'} _op - Pending local operation.
+ */
+
+/**
+ * Existing public link with a pending local operation.
+ * @typedef {Object} LinkEntry
+ * @property {ShareItem}  share   - The existing share object.
+ * @property {'keep'|'remove'|'edit'} _op - Pending local operation.
+ * @property {DraftLink|null} _draft - Updated fields when _op === 'edit'.
+ */
+
+/**
+ * A public link staged for creation (not yet committed).
+ * @typedef {Object} DraftLink
+ * @property {string}      name
+ * @property {string|null} password
+ * @property {string|null} expires_at  - ISO-8601 date string or null.
  */
 

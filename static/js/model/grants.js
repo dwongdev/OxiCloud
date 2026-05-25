@@ -2,6 +2,8 @@
  * @import {Grant, ResourceTypeEnum, SharedWithMeResponse} from '../core/types.js'
  */
 
+import { getCsrfHeaders } from '../core/csrf.js';
+
 const grants = {
     /** @type {Record<String, Record<String, Grant[]>>} */
     outgoingGrants: {},
@@ -13,14 +15,15 @@ const grants = {
         const response = await fetch('/api/grants/outgoing');
 
         if (!response.ok) {
-            console.log(`error ${response.status} while fetching /api/grants/outgoing:`, await response.json());
+            console.error(`error ${response.status} while fetching /api/grants/outgoing`);
             return;
         }
 
         /** @type {Grant[]} */
         const outgoingGrants = await response.json();
 
-        console.log(outgoingGrants);
+        // Reset and rebuild cache
+        this.outgoingGrants = {};
 
         // store grants by type, then by id
         outgoingGrants.forEach((grant) => {
@@ -28,8 +31,6 @@ const grants = {
             this.outgoingGrants[grant.resource.type][grant.resource.id] ??= [];
             this.outgoingGrants[grant.resource.type][grant.resource.id].push(grant);
         });
-
-        console.log(`outgoing grants: `, this.outgoingGrants);
     },
 
     /**
@@ -50,7 +51,7 @@ const grants = {
         const response = await fetch('/api/grants/incoming');
 
         if (!response.ok) {
-            console.log(`error ${response.status} while fetching /api/grants/incoming:`, await response.json);
+            console.error(`error ${response.status} while fetching /api/grants/incoming`);
             return;
         }
 
@@ -63,8 +64,6 @@ const grants = {
             this.incomingGrants[grant.resource.type][grant.resource.id] ??= [];
             this.incomingGrants[grant.resource.type][grant.resource.id].push(grant);
         });
-
-        console.log(`incoming grants: `, this.incomingGrants);
     },
 
     /**
@@ -105,6 +104,96 @@ const grants = {
         }
 
         return response.json();
+    },
+
+    /**
+     * Fetch all grants on a specific resource (for the "Manage sharing" panel).
+     * Refreshes the outgoingGrants cache for this resource.
+     *
+     * @param {ResourceTypeEnum} resourceType
+     * @param {string}           resourceId
+     * @returns {Promise<Grant[]>}
+     */
+    async fetchGrantsForResource(resourceType, resourceId) {
+        const params = new URLSearchParams({ resource_type: resourceType, resource_id: resourceId });
+        const response = await fetch(`/api/grants?${params}`, { credentials: 'same-origin' });
+
+        if (!response.ok) {
+            throw new Error(`fetchGrantsForResource: HTTP ${response.status}`);
+        }
+
+        /** @type {Grant[]} */
+        const result = await response.json();
+
+        // Refresh the outgoing cache for this resource
+        this.outgoingGrants[resourceType] ??= {};
+        this.outgoingGrants[resourceType][resourceId] = result;
+
+        return result;
+    },
+
+    /**
+     * Create a new grant.
+     * Body mirrors `CreateGrantDto`: `{ subject, resource, role }` OR `{ subject, resource, permissions }`.
+     *
+     * @param {Object} dto - CreateGrantDto shape
+     * @returns {Promise<Grant[]>}
+     */
+    async createGrant(dto) {
+        const response = await fetch('/api/grants', {
+            method: 'POST',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', ...getCsrfHeaders() },
+            body: JSON.stringify(dto)
+        });
+
+        if (!response.ok) {
+            const body = await response.json().catch(() => ({}));
+            throw new Error(body.error || `createGrant: HTTP ${response.status}`);
+        }
+
+        return response.json();
+    },
+
+    /**
+     * Reconcile a subject's role on a resource (replaces all their permissions).
+     * Body mirrors `UpdateRoleDto`: `{ subject, resource, role }`.
+     *
+     * @param {Object} dto - UpdateRoleDto shape
+     * @returns {Promise<Grant[]>}
+     */
+    async updateRole(dto) {
+        const response = await fetch('/api/grants/role', {
+            method: 'PUT',
+            credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', ...getCsrfHeaders() },
+            body: JSON.stringify(dto)
+        });
+
+        if (!response.ok) {
+            const body = await response.json().catch(() => ({}));
+            throw new Error(body.error || `updateRole: HTTP ${response.status}`);
+        }
+
+        return response.json();
+    },
+
+    /**
+     * Revoke a single grant by its UUID.
+     *
+     * @param {string} grantId
+     * @returns {Promise<void>}
+     */
+    async revokeGrant(grantId) {
+        const response = await fetch(`/api/grants/${encodeURIComponent(grantId)}`, {
+            method: 'DELETE',
+            credentials: 'same-origin',
+            headers: getCsrfHeaders()
+        });
+
+        if (!response.ok) {
+            throw new Error(`revokeGrant: HTTP ${response.status}`);
+        }
     }
 };
 

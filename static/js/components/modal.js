@@ -40,6 +40,14 @@ const Modal = {
     // Rename mode: select only name without extension
     _selectNameOnly: false,
 
+    // Panel mode — openPanel() sets this; skips input-focus logic
+    /** @private */
+    _panelMode: false,
+
+    // Saved modal-body innerHTML to restore when a panel closes
+    /** @private */
+    _savedBodyHTML: '',
+
     /**
      * Initialize modal system
      */
@@ -81,6 +89,13 @@ const Modal = {
                 e.preventDefault();
                 this.confirm();
             } else if (e.key === 'Escape') {
+                this.close(false);
+            }
+        });
+
+        // Escape in panel mode (input isn't focused so the above handler won't fire)
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && this._panelMode && !this.overlay?.classList.contains('hidden')) {
                 this.close(false);
             }
         });
@@ -259,6 +274,8 @@ const Modal = {
         this._action = null;
         this.overlay.classList.remove('active');
 
+        const wasPanel = this._panelMode;
+
         setTimeout(() => {
             this.overlay.classList.add('hidden');
 
@@ -269,6 +286,15 @@ const Modal = {
             // Clear callbacks
             this.onConfirm = null;
             this.onCancel = null;
+
+            // Restore original modal-body content after a panel closes
+            if (wasPanel) {
+                const bodyEl = this.overlay?.querySelector('.modal-body');
+                if (bodyEl) bodyEl.innerHTML = this._savedBodyHTML;
+                this.overlay?.querySelector('.modal-container')?.classList.remove('modal-container--panel');
+                this._panelMode = false;
+                this._savedBodyHTML = '';
+            }
         }, 200);
     },
 
@@ -277,6 +303,13 @@ const Modal = {
      * until it resolves — closing only on success, showing the error inline on failure.
      */
     async confirm() {
+        // Panel mode: delegate entirely to the caller-supplied onConfirm
+        if (this._panelMode) {
+            if (this.onConfirm) this.onConfirm();
+            this.close(true);
+            return;
+        }
+
         if (!this._action) {
             if (this.onConfirm) this.onConfirm();
             this.close(true);
@@ -298,6 +331,71 @@ const Modal = {
             this.confirmBtn.disabled = false;
             this.input.focus();
         }
+    },
+
+    /**
+     * Open the modal with fully custom body content (panel mode).
+     *
+     * The caller supplies a pre-built HTMLElement as `content`; it is injected
+     * into `.modal-body`, replacing the default label/input/error elements for
+     * the lifetime of this panel.  The overlay, header, animation, footer
+     * buttons, click-outside, and Escape handling all come from Modal.
+     *
+     * Original `.modal-body` innerHTML is restored automatically when the
+     * panel closes.
+     *
+     * @param {Object} options
+     * @param {string}        options.title
+     * @param {string}        [options.icon]          - Font Awesome class, default 'fa-share-alt'
+     * @param {HTMLElement}   options.content         - DOM node to inject into .modal-body
+     * @param {string}        [options.confirmText]   - Confirm button label
+     * @param {string}        [options.cancelText]    - Cancel button label
+     * @param {() => void}    [options.onConfirm]     - Called when Confirm is clicked
+     * @param {() => void}    [options.onCancel]      - Called when Cancel / close is triggered
+     */
+    openPanel({ title, icon = 'fa-share-alt', content, confirmText = null, cancelText = null, onConfirm = null, onCancel = null }) {
+        if (!this.overlay) return;
+
+        this._panelMode = true;
+
+        // ── Header ──────────────────────────────────────────────────────────
+        const iconContainer = this.overlay.querySelector('.modal-icon');
+        if (iconContainer) {
+            iconContainer.innerHTML = `<i class="fas ${icon}"></i>`;
+            if (replaceIconsInElement) replaceIconsInElement(iconContainer);
+        }
+        if (this.title) this.title.textContent = title;
+
+        // ── Body swap ───────────────────────────────────────────────────────
+        const bodyEl = this.overlay.querySelector('.modal-body');
+        if (bodyEl) {
+            this._savedBodyHTML = bodyEl.innerHTML;
+            bodyEl.replaceChildren(content);
+        }
+
+        // ── Container size modifier ──────────────────────────────────────────
+        this.overlay.querySelector('.modal-container')?.classList.add('modal-container--panel');
+
+        // ── Footer buttons ──────────────────────────────────────────────────
+        if (this.confirmBtn) {
+            this.confirmBtn.textContent = confirmText ?? i18n.t('actions.apply', 'Apply');
+            this.confirmBtn.disabled = false;
+        }
+        if (this.cancelBtn) {
+            this.cancelBtn.textContent = cancelText ?? i18n.t('actions.cancel');
+        }
+
+        // ── Callbacks ───────────────────────────────────────────────────────
+        this.onConfirm = onConfirm;
+        this.onCancel = onCancel;
+        this._action = null;
+        this.clearError();
+
+        // ── Show overlay (same animation as prompt, no input focus) ─────────
+        this.overlay.classList.remove('hidden');
+        requestAnimationFrame(() => {
+            this.overlay.classList.add('active');
+        });
     }
 };
 

@@ -1,9 +1,9 @@
 import { app } from '../../app/state.js';
+import { Modal } from '../../components/modal.js';
 import { getCsrfHeaders } from '../../core/csrf.js';
 import { formatFileSize } from '../../core/formatters.js';
 import { i18n } from '../../core/i18n.js';
 import { oxiIcon } from '../../core/icons.js';
-import { Modal } from '../../components/modal.js';
 import { notifications } from '../../core/notifications.js';
 
 /** @import {FileItem, Musicshare, Playlist, PlaylistItem} from '../../core/types.js' */

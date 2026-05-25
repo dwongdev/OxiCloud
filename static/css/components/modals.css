@@ -190,6 +190,9 @@
     color: var(--color-text-heading);
     margin: 0;
     flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
 
 .modal-close-btn {
@@ -306,4 +309,21 @@
 
 .modal-footer .btn-primary:active {
     transform: translateY(0);
+}
+
+/* ── Panel mode (ShareModal, etc.) ─────────────────────────────────────────── */
+/* Wider, taller container; body becomes a zero-padding scrollable slot.       */
+
+.modal-container--panel {
+    width: 520px;
+    max-width: 96vw;
+    max-height: 88vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.modal-container--panel .modal-body {
+    padding: 0;
+    overflow-y: auto;
+    flex: 1;
 }
