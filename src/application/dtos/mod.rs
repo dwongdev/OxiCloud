@@ -1,4 +1,6 @@
 pub mod address_book_dto;
+pub mod cursor;
+pub use cursor::{CursorListResponse, CursorQuery, PageCursor};
 pub mod app_password_dto;
 pub mod calendar_dto;
 pub mod contact_dto;

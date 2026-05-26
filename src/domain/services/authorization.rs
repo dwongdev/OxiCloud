@@ -5,7 +5,7 @@
 //! `AuthorizationEngine` port consumes them and the `PgAclEngine` implementation
 //! maps them to / from `storage.access_grants` rows.
 
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use crate::application::dtos::cursor::PageCursor;
 use std::fmt;
 use uuid::Uuid;
 
@@ -265,20 +265,8 @@ pub struct GrantCursor {
     pub resource_id: Uuid,
 }
 
-impl GrantCursor {
-    /// Encode as a URL-safe base64 JSON string (no padding).
-    pub fn encode(&self) -> String {
-        let json = serde_json::to_vec(self).unwrap_or_default();
-        URL_SAFE_NO_PAD.encode(&json)
-    }
-
-    /// Decode from a URL-safe base64 JSON string. Returns `None` on any
-    /// parse failure — callers treat a bad cursor as "start from the top".
-    pub fn decode(s: &str) -> Option<Self> {
-        let bytes = URL_SAFE_NO_PAD.decode(s).ok()?;
-        serde_json::from_slice(&bytes).ok()
-    }
-}
+/// Delegate encode/decode to the shared [`PageCursor`] trait.
+impl PageCursor for GrantCursor {}
 
 #[cfg(test)]
 mod tests {

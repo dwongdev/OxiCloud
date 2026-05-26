@@ -150,8 +150,8 @@ const sharedWithMeView = {
         const ownerMap = new Map();
 
         for (const item of items) {
-            if (item.resource_type === 'folder' && item.folder) {
-                const f = item.folder;
+            if (item.resource_type === 'folder') {
+                const f = /** @type {FolderItem} */ (item.resource);
                 folders.push(
                     /** @type {FolderItem} */ ({
                         id: f.id,
@@ -168,8 +168,8 @@ const sharedWithMeView = {
                     })
                 );
                 ownerMap.set(f.id, item.granted_by);
-            } else if (item.resource_type === 'file' && item.file) {
-                const f = item.file;
+            } else if (item.resource_type === 'file') {
+                const f = /** @type {FileItem} */ (item.resource);
                 files.push(
                     /** @type {FileItem} */ ({
                         id: f.id,

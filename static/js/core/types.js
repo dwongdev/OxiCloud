@@ -297,14 +297,13 @@
 
 /**
  * One item returned by `GET /api/grants/incoming/resources`.
- * Exactly one of `file` / `folder` is populated (indicated by `resource_type`).
+ * `resource_type` discriminates the shape of `resource`.
  * @typedef {Object} SharedWithMeItem
  * @property {ResourceTypeEnum}        resource_type
  * @property {PermissionTypeEnum[]}    permissions   - All permissions the caller holds on this resource.
  * @property {string}                  granted_at    - ISO-8601 timestamp of the earliest grant.
  * @property {string}                  granted_by    - UUID of the user who created the grant.
- * @property {FileItem|undefined}      [file]        - Populated when resource_type === 'file'.
- * @property {FolderItem|undefined}    [folder]      - Populated when resource_type === 'folder'.
+ * @property {FileItem|FolderItem}     resource      - Full resource details; shape follows resource_type.
  */
 
 /**

@@ -96,10 +96,12 @@ export default defineConfig({
           items: [
             { text: "Internal Architecture", link: "/architecture/" },
             { text: "Caching", link: "/architecture/caching" },
+            { text: "Resource Listing API", link: "/architecture/resource-listing" },
             { text: "Storage Safety", link: "/architecture/file-system-safety" },
             { text: "Database Transactions", link: "/architecture/database-transactions" },
             { text: "Share Integration", link: "/architecture/share-integration" },
             { text: "Storage Quotas", link: "/architecture/storage-quotas" },
+            { text: "File and Blob lifecycle", link: "/architecture/file-and-blob-lifecycle" },
           ],
         },
         { text: "FAQ", link: "/faq" },

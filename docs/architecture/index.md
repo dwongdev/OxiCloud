@@ -71,4 +71,5 @@ src/
 ## Further Reading
 
 - [Caching Architecture →](/architecture/caching)
+- [Resource Listing API →](/architecture/resource-listing)
 - [Storage Quotas →](/architecture/storage-quotas)

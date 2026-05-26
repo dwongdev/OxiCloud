@@ -18,9 +18,10 @@ use tracing::{error, info, warn};
 use utoipa::IntoParams;
 use uuid::Uuid;
 
+use crate::application::dtos::cursor::PageCursor;
 use crate::application::dtos::grant_dto::{
-    CreateGrantDto, GrantDto, PermissionDto, ResourceDto, ResourceTypeDto, SharedWithMeDto,
-    SharedWithMeItemDto, SharedWithMeQuery, SubjectDto, UpdateRoleDto,
+    CreateGrantDto, GrantDto, PermissionDto, ResourceContentDto, ResourceDto, ResourceTypeDto,
+    SharedWithMeDto, SharedWithMeItemDto, SharedWithMeQuery, SubjectDto, UpdateRoleDto,
 };
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::file_ports::FileRetrievalUseCase;
@@ -320,10 +321,10 @@ pub async fn list_shared_with_me(
         .unwrap_or_default();
 
     // Clamp limit to 1–200.
-    let limit = q.limit.clamp(1, 200);
+    let limit = q.limit_clamped() as u32;
 
     // Decode cursor (treat invalid cursor as "start from top").
-    let cursor = q.cursor.as_deref().and_then(GrantCursor::decode);
+    let cursor = q.decode_cursor::<GrantCursor>();
 
     // Fetch paged summaries from the ACL engine.
     let (summaries, next_cursor) = match state
@@ -384,8 +385,9 @@ pub async fn list_shared_with_me(
                             permissions: summary.permissions.iter().map(|p| (*p).into()).collect(),
                             granted_at: summary.granted_at,
                             granted_by: summary.granted_by,
-                            file: Some(file_dto.clone().without_hierarchy_info()),
-                            folder: None,
+                            resource: ResourceContentDto::File(
+                                file_dto.clone().without_hierarchy_info(),
+                            ),
                         });
                     }
                     Err(e) if e.kind == ErrorKind::NotFound => {
@@ -414,8 +416,9 @@ pub async fn list_shared_with_me(
                             permissions: summary.permissions.iter().map(|p| (*p).into()).collect(),
                             granted_at: summary.granted_at,
                             granted_by: summary.granted_by,
-                            file: None,
-                            folder: Some(folder_dto.clone().without_hierarchy_info()),
+                            resource: ResourceContentDto::Folder(
+                                folder_dto.clone().without_hierarchy_info(),
+                            ),
                         });
                     }
                     Err(e) if e.kind == ErrorKind::NotFound => {
@@ -438,10 +441,10 @@ pub async fn list_shared_with_me(
 
     (
         StatusCode::OK,
-        Json(SharedWithMeDto {
+        Json(SharedWithMeDto::with_cursor(
             items,
-            next_cursor: next_cursor.map(|c| c.encode()),
-        }),
+            next_cursor.map(|c| c.encode()),
+        )),
     )
         .into_response()
 }

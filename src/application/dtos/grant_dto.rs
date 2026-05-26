@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 
+use crate::application::dtos::cursor::{CursorListResponse, CursorQuery, PageCursor};
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
 use crate::domain::services::authorization::{Grant, Permission, Resource, Subject};
@@ -232,26 +233,58 @@ impl From<Grant> for GrantDto {
 // ════════════════════════════════════════════════════════════════════════════
 
 /// Query parameters for `GET /api/grants/incoming/resources`.
+///
+/// `limit`, `cursor`, and `sort_by` follow the standard [`CursorQuery`]
+/// contract.  They are declared directly here rather than via
+/// `#[serde(flatten)]` because `serde_urlencoded` (Axum's query extractor)
+/// does not support flattening.
 #[derive(Debug, Deserialize, IntoParams)]
 pub struct SharedWithMeQuery {
     /// Maximum number of items to return (1–200, default 50).
-    #[serde(default = "shared_with_me_default_limit")]
+    #[serde(default = "CursorQuery::default_limit")]
     pub limit: u32,
+    /// Opaque cursor from a previous response. Omit to start from the
+    /// most-recently-granted item.
+    pub cursor: Option<String>,
+    /// Sort dimension. Supported values: `"granted_at"` (default),
+    /// `"granted_by"` (for swimlane grouping).
+    pub sort_by: Option<String>,
     /// Comma-separated resource types to include, e.g. `file,folder`.
     /// Omit to return all known types.
     pub resource_types: Option<String>,
-    /// Opaque cursor returned by a previous call. Omit to start from the
-    /// most-recently-granted item.
-    pub cursor: Option<String>,
 }
 
-fn shared_with_me_default_limit() -> u32 {
-    50
+impl SharedWithMeQuery {
+    /// Returns `limit` clamped to `[1, 200]`.
+    pub fn limit_clamped(&self) -> usize {
+        self.limit.clamp(1, 200) as usize
+    }
+
+    /// Decode the optional cursor string.  Invalid cursor → start from top.
+    pub fn decode_cursor<C: PageCursor>(&self) -> Option<C> {
+        self.cursor.as_deref().and_then(C::decode)
+    }
 }
 
-/// One item in the shared-with-me list. Exactly one of `file` / `folder` is
-/// populated, indicated by `resource_type`. Additional optional fields for
-/// future resource types (playlist, addressbook, …) will be added here.
+/// The resource payload for one item in the shared-with-me list.
+///
+/// The variant is discriminated by `resource_type` on the parent
+/// [`SharedWithMeItemDto`].  Serialised as the inner object (no wrapper key)
+/// via `#[serde(untagged)]`, so consumers see the file/folder fields directly
+/// under the `resource` key.
+#[derive(Debug, Serialize, ToSchema)]
+#[serde(untagged)]
+pub enum ResourceContentDto {
+    File(FileDto),
+    Folder(FolderDto),
+}
+
+/// One item in the shared-with-me list.
+///
+/// `resource_type` indicates whether `resource` contains a file or a folder.
+/// Using a single `resource` field (instead of nullable `file`/`folder` pairs)
+/// makes adding new resource types backward-compatible — only `resource_type`
+/// gains a new variant; the wrapper shape stays the same.
 #[derive(Debug, Serialize, ToSchema)]
 pub struct SharedWithMeItemDto {
     pub resource_type: ResourceTypeDto,
@@ -261,17 +294,9 @@ pub struct SharedWithMeItemDto {
     pub granted_at: chrono::DateTime<chrono::Utc>,
     /// UUID of the user who created the (earliest) grant.
     pub granted_by: Uuid,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub file: Option<FileDto>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub folder: Option<FolderDto>,
+    /// Full resource details. Shape is determined by `resource_type`.
+    pub resource: ResourceContentDto,
 }
 
 /// Response for `GET /api/grants/incoming/resources`.
-#[derive(Debug, Serialize, ToSchema)]
-pub struct SharedWithMeDto {
-    pub items: Vec<SharedWithMeItemDto>,
-    /// Opaque cursor for the next page. Absent when the last page is reached.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub next_cursor: Option<String>,
-}
+pub type SharedWithMeDto = CursorListResponse<SharedWithMeItemDto>;
