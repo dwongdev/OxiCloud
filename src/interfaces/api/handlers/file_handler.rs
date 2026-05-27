@@ -1080,6 +1080,7 @@ pub(super) fn build_content_disposition(name: &str, mime: &str, force_inline: bo
         (status = 200, description = "List of files", body = Vec<FileDto>),
         (status = 304, description = "Not modified"),
     ),
+    security(("bearerAuth" = [])),
     tag = "files"
 )]
 pub async fn list_files_query(
@@ -1100,6 +1101,7 @@ pub async fn list_files_query(
         (status = 400, description = "Invalid request"),
         (status = 507, description = "Storage quota exceeded"),
     ),
+    security(("bearerAuth" = [])),
     tag = "files"
 )]
 pub async fn upload_file_with_thumbnails(
@@ -1125,6 +1127,7 @@ pub async fn upload_file_with_thumbnails(
         (status = 304, description = "Not modified"),
         (status = 404, description = "File not found"),
     ),
+    security(("bearerAuth" = [])),
     tag = "files"
 )]
 pub async fn download_file(
@@ -1150,6 +1153,7 @@ pub async fn download_file(
         (status = 304, description = "Not modified"),
         (status = 404, description = "File not found"),
     ),
+    security(("bearerAuth" = [])),
     tag = "files"
 )]
 pub async fn get_thumbnail(
@@ -1174,6 +1178,7 @@ pub async fn get_thumbnail(
         (status = 400, description = "Invalid image or size too large"),
         (status = 404, description = "File not found"),
     ),
+    security(("bearerAuth" = [])),
     tag = "files"
 )]
 pub async fn upload_thumbnail(
@@ -1193,6 +1198,7 @@ pub async fn upload_thumbnail(
         (status = 200, description = "File metadata (EXIF, dimensions, duration, etc.)"),
         (status = 404, description = "File not found"),
     ),
+    security(("bearerAuth" = [])),
     tag = "files"
 )]
 pub async fn get_file_metadata(
@@ -1211,6 +1217,7 @@ pub async fn get_file_metadata(
         (status = 204, description = "File deleted (moved to trash if enabled)"),
         (status = 404, description = "File not found"),
     ),
+    security(("bearerAuth" = [])),
     tag = "files"
 )]
 pub async fn delete_file(
@@ -1230,6 +1237,7 @@ pub async fn delete_file(
         (status = 200, description = "Renamed file", body = FileDto),
         (status = 404, description = "File not found"),
     ),
+    security(("bearerAuth" = [])),
     tag = "files"
 )]
 pub async fn rename_file(
@@ -1250,6 +1258,7 @@ pub async fn rename_file(
         (status = 200, description = "Moved file", body = FileDto),
         (status = 404, description = "File or destination not found"),
     ),
+    security(("bearerAuth" = [])),
     tag = "files"
 )]
 pub async fn move_file_simple(

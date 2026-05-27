@@ -17,6 +17,7 @@ use std::sync::Arc;
         (status = 200, description = "List of trashed items"),
         (status = 501, description = "Trash feature not enabled")
     ),
+    security(("bearerAuth" = [])),
     tag = "trash"
 )]
 #[instrument(skip_all)]
@@ -71,6 +72,7 @@ pub async fn get_trash_items(
         (status = 200, description = "File moved to trash"),
         (status = 501, description = "Trash feature not enabled")
     ),
+    security(("bearerAuth" = [])),
     tag = "trash"
 )]
 #[instrument(skip_all)]
@@ -132,6 +134,7 @@ pub async fn move_file_to_trash(
         (status = 200, description = "Folder moved to trash"),
         (status = 501, description = "Trash feature not enabled")
     ),
+    security(("bearerAuth" = [])),
     tag = "trash"
 )]
 #[instrument(skip_all)]
@@ -195,6 +198,7 @@ pub async fn move_folder_to_trash(
         (status = 200, description = "Item restored from trash"),
         (status = 501, description = "Trash feature not enabled")
     ),
+    security(("bearerAuth" = [])),
     tag = "trash"
 )]
 #[instrument(skip_all)]
@@ -266,6 +270,7 @@ pub async fn restore_from_trash(
         (status = 200, description = "Item permanently deleted"),
         (status = 501, description = "Trash feature not enabled")
     ),
+    security(("bearerAuth" = [])),
     tag = "trash"
 )]
 #[instrument(skip_all)]
@@ -338,6 +343,7 @@ pub async fn delete_permanently(
         (status = 200, description = "Trash emptied successfully"),
         (status = 501, description = "Trash feature not enabled")
     ),
+    security(("bearerAuth" = [])),
     tag = "trash"
 )]
 #[instrument(skip_all)]

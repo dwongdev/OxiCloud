@@ -19,7 +19,6 @@ use crate::interfaces::api::cookie_auth;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::CurrentUserId;
 use serde::Deserialize;
-use utoipa::ToSchema;
 
 /// Public auth routes — no authentication required.
 pub fn auth_public_routes() -> Router<Arc<AppState>> {
@@ -667,7 +666,9 @@ pub async fn get_system_status(
     ),
     tag = "auth"
 )]
-pub async fn oidc_providers(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+pub async fn oidc_providers(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, AppError> {
     let auth_service = state
         .auth_service
         .as_ref()
@@ -708,7 +709,9 @@ pub async fn oidc_providers(State(state): State<Arc<AppState>>) -> Result<impl I
     ),
     tag = "auth"
 )]
-pub async fn oidc_authorize(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
+pub async fn oidc_authorize(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, AppError> {
     let auth_service = state
         .auth_service
         .as_ref()

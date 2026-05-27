@@ -38,6 +38,7 @@ pub struct PhotosQueryParams {
         (status = 401, description = "Unauthorized"),
         (status = 500, description = "Internal server error")
     ),
+    security(("bearerAuth" = [])),
     tag = "photos"
 )]
 pub async fn list_photos(

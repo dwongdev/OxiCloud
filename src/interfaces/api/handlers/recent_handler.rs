@@ -26,6 +26,7 @@ pub struct GetRecentParams {
     responses(
         (status = 200, description = "List of recent items", body = Vec<crate::application::dtos::recent_dto::RecentItemDto>)
     ),
+    security(("bearerAuth" = [])),
     tag = "recent"
 )]
 pub async fn get_recent_items(
@@ -65,6 +66,7 @@ pub async fn get_recent_items(
         (status = 200, description = "Access recorded"),
         (status = 400, description = "Invalid item type")
     ),
+    security(("bearerAuth" = [])),
     tag = "recent"
 )]
 pub async fn record_item_access(
@@ -124,6 +126,7 @@ pub async fn record_item_access(
         (status = 200, description = "Item removed from recents"),
         (status = 404, description = "Item not in recents")
     ),
+    security(("bearerAuth" = [])),
     tag = "recent"
 )]
 pub async fn remove_from_recent(
@@ -178,6 +181,7 @@ pub async fn remove_from_recent(
     responses(
         (status = 200, description = "Recent items cleared")
     ),
+    security(("bearerAuth" = [])),
     tag = "recent"
 )]
 pub async fn clear_recent_items(

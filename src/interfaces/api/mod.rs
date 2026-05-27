@@ -7,8 +7,8 @@ pub use routes::create_api_routes;
 pub use routes::create_health_routes;
 pub use routes::create_public_api_routes;
 
-use utoipa::{Modify, OpenApi};
 use utoipa::openapi::security::{Http, HttpAuthScheme, SecurityScheme};
+use utoipa::{Modify, OpenApi};
 
 use crate::application::dtos::contact_dto::{
     AddressDto, ContactDto, ContactGroupDto, EmailDto, PhoneDto,
@@ -47,6 +47,7 @@ use crate::application::dtos::user_dto::{
 use crate::application::ports::chunked_upload_ports::{
     ChunkUploadResponseDto, CreateUploadResponseDto, UploadStatusResponseDto,
 };
+use crate::interfaces::api::handlers::auth_handler::SystemStatus;
 use crate::interfaces::api::handlers::chunked_upload_handler::{
     CompleteUploadResponse, CreateUploadRequest,
 };
@@ -57,7 +58,6 @@ use crate::interfaces::api::handlers::contacts_handler::{
 use crate::interfaces::api::handlers::dedup_handler::{
     DedupUploadResponse, HashCheckResponse, StatsResponse,
 };
-use crate::interfaces::api::handlers::auth_handler::SystemStatus;
 use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
 
 #[derive(OpenApi)]

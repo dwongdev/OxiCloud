@@ -33,6 +33,7 @@ pub struct BatchFavoritesRequest {
     responses(
         (status = 200, description = "List of favorites", body = Vec<crate::application::dtos::favorites_dto::FavoriteItemDto>)
     ),
+    security(("bearerAuth" = [])),
     tag = "favorites"
 )]
 pub async fn get_favorites(
@@ -75,6 +76,7 @@ pub async fn get_favorites(
         (status = 201, description = "Item added to favorites"),
         (status = 400, description = "Invalid item type")
     ),
+    security(("bearerAuth" = [])),
     tag = "favorites"
 )]
 pub async fn add_favorite(
@@ -131,6 +133,7 @@ pub async fn add_favorite(
         (status = 200, description = "Item removed from favorites"),
         (status = 404, description = "Item not in favorites")
     ),
+    security(("bearerAuth" = [])),
     tag = "favorites"
 )]
 pub async fn remove_favorite(
@@ -184,6 +187,7 @@ pub async fn remove_favorite(
         (status = 200, description = "Batch add result", body = crate::application::dtos::favorites_dto::BatchFavoritesResult),
         (status = 400, description = "Invalid request")
     ),
+    security(("bearerAuth" = [])),
     tag = "favorites"
 )]
 pub async fn batch_add_favorites(

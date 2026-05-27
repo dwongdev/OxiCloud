@@ -299,6 +299,7 @@ pub struct SuggestParams {
         (status = 200, description = "Search results", body = SearchResultsDto),
         (status = 503, description = "Search service unavailable"),
     ),
+    security(("bearerAuth" = [])),
     tag = "search"
 )]
 pub async fn search_files_get(
@@ -317,6 +318,7 @@ pub async fn search_files_get(
         (status = 200, description = "Search results", body = SearchResultsDto),
         (status = 503, description = "Search service unavailable"),
     ),
+    security(("bearerAuth" = [])),
     tag = "search"
 )]
 pub async fn search_files_post(
@@ -339,6 +341,7 @@ pub async fn search_files_post(
         (status = 200, description = "Suggestions", body = SearchSuggestionsDto),
         (status = 503, description = "Search service unavailable"),
     ),
+    security(("bearerAuth" = [])),
     tag = "search"
 )]
 pub async fn suggest_files(
@@ -355,6 +358,7 @@ pub async fn suggest_files(
         (status = 200, description = "Cache cleared"),
         (status = 503, description = "Search service unavailable"),
     ),
+    security(("bearerAuth" = [])),
     tag = "search"
 )]
 pub async fn clear_search_cache(state: State<Arc<AppState>>) -> impl IntoResponse {

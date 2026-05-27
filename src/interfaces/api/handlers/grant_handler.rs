@@ -50,6 +50,7 @@ type AppStateRef = Arc<AppState>;
         (status = 400, description = "Invalid input (both/neither of permissions+role provided)"),
         (status = 404, description = "Resource not found OR caller lacks Share permission"),
     ),
+    security(("bearerAuth" = [])),
     tag = "grants"
 )]
 pub async fn create_grant(
@@ -125,6 +126,7 @@ pub async fn create_grant(
         (status = 204, description = "Grant revoked (or did not exist)"),
         (status = 404, description = "Caller lacks Share permission on the underlying resource"),
     ),
+    security(("bearerAuth" = [])),
     tag = "grants"
 )]
 pub async fn revoke_grant(
@@ -174,6 +176,7 @@ pub async fn revoke_grant(
         (status = 200, description = "Role applied; returns the new full grant set", body = Vec<GrantDto>),
         (status = 404, description = "Resource not found or caller lacks Share"),
     ),
+    security(("bearerAuth" = [])),
     tag = "grants"
 )]
 pub async fn set_role(
@@ -261,6 +264,7 @@ pub struct IncomingQuery {
     responses(
         (status = 200, description = "Direct grants targeting the caller", body = Vec<GrantDto>),
     ),
+    security(("bearerAuth" = [])),
     tag = "grants"
 )]
 pub async fn list_incoming(
@@ -298,6 +302,7 @@ pub async fn list_incoming(
                         last page.",
          body = SharedWithMeDto),
     ),
+    security(("bearerAuth" = [])),
     tag = "grants"
 )]
 pub async fn list_shared_with_me(
@@ -456,6 +461,7 @@ pub async fn list_shared_with_me(
     responses(
         (status = 200, description = "Grants the caller has created", body = Vec<GrantDto>),
     ),
+    security(("bearerAuth" = [])),
     tag = "grants"
 )]
 pub async fn list_outgoing(
@@ -491,6 +497,7 @@ pub struct OnResourceQuery {
         (status = 200, description = "Grants on the specified resource", body = Vec<GrantDto>),
         (status = 404, description = "Resource not found or caller lacks Share"),
     ),
+    security(("bearerAuth" = [])),
     tag = "grants"
 )]
 pub async fn list_on_resource(

@@ -420,6 +420,7 @@ impl FolderHandler {
         (status = 201, description = "Folder created", body = FolderDto),
         (status = 400, description = "Invalid request"),
     ),
+    security(("bearerAuth" = [])),
     tag = "folders"
 )]
 pub async fn create_folder(
@@ -438,6 +439,7 @@ pub async fn create_folder(
         (status = 200, description = "Folder", body = FolderDto),
         (status = 404, description = "Folder not found"),
     ),
+    security(("bearerAuth" = [])),
     tag = "folders"
 )]
 pub async fn get_folder(
@@ -454,6 +456,7 @@ pub async fn get_folder(
     responses(
         (status = 200, description = "List of root folders", body = Vec<FolderDto>),
     ),
+    security(("bearerAuth" = [])),
     tag = "folders"
 )]
 pub async fn list_root_folders(
@@ -471,6 +474,7 @@ pub async fn list_root_folders(
         (status = 200, description = "List of sub-folders", body = Vec<FolderDto>),
         (status = 404, description = "Folder not found"),
     ),
+    security(("bearerAuth" = [])),
     tag = "folders"
 )]
 pub async fn list_folder_contents(
@@ -488,6 +492,7 @@ pub async fn list_folder_contents(
     responses(
         (status = 200, description = "Paginated list of root folders"),
     ),
+    security(("bearerAuth" = [])),
     tag = "folders"
 )]
 pub async fn list_root_folders_paginated(
@@ -509,6 +514,7 @@ pub async fn list_root_folders_paginated(
         (status = 200, description = "Paginated list of sub-folders"),
         (status = 404, description = "Folder not found"),
     ),
+    security(("bearerAuth" = [])),
     tag = "folders"
 )]
 pub async fn list_folder_contents_paginated(
@@ -529,6 +535,7 @@ pub async fn list_folder_contents_paginated(
         (status = 304, description = "Not modified"),
         (status = 404, description = "Folder not found"),
     ),
+    security(("bearerAuth" = [])),
     tag = "folders"
 )]
 pub async fn list_folder_listing(
@@ -549,6 +556,7 @@ pub async fn list_folder_listing(
         (status = 200, description = "Renamed folder", body = FolderDto),
         (status = 404, description = "Folder not found"),
     ),
+    security(("bearerAuth" = [])),
     tag = "folders"
 )]
 pub async fn rename_folder(
@@ -569,6 +577,7 @@ pub async fn rename_folder(
         (status = 200, description = "Moved folder", body = FolderDto),
         (status = 404, description = "Folder or destination not found"),
     ),
+    security(("bearerAuth" = [])),
     tag = "folders"
 )]
 pub async fn move_folder(
@@ -588,6 +597,7 @@ pub async fn move_folder(
         (status = 204, description = "Folder deleted"),
         (status = 404, description = "Folder not found"),
     ),
+    security(("bearerAuth" = [])),
     tag = "folders"
 )]
 pub async fn delete_folder_with_trash(
@@ -607,6 +617,7 @@ pub async fn delete_folder_with_trash(
         (status = 404, description = "Folder not found"),
         (status = 501, description = "ZIP service not available"),
     ),
+    security(("bearerAuth" = [])),
     tag = "folders"
 )]
 pub async fn download_folder_zip(

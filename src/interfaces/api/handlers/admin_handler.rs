@@ -108,6 +108,7 @@ async fn admin_guard(state: &AppState, headers: &HeaderMap) -> Result<(Uuid, Str
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn get_oidc_settings(
@@ -138,6 +139,7 @@ pub async fn get_oidc_settings(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn save_oidc_settings(
@@ -198,6 +200,7 @@ async fn test_oidc_connection(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn get_storage_settings(
@@ -228,6 +231,7 @@ pub async fn get_storage_settings(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn save_storage_settings(
@@ -288,6 +292,7 @@ async fn test_storage_connection(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn get_migration_status(
@@ -309,6 +314,7 @@ pub async fn get_migration_status(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn start_migration(
@@ -386,6 +392,7 @@ pub async fn start_migration(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn pause_migration(
@@ -416,6 +423,7 @@ pub async fn pause_migration(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn resume_migration(
@@ -447,6 +455,7 @@ pub async fn resume_migration(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn complete_migration(
@@ -486,6 +495,7 @@ pub async fn complete_migration(
         (status = 403, description = "Admin required"),
         (status = 500, description = "Verification failed")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn verify_migration(
@@ -563,6 +573,7 @@ fn migration_state_to_dto(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn generate_encryption_key(
@@ -619,6 +630,7 @@ fn build_backend_from_config(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn get_general_settings(
@@ -660,6 +672,7 @@ pub async fn get_general_settings(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn get_dashboard_stats(
@@ -750,6 +763,7 @@ pub async fn get_dashboard_stats(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn list_users(
@@ -798,6 +812,7 @@ pub async fn list_users(
         (status = 403, description = "Admin required"),
         (status = 404, description = "User not found")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn get_user(
@@ -834,6 +849,7 @@ pub async fn get_user(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn delete_user(
@@ -883,6 +899,7 @@ pub async fn delete_user(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn update_user_role(
@@ -933,6 +950,7 @@ pub async fn update_user_role(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn update_user_active(
@@ -987,6 +1005,7 @@ pub async fn update_user_active(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn update_user_quota(
@@ -1032,6 +1051,7 @@ pub async fn update_user_quota(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn create_user(
@@ -1072,6 +1092,7 @@ pub async fn create_user(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn reset_user_password(
@@ -1121,6 +1142,7 @@ pub async fn reset_user_password(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn get_registration_setting(
@@ -1151,6 +1173,7 @@ pub async fn get_registration_setting(
         (status = 401, description = "Unauthorized"),
         (status = 403, description = "Admin required")
     ),
+    security(("bearerAuth" = [])),
     tag = "admin"
 )]
 pub async fn set_registration_setting(
