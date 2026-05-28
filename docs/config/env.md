@@ -9,9 +9,10 @@ Most runtime variables use the `OXICLOUD_` prefix. A few build-time or allocator
 | `OXICLOUD_STORAGE_PATH` | `./storage` | Root storage directory |
 | `OXICLOUD_STATIC_PATH` | `./static` | Static files directory |
 | `OXICLOUD_SERVER_PORT` | `8086` | Server port |
-| `OXICLOUD_SERVER_HOST` | `127.0.0.1` | Server bind addressi (IPv4 or IPv6 allowed) |
+| `OXICLOUD_SERVER_HOST` | `127.0.0.1` | Server bind address (IPv4 or IPv6 allowed) |
 | `OXICLOUD_BASE_URL` | (auto) | Public base URL for share links; defaults to `http://{host}:{port}` |
 | `OXICLOUD_MAX_UPLOAD_SIZE` | `10737418240` | Maximum upload size in bytes (10 GB on 64-bit, 1 GB on 32-bit) |
+| `OXICLOUD_REUSE_PORT` | `false` | Enable `SO_REUSEPORT` so multiple processes can share the same port. **Disabled by default** — a second accidental instance will fail with "address already in use". Enable only for deliberate multi-worker setups (process supervisor, rolling restart). Not supported on Windows. |
 
 ## Database
 

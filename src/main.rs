@@ -77,7 +77,7 @@ fn parse_addr(host: &str, port: u16) -> Result<SocketAddr, String> {
         .map_err(|e| format!("Invalid address '{}': {}", addr_str, e))
 }
 
-fn make_socket(addr: &SocketAddr) -> std::io::Result<Socket> {
+fn make_socket(addr: &SocketAddr, reuse_port: bool) -> std::io::Result<Socket> {
     let domain = if addr.is_ipv6() {
         Domain::IPV6
     } else {
@@ -85,9 +85,14 @@ fn make_socket(addr: &SocketAddr) -> std::io::Result<Socket> {
     };
     let socket = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
     socket.set_reuse_address(true)?;
-    // Allow multiple workers on the same port (future-ready)
+    // SO_REUSEPORT: opt-in only — must be explicitly enabled via
+    // OXICLOUD_REUSE_PORT=true.  Disabled by default so that accidentally
+    // starting a second instance fails fast with "address already in use"
+    // rather than silently sharing the port.
     #[cfg(not(windows))]
-    socket.set_reuse_port(true)?;
+    if reuse_port {
+        socket.set_reuse_port(true)?;
+    }
     // Disable Nagle's algorithm — send small responses (JSON, PROPFIND)
     // immediately instead of waiting up to 40ms for coalescing.
     socket.set_tcp_nodelay(true)?;
@@ -566,9 +571,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start server — tuned socket for low-latency responses
     // TODO: suport multiple addresses ?
     let addr = parse_addr(&config.server_host, config.server_port)?;
+
+    // SO_REUSEPORT: disabled by default — a second instance on the same port
+    // fails loudly instead of silently sharing the socket.  Set
+    // OXICLOUD_REUSE_PORT=true only when you deliberately run multiple
+    // workers (e.g. behind a process supervisor or during a rolling restart).
+    let reuse_port = std::env::var("OXICLOUD_REUSE_PORT")
+        .map(|v| v.eq_ignore_ascii_case("true") || v == "1")
+        .unwrap_or(false);
+
+    if reuse_port {
+        tracing::warn!(
+            "OXICLOUD_REUSE_PORT is enabled — multiple processes may bind to port {}",
+            config.server_port
+        );
+    }
+
     tracing::info!("Starting OxiCloud server on http://{}", addr);
 
-    let socket = make_socket(&addr)?;
+    let socket = make_socket(&addr, reuse_port)?;
 
     let listener = tokio::net::TcpListener::from_std(socket.into())?;
 
