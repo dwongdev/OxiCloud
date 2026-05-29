@@ -182,34 +182,58 @@
     color: var(--color-text-subtle);
 }
 
-.user-menu-item .theme-toggle-pill {
+/* The appearance row is a plain container, not a button — the inner
+ * segmented control captures the clicks. Match the height of other
+ * .user-menu-item rows so the row reads as part of the same list. */
+.user-menu-item--theme {
+    cursor: default;
+}
+
+.user-menu-item--theme:hover {
+    background: transparent;
+}
+
+/* Light / Like OS / Dark — three-option pill, active option highlighted
+ * with the accent colour. Sits at the right edge of the row. */
+.theme-segmented {
     margin-left: auto;
-    width: 40px;
+    display: inline-flex;
+    background: var(--color-bg-muted);
+    border: 1px solid var(--color-border);
+    border-radius: 999px;
+    padding: 2px;
+    gap: 2px;
+}
+
+.theme-segmented__opt {
+    width: 28px;
     height: 22px;
-    background: var(--color-border);
-    border-radius: 11px;
-    position: relative;
-    transition: background 0.3s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    background: transparent;
+    color: var(--color-text-subtle);
+    border-radius: 999px;
+    cursor: pointer;
+    font-size: 11px;
+    padding: 0;
+    transition:
+        background 0.15s ease,
+        color 0.15s ease;
 }
 
-.user-menu-item .theme-toggle-pill.active {
+.theme-segmented__opt:hover {
+    color: var(--color-text);
+}
+
+.theme-segmented__opt--active {
     background: var(--color-accent);
+    color: var(--color-danger-text);
 }
 
-.user-menu-item .theme-toggle-knob {
-    width: 18px;
-    height: 18px;
-    background: var(--color-danger-text);
-    border-radius: 50%;
-    position: absolute;
-    top: 2px;
-    left: 2px;
-    transition: transform 0.3s ease;
-    box-shadow: 0 1px 4px var(--color-shadow-md);
-}
-
-.user-menu-item .theme-toggle-pill.active .theme-toggle-knob {
-    transform: translateX(18px);
+.theme-segmented__opt--active:hover {
+    color: var(--color-danger-text);
 }
 
 .user-menu-admin {

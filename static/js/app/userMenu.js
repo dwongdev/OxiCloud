@@ -6,14 +6,13 @@ import { createUserVignette } from '../components/userVignette.js';
 import { getCsrfHeaders } from '../core/csrf.js';
 import { formatFileSize, formatQuotaSize } from '../core/formatters.js';
 import { i18n } from '../core/i18n.js';
-import { ui } from './ui.js';
 
 function setupUserMenu() {
     const wrapper = document.getElementById('user-menu-wrapper');
     const avatarBtn = document.getElementById('user-avatar-btn');
     const menu = document.getElementById('user-menu');
     const logoutBtn = document.getElementById('user-menu-logout');
-    const themeBtn = document.getElementById('user-menu-theme');
+    const themeSegmented = document.getElementById('user-menu-theme-segmented');
     const aboutBtn = document.getElementById('user-menu-about');
     const adminBtn = document.getElementById('user-menu-admin');
     const adminDivider = document.getElementById('user-menu-admin-divider');
@@ -65,53 +64,49 @@ function setupUserMenu() {
         });
     }
 
-    if (themeBtn) {
-        const pill = document.getElementById('theme-toggle-pill');
-
-        // Sync pill UI with current theme state
-        function syncThemePill() {
-            const isDark = localStorage.getItem('oxicloud_theme') === 'dark';
-            if (pill) {
-                if (isDark) {
-                    pill.classList.add('active');
-                } else {
-                    pill.classList.remove('active');
-                }
-            }
-            // Ensure document theme matches localStorage
-            if (isDark) {
-                document.documentElement.setAttribute('data-theme', 'dark');
-            } else {
-                document.documentElement.removeAttribute('data-theme');
-            }
+    if (themeSegmented) {
+        /**
+         * Read the current selection. Returns `'auto'` when no explicit choice
+         * is stored — that's the default and means "follow OS preference".
+         * @returns {'light' | 'dark' | 'auto'}
+         */
+        function currentMode() {
+            const saved = localStorage.getItem('oxicloud_theme');
+            return saved === 'light' || saved === 'dark' ? saved : 'auto';
         }
 
-        // Initialize pill state on load
-        syncThemePill();
-
-        themeBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            // Toggle theme based on current state, not pill state
-            const currentIsDark = localStorage.getItem('oxicloud_theme') === 'dark';
-            const newIsDark = !currentIsDark;
-
-            localStorage.setItem('oxicloud_theme', newIsDark ? 'dark' : 'light');
-
-            if (newIsDark) {
-                document.documentElement.setAttribute('data-theme', 'dark');
+        /**
+         * Apply a mode: persist it, stamp the html attribute (or remove it
+         * for 'auto' so CSS `color-scheme: light dark` resolves via OS), and
+         * highlight the matching button.
+         * @param {'light' | 'dark' | 'auto'} mode
+         */
+        function applyMode(mode) {
+            if (mode === 'auto') {
+                localStorage.setItem('oxicloud_theme', 'auto');
+                document.documentElement.removeAttribute('data-color-scheme');
             } else {
-                document.documentElement.removeAttribute('data-theme');
+                localStorage.setItem('oxicloud_theme', mode);
+                document.documentElement.setAttribute('data-color-scheme', mode);
             }
+            themeSegmented.querySelectorAll('.theme-segmented__opt').forEach((b) => {
+                const el = /** @type {HTMLElement} */ (b);
+                const isActive = el.dataset.mode === mode;
+                el.classList.toggle('theme-segmented__opt--active', isActive);
+                el.setAttribute('aria-checked', String(isActive));
+            });
+        }
 
-            if (pill) {
-                if (newIsDark) {
-                    pill.classList.add('active');
-                } else {
-                    pill.classList.remove('active');
-                }
-            }
+        // Initial highlight (theme-init.js already stamped the attribute).
+        applyMode(currentMode());
 
-            ui.showNotification(newIsDark ? '🌙' : '☀️', newIsDark ? 'Dark mode enabled' : 'Light mode enabled');
+        themeSegmented.addEventListener('click', (e) => {
+            const btn = /** @type {HTMLElement | null} */ (/** @type {HTMLElement} */ (e.target).closest('.theme-segmented__opt'));
+            if (!btn) return;
+            e.stopPropagation();
+            const mode = /** @type {'light' | 'dark' | 'auto'} */ (btn.dataset.mode);
+            if (mode !== 'light' && mode !== 'dark' && mode !== 'auto') return;
+            applyMode(mode);
         });
     }
 

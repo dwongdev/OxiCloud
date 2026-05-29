@@ -126,7 +126,12 @@
         "about_description": "Cloud storage platform built with Rust & Clean Architecture. Fast, secure, and private.",
         "admin_panel": "Admin Panel",
         "profile": "My Profile",
-        "role_user": "User"
+        "role_user": "User",
+        "theme": {
+            "light": "Light",
+            "dark": "Dark",
+            "auto": "Like OS"
+        }
     },
     "share": {
         "dialogTitle": "Share Link",

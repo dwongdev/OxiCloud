@@ -1,122 +1,151 @@
-[data-theme="dark"] {
-    /* Backgrounds */
-    --color-bg-page: #0f172a;
-    --color-bg-surface: #1e293b;
-    --color-bg-input: #0f172a;
-    --color-bg-hover: #334155;
-    --color-bg-muted: #1a2540;
-    --color-bg-subtle: #162032;
-    --color-bg-alt: #0f172a;
-    --color-bg-input-alt: #253045;
-    --color-bg-empty: #253045;
+/*
+ * Legacy dark-mode fallback for browsers that don't support `light-dark()`
+ * (Chrome < 123 / Safari < 17.5 / Firefox < 120, all from early 2024).
+ *
+ * Modern browsers skip this entire stylesheet at parse time thanks to the
+ * `@supports not (color: light-dark(white, black))` gate — the merged tokens
+ * in `base/variables.css` handle dark mode declaratively via the
+ * `color-scheme` CSS property.
+ *
+ * On capable browsers this file becomes dead code; once the supported
+ * baseline raises beyond the cut-off, it can be deleted.
+ *
+ * The selector matches BOTH attribute names so the fallback works during
+ * the transitional window (when some users may still have `data-theme`
+ * stamped from cached app state):
+ *   • [data-theme="dark"]              — legacy attribute, never set by new code
+ *   • html[data-color-scheme="dark"]   — new attribute set by theme-init.js
+ */
 
-    /* Borders */
-    --color-border: #334155;
-    --color-border-light: #334155;
-    --color-border-medium: #475569;
-    --color-border-faint: #2a3650;
-    --color-border-subtle: #2a3650;
-    --color-border-xfaint: #1e293b;
-    --color-border-ddd: #334155;
+@supports not (color: light-dark(white, black)) {
+    [data-theme="dark"],
+    html[data-color-scheme="dark"] {
+        /* Backgrounds */
+        --color-bg-page: #0f172a;
+        --color-bg-surface: #1e293b;
+        --color-bg-input: #0f172a;
+        --color-bg-hover: #334155;
+        --color-bg-muted: #1a2540;
+        --color-bg-subtle: #162032;
+        --color-bg-alt: #0f172a;
+        --color-bg-input-alt: #253045;
+        --color-bg-empty: #253045;
 
-    /* Text */
-    --color-text: #e2e8f0;
-    --color-text-heading: #f1f5f9;
-    --color-text-muted: #94a3b8;
-    --color-text-faint: #7a8a9f;
-    --color-text-secondary: #cbd5e1;
-    --color-text-subtle: #94a3b8;
-    --color-text-dark: #cbd5e1;
-    --color-text-placeholder: #64748b;
-    --color-text-gray: #94a3b8;
-    --color-text-medium: #94a3b8;
-    --color-text-faint2: #64748b;
-    --color-text-light: #64748b;
-    --color-text-black: #e2e8f0;
-    --color-text-dim: #94a3b8;
+        /* Borders */
+        --color-border: #334155;
+        --color-border-light: #334155;
+        --color-border-medium: #475569;
+        --color-border-faint: #2a3650;
+        --color-border-subtle: #2a3650;
+        --color-border-xfaint: #1e293b;
+        --color-border-ddd: #334155;
 
-    /* Accent */
-    --color-accent: #ff5e3a;
-    --color-accent-hover: #ff7a5c;
-    --color-accent-gradient: linear-gradient(135deg, #ff5e3a 0%, #ff2d55 100%);
-    --color-accent-shadow: rgba(255, 94, 58, 0.3);
-    --color-accent-ring: rgba(255, 94, 58, 0.15);
-    --color-accent-tint: #2a1a15;
+        /* Text */
+        --color-text: #e2e8f0;
+        --color-text-heading: #f1f5f9;
+        --color-text-muted: #94a3b8;
+        --color-text-faint: #7a8a9f;
+        --color-text-secondary: #cbd5e1;
+        --color-text-subtle: #94a3b8;
+        --color-text-dark: #cbd5e1;
+        --color-text-placeholder: #64748b;
+        --color-text-gray: #94a3b8;
+        --color-text-medium: #94a3b8;
+        --color-text-faint2: #64748b;
+        --color-text-light: #64748b;
+        --color-text-black: #e2e8f0;
+        --color-text-dim: #94a3b8;
 
-    /* Feedback */
-    --color-error-bg: #3b1111;
-    --color-error-text: #fca5a5;
-    --color-success-bg: #052e16;
-    --color-success-text: #86efac;
+        /* Accent */
+        --color-accent: #ff5e3a;
+        --color-accent-hover: #ff7a5c;
+        --color-accent-gradient: linear-gradient(135deg, #ff5e3a 0%, #ff2d55 100%);
+        --color-accent-shadow: rgba(255, 94, 58, 0.3);
+        --color-accent-ring: rgba(255, 94, 58, 0.15);
+        --color-accent-tint: #2a1a15;
 
-    /* Shadows (stronger on dark mode) */
-    --color-shadow: rgba(0, 0, 0, 0.3);
-    --color-shadow-lg: rgba(0, 0, 0, 0.3);
-    --color-shadow-md: rgba(0, 0, 0, 0.3);
+        /* Feedback */
+        --color-error-bg: #3b1111;
+        --color-error-text: #fca5a5;
+        --color-success-bg: #052e16;
+        --color-success-text: #86efac;
 
-    /* Additional dark overrides */
-    --color-warning-bg: #3d2e00;
-    --color-warning-bg-dark: #5a4200;
-    --color-notification-bg: #1e293b;
-    --color-user-menu-header-bg: linear-gradient(135deg, #1a2332 0%, #1e2940 100%);
-    --color-user-menu-header-border: #3a2520;
-    --color-info-bg: #0c1e35;
-    --color-info-bg-alt: #0c1e35;
-    --color-info-surface: #0c1e35;
-    --color-danger-light-bg: #2a0c0c;
-    --color-danger-lighter: #2a0c0c;
-    --color-error-text-dark: #f87171;
+        /* Shadows (stronger on dark mode) */
+        --color-shadow: rgba(0, 0, 0, 0.3);
+        --color-shadow-lg: rgba(0, 0, 0, 0.3);
+        --color-shadow-md: rgba(0, 0, 0, 0.3);
 
-    /* Pastel chip backgrounds need dark equivalents — otherwise the light
-     * cream / white-blue / pink-cream backdrops glow against dark surfaces
-     * and the saturated text colours become unreadable on the now-dark fill.
-     * Same pattern: dark tinted background + lighter pastel text. */
-    --color-badge-orange-bg: #2a1814;
-    --color-badge-orange-text: #ff8a65;
-    --color-badge-blue-bg: #0c2d48;
-    --color-badge-blue-text: #93c5fd;
-    --color-warning-bg-light: #2a2410;
-    --color-warning-text-amber: #fbbf24;
-    --color-warning-orange-bg: #2a1c10;
-    --color-warning-orange-text: #fb923c;
-    --color-purple-bg: #1a0a33;
-    --color-success-bg-alt: #0a2015;
-    --color-success-bg-green: #0a2015;
-    --color-content-bg-warn: #3d2e00;
-    --color-content-bg-warn-dark: #5a4200;
+        /* Additional dark overrides */
+        --color-warning-bg: #3d2e00;
+        --color-warning-bg-dark: #5a4200;
+        --color-notification-bg: #1e293b;
+        --color-user-menu-header-bg: linear-gradient(135deg, #1a2332 0%, #1e2940 100%);
+        --color-user-menu-header-border: #3a2520;
+        --color-info-bg: #0c1e35;
+        --color-info-bg-alt: #0c1e35;
+        --color-info-surface: #0c1e35;
+        --color-danger-light-bg: #2a0c0c;
+        --color-danger-lighter: #2a0c0c;
+        --color-error-text-dark: #f87171;
 
-    /* Sidebar */
-    --color-sidebar-bg-from: #0f172a;
-    --color-sidebar-bg-to: #0c1322;
+        /* Pastel chip backgrounds need dark equivalents — otherwise the light
+         * cream / white-blue / pink-cream backdrops glow against dark surfaces
+         * and the saturated text colours become unreadable on the now-dark fill.
+         * Same pattern: dark tinted background + lighter pastel text. */
+        --color-badge-orange-bg: #2a1814;
+        --color-badge-orange-text: #ff8a65;
+        --color-badge-blue-bg: #0c2d48;
+        --color-badge-blue-text: #93c5fd;
+        --color-warning-bg-light: #2a2410;
+        --color-warning-text-amber: #fbbf24;
+        --color-warning-orange-bg: #2a1c10;
+        --color-warning-orange-text: #fb923c;
+        --color-purple-bg: #1a0a33;
+        --color-success-bg-alt: #0a2015;
+        --color-success-bg-green: #0a2015;
+        --color-content-bg-warn: #3d2e00;
+        --color-content-bg-warn-dark: #5a4200;
 
-    /* Items */
-    --color-item-active: #5a5047;
-    --color-item-selected: #39281a;
-    --color-item-hover-accent: #3d342c;
+        /* Sidebar */
+        --color-sidebar-bg-from: #0f172a;
+        --color-sidebar-bg-to: #0c1322;
 
-    /* Primary */
-    /* TODO: rename into primary-blue ? */
-    --color-primary: #60a5fa;
-    --color-primary-hover: #6fa8ee;
-}
+        /* Items */
+        --color-item-active: #5a5047;
+        --color-item-selected: #39281a;
+        --color-item-hover-accent: #3d342c;
 
-/* ------------ */
+        /* Primary */
+        /* TODO: rename into primary-blue ? */
+        --color-primary: #60a5fa;
+        --color-primary-hover: #6fa8ee;
+    }
 
-[data-theme="dark"] select {
-    background-color: #1e293b;
-    border-color: #334155;
-    color: #e2e8f0;
-}
+    /* ------------ */
+    /* Native form controls need explicit dark styling on browsers without
+     * `color-scheme` — on capable browsers the UA does this automatically
+     * once `color-scheme: dark` is in effect. */
 
-[data-theme="dark"] select:hover {
-    border-color: #475569;
-}
+    [data-theme="dark"] select,
+    html[data-color-scheme="dark"] select {
+        background-color: #1e293b;
+        border-color: #334155;
+        color: #e2e8f0;
+    }
 
-[data-theme="dark"] select:focus {
-    border-color: #ff5e3a;
-    background-color: #1e293b;
-}
+    [data-theme="dark"] select:hover,
+    html[data-color-scheme="dark"] select:hover {
+        border-color: #475569;
+    }
 
-[data-theme="dark"] .smd-expiry-date-input::-webkit-calendar-picker-indicator {
-    filter: invert(1);
+    [data-theme="dark"] select:focus,
+    html[data-color-scheme="dark"] select:focus {
+        border-color: #ff5e3a;
+        background-color: #1e293b;
+    }
+
+    [data-theme="dark"] .smd-expiry-date-input::-webkit-calendar-picker-indicator,
+    html[data-color-scheme="dark"] .smd-expiry-date-input::-webkit-calendar-picker-indicator {
+        filter: invert(1);
+    }
 }

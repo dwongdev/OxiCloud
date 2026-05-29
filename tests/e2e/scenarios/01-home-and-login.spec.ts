@@ -59,12 +59,15 @@ test.describe('authenticated as admin', () => {
   test('theme can be changed to dark', async ({ page }) => {
     await page.locator('#user-avatar-btn').click();
     await expect(page.locator('#user-menu')).toBeVisible();
-    await page.locator('#theme-toggle-pill').click();
 
-    // html element must carry data-theme="dark"
-    await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+    // The appearance row is now a 3-option segmented control
+    // (Light / Like OS / Dark). Each option carries a `data-mode` attribute.
+    await page.locator('.theme-segmented__opt[data-mode="dark"]').click();
 
-    // localStorage must persist the choice
+    // html element must carry data-color-scheme="dark" (new attribute).
+    await expect(page.locator('html')).toHaveAttribute('data-color-scheme', 'dark');
+
+    // localStorage must persist the choice.
     const theme = await page.evaluate(() => localStorage.getItem('oxicloud_theme'));
     expect(theme).toBe('dark');
 
@@ -75,9 +78,9 @@ test.describe('authenticated as admin', () => {
       mask: [page.locator('.storage-bar'), page.locator('.storage-info') ]
     });
 
-    // Toggle back to light
-    await page.locator('#theme-toggle-pill').click();
-    await expect(page.locator('html')).not.toHaveAttribute('data-theme', 'dark');
+    // Switch back to light via the Light option.
+    await page.locator('.theme-segmented__opt[data-mode="light"]').click();
+    await expect(page.locator('html')).toHaveAttribute('data-color-scheme', 'light');
 
     const themeAfter = await page.evaluate(() => localStorage.getItem('oxicloud_theme'));
     expect(themeAfter).toBe('light');
