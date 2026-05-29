@@ -2,10 +2,16 @@ use std::sync::Arc;
 use tracing::{debug, error, info, instrument, warn};
 use uuid::Uuid;
 
+use crate::application::dtos::cursor::PageCursor;
 use crate::application::dtos::display_helpers::{
-    category_for, icon_class_for, icon_special_class_for,
+    category_for, format_file_size, icon_class_for, icon_special_class_for,
 };
-use crate::application::dtos::trash_dto::TrashedItemDto;
+use crate::application::dtos::file_dto::FileDto;
+use crate::application::dtos::folder_dto::FolderDto;
+use crate::application::dtos::grant_dto::{ResourceContentDto, ResourceTypeDto};
+use crate::application::dtos::trash_dto::{
+    TrashCursor, TrashResourceItemDto, TrashResourceRow, TrashedItemDto,
+};
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::file_lifecycle::FileLifecycleHook;
 use crate::application::ports::storage_ports::{FileReadPort, FileWritePort};
@@ -14,6 +20,7 @@ use crate::common::errors::{DomainError, ErrorKind, Result};
 use crate::domain::entities::trashed_item::{TrashedItem, TrashedItemType};
 use crate::domain::repositories::folder_repository::FolderRepository;
 use crate::domain::repositories::trash_repository::TrashRepository;
+use crate::domain::services::authorization::ResourceKind;
 use crate::domain::services::authorization::{Permission, Resource, Subject};
 use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
 use crate::infrastructure::repositories::pg::file_blob_write_repository::FileBlobWriteRepository;
@@ -729,5 +736,126 @@ impl TrashUseCase for TrashService {
 
         info!("Trash emptied for user {}", user_id);
         Ok(())
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Cursor-paginated trash listing  (GET /api/trash/resources)
+// ════════════════════════════════════════════════════════════════════════════
+impl TrashService {
+    /// Cursor-paginated list of the user's trashed resources.
+    ///
+    /// No `authz.require()` here — trashed items are strictly user-scoped and
+    /// the repository enforces `WHERE user_id = $1`. This matches the pattern
+    /// used by favorites and recent listing endpoints. Mutations (restore,
+    /// delete permanently, move to trash) keep their per-item authz checks.
+    ///
+    /// Returns `(page items, next_cursor_encoded)`.
+    pub async fn list_resources_paged(
+        &self,
+        user_id: Uuid,
+        limit: usize,
+        cursor: Option<TrashCursor>,
+        order_by: &str,
+        kinds: Option<&[ResourceKind]>,
+        reverse: bool,
+    ) -> Result<(Vec<TrashResourceItemDto>, Option<String>)> {
+        // Fetch one extra row to detect whether a next page exists.
+        let mut rows = self
+            .trash_repository
+            .list_resources_paged(
+                user_id,
+                limit + 1,
+                cursor.as_ref(),
+                order_by,
+                kinds,
+                reverse,
+            )
+            .await?;
+
+        let next_cursor = if rows.len() > limit {
+            let last = &rows[limit - 1];
+            let c = build_trash_cursor(last, order_by, reverse);
+            rows.truncate(limit);
+            Some(c.encode())
+        } else {
+            None
+        };
+
+        let items: Vec<TrashResourceItemDto> = rows.into_iter().map(row_to_item_dto).collect();
+
+        Ok((items, next_cursor))
+    }
+}
+
+/// Build the next-page cursor from the last row of the current page.
+/// `reverse` is stored in the cursor so subsequent pages use the same direction.
+fn build_trash_cursor(row: &TrashResourceRow, order_by: &str, reverse: bool) -> TrashCursor {
+    let order_by_owned = match order_by {
+        "deletion_date" | "trashed_at" | "name" | "type" | "size" => order_by.to_owned(),
+        _ => "deletion_date".to_owned(),
+    };
+    TrashCursor {
+        order_by: order_by_owned,
+        resource_id: row.resource_id,
+        sort_str: row.sort_str.clone(),
+        sort_int: row.sort_int,
+        sort_ts: row.sort_ts,
+        reverse,
+    }
+}
+
+/// Convert a raw repository row into the API DTO.
+fn row_to_item_dto(row: TrashResourceRow) -> TrashResourceItemDto {
+    let path = row.path.clone().unwrap_or_default();
+    if row.resource_type == "folder" {
+        let dto = FolderDto {
+            id: row.resource_id.to_string(),
+            name: row.name.clone(),
+            path,
+            parent_id: row.parent_id.map(|u| u.to_string()),
+            owner_id: Some(row.owner_id.to_string()),
+            created_at: row.resource_created_at.timestamp() as u64,
+            modified_at: row.modified_at.timestamp() as u64,
+            is_root: false,
+            icon_class: std::sync::Arc::from("fas fa-folder"),
+            icon_special_class: std::sync::Arc::from("folder-icon"),
+            category: std::sync::Arc::from("Folder"),
+        };
+        TrashResourceItemDto {
+            resource_type: ResourceTypeDto::Folder,
+            trashed_at: row.trashed_at,
+            deletion_date: row.deletion_date,
+            resource: ResourceContentDto::Folder(dto),
+        }
+    } else {
+        let mime = row
+            .mime_type
+            .as_deref()
+            .unwrap_or("application/octet-stream");
+        let size_bytes = row.size.max(0) as u64;
+        let dto = FileDto {
+            id: row.resource_id.to_string(),
+            name: row.name.clone(),
+            path,
+            size: size_bytes,
+            mime_type: std::sync::Arc::from(mime),
+            folder_id: row.parent_id.map(|u| u.to_string()),
+            created_at: row.resource_created_at.timestamp() as u64,
+            modified_at: row.modified_at.timestamp() as u64,
+            icon_class: std::sync::Arc::from(icon_class_for(&row.name, mime)),
+            icon_special_class: std::sync::Arc::from(icon_special_class_for(&row.name, mime)),
+            category: std::sync::Arc::from(category_for(&row.name, mime)),
+            size_formatted: format_file_size(size_bytes),
+            owner_id: Some(row.owner_id.to_string()),
+            sort_date: None,
+            etag: String::new(),
+        };
+        TrashResourceItemDto {
+            resource_type: ResourceTypeDto::File,
+            trashed_at: row.trashed_at,
+            deletion_date: row.deletion_date,
+            resource: ResourceContentDto::File(dto),
+        }
     }
 }

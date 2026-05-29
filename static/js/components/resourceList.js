@@ -29,6 +29,14 @@ import { createUserVignette } from './userVignette.js';
  */
 
 /**
+ * @typedef {Object} CustomAction
+ * @property {string} iconHtml   - Inner HTML for the button icon (e.g. `<i class="fas fa-undo"></i>`).
+ * @property {string} [labelKey] - i18n key used for the button's `title` / `aria-label`.
+ * @property {string} [className] - Extra CSS class(es) appended to `btn-action`.
+ * @property {(item: FileItem|FolderItem) => (void|Promise<void>)} onClick
+ */
+
+/**
  * @typedef {Object} ResourceListConfig
  *
  * Feature flags
@@ -38,12 +46,17 @@ import { createUserVignette } from './userVignette.js';
  * @property {boolean}  [showShareBadge=true]  - Show the shared-resource badge on items.
  * @property {boolean}  [draggable=false]      - Mark items as draggable (HTML attribute).
  * @property {boolean}  [showContextMenu=true] - Enable the three-dots button and right-click menu.
+ * @property {boolean}  [showType=true]        - Render the Type column.
+ * @property {boolean}  [showPath=false]       - Render the Path column (CSS hides it in grid mode).
  *
  * Appearance
  * @property {string}   [itemModifierClass]    - Extra CSS class applied to every .file-item
  *                                              (e.g. 'favorite-item', 'recent-item').
  * @property {string}   [dateField='modified_at'] - Which date field to display in the date column.
  * @property {string}   [dateLabel]            - Column header label for the date column (i18n key).
+ * @property {(value: string | number | Date | null | undefined) => string} [dateFormatter]
+ *   Override the date-cell formatter. Defaults to `formatDateTime`. Pass
+ *   `formatDaysRemaining` for the Trash view to surface remaining lifetime.
  *
  * State providers (called at item-creation time)
  * @property {(id: string, type: 'file'|'folder') => boolean} [isFavorite]
@@ -60,6 +73,11 @@ import { createUserVignette } from './userVignette.js';
  *   Called when the user clicks the shared badge. Falls back to onContextMenu if absent.
  * @property {(selected: Array<FileItem|FolderItem>) => void} [onSelectionChange]
  *   Called whenever the selection set changes.
+ *
+ * Per-section inline actions
+ * @property {CustomAction[]} [customActions]
+ *   Extra buttons rendered in the action cell (always visible, both grid and list view).
+ *   Use this for section-specific verbs like restore / permanently-delete on trash.
  */
 
 export class ResourceListComponent {
@@ -70,7 +88,7 @@ export class ResourceListComponent {
     constructor(container, config) {
         this._container = container;
 
-        /** @type {Required<Pick<ResourceListConfig,'selectable'|'showFavorite'|'showOwner'|'showShareBadge'|'draggable'|'showContextMenu'|'dateField'>> & ResourceListConfig} */
+        /** @type {Required<Pick<ResourceListConfig,'selectable'|'showFavorite'|'showOwner'|'showShareBadge'|'draggable'|'showContextMenu'|'showType'|'showPath'|'dateField'>> & ResourceListConfig} */
         this._cfg = {
             selectable: true,
             showFavorite: true,
@@ -78,6 +96,8 @@ export class ResourceListComponent {
             showShareBadge: true,
             draggable: false,
             showContextMenu: true,
+            showType: true,
+            showPath: false,
             dateField: 'modified_at',
             ...config
         };
@@ -454,7 +474,7 @@ export class ResourceListComponent {
         const isFav = cfg.isFavorite ? cfg.isFavorite(folder.id, 'folder') : false;
         const isShared = cfg.isShared ? cfg.isShared(folder.id, 'folder') : false;
         const dateVal = /** @type {Record<string,string>} */ (/** @type {unknown} */ (folder))[cfg.dateField] ?? folder.modified_at;
-        const formattedDate = formatDateTime(new Date(dateVal));
+        const formattedDate = cfg.dateFormatter ? cfg.dateFormatter(dateVal) : formatDateTime(new Date(dateVal));
 
         el.innerHTML = `
             ${cfg.selectable ? '<div class="checkbox-cell"><input type="checkbox" class="item-checkbox"></div>' : ''}
@@ -465,10 +485,12 @@ export class ResourceListComponent {
                 ${cfg.showShareBadge ? `<div class="file-badge file-badge-shared${isShared ? '' : ' hidden'}"><i class="fas fa-oxiexport"></i></div>` : ''}
             </div>
             <div class="owner-cell${this._ownerVisible ? '' : ' hidden'}" data-owner-id="${escapeHtml(folder.owner_id || '')}"></div>
-            <div class="type-cell">${i18n.t('files.file_types.folder')}</div>
+            ${cfg.showPath ? `<div class="path-cell" title="${escapeHtml(folder.path || '')}">${escapeHtml(folder.path || '')}</div>` : ''}
+            ${cfg.showType ? `<div class="type-cell">${i18n.t('files.file_types.folder')}</div>` : ''}
             <div class="size-cell">--</div>
             <div class="date-cell">${formattedDate}</div>
             <div class="action-cell">
+                ${this._renderCustomActions()}
                 ${cfg.showFavorite ? `<button class="favorite-star${isFav ? ' active' : ''}"><i class="${isFav ? 'fas' : 'far'} fa-star"></i></button>` : ''}
                 ${cfg.showContextMenu ? '<button class="file-actions"><i class="fas fa-ellipsis-v"></i></button>' : ''}
             </div>
@@ -490,7 +512,7 @@ export class ResourceListComponent {
         const typeLabel = cat ? i18n.t(`files.file_types.${cat.toLowerCase()}`) || cat : i18n.t('files.file_types.document');
         const fileSize = file.size_formatted || formatFileSize(file.size);
         const dateVal = /** @type {Record<string,string>} */ (/** @type {unknown} */ (file))[cfg.dateField] ?? file.modified_at;
-        const formattedDate = formatDateTime(new Date(dateVal));
+        const formattedDate = cfg.dateFormatter ? cfg.dateFormatter(dateVal) : formatDateTime(new Date(dateVal));
         const isFav = cfg.isFavorite ? cfg.isFavorite(file.id, 'file') : false;
         const isShared = cfg.isShared ? cfg.isShared(file.id, 'file') : false;
 
@@ -513,10 +535,12 @@ export class ResourceListComponent {
                 ${cfg.showShareBadge ? `<div class="file-badge file-badge-shared${isShared ? '' : ' hidden'}"><i class="fas fa-oxiexport"></i></div>` : ''}
             </div>
             <div class="owner-cell${this._ownerVisible ? '' : ' hidden'}" data-owner-id="${escapeHtml(file.owner_id || '')}"></div>
-            <div class="type-cell">${typeLabel}</div>
+            ${cfg.showPath ? `<div class="path-cell" title="${escapeHtml(file.path || '')}">${escapeHtml(file.path || '')}</div>` : ''}
+            ${cfg.showType ? `<div class="type-cell">${typeLabel}</div>` : ''}
             <div class="size-cell">${fileSize}</div>
             <div class="date-cell">${formattedDate}</div>
             <div class="action-cell">
+                ${this._renderCustomActions()}
                 ${cfg.showFavorite ? `<button class="favorite-star${isFav ? ' active' : ''}"><i class="${isFav ? 'fas' : 'far'} fa-star"></i></button>` : ''}
                 ${cfg.showContextMenu ? '<button class="file-actions"><i class="fas fa-ellipsis-v"></i></button>' : ''}
             </div>
@@ -525,6 +549,25 @@ export class ResourceListComponent {
         el.querySelector('.resource-icon-slot')?.replaceWith(buildResourceIcon(file, 'file'));
         this._bindItemEvents(el, file);
         return el;
+    }
+
+    /**
+     * Render the inline action buttons declared in `cfg.customActions`.
+     * Each button gets `data-custom-action="<index>"` so the binder can
+     * dispatch by position.  Returns an empty string when no actions are
+     * configured.
+     * @returns {string}
+     */
+    _renderCustomActions() {
+        const actions = this._cfg.customActions;
+        if (!actions?.length) return '';
+        return actions
+            .map((a, i) => {
+                const cls = a.className ? ` ${a.className}` : '';
+                const label = a.labelKey ? escapeHtml(i18n.t(a.labelKey)) : '';
+                return `<button type="button" class="btn-action${cls}" data-custom-action="${i}" title="${label}" aria-label="${label}">${a.iconHtml}</button>`;
+            })
+            .join('');
     }
 
     /**
@@ -544,6 +587,21 @@ export class ResourceListComponent {
                 e.stopImmediatePropagation();
                 e.preventDefault();
                 cfg.onFavoriteToggle?.(item);
+            });
+        }
+
+        // Custom inline actions (e.g. restore / delete-permanently on trash) —
+        // bound directly so they stop propagation before the card-open handler.
+        if (cfg.customActions?.length) {
+            el.querySelectorAll('button[data-custom-action]').forEach((btn) => {
+                btn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    e.stopImmediatePropagation();
+                    e.preventDefault();
+                    const idx = Number(/** @type {HTMLElement} */ (btn).dataset.customAction);
+                    const action = cfg.customActions?.[idx];
+                    if (action) action.onClick(item);
+                });
             });
         }
 

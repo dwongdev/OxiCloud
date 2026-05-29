@@ -341,10 +341,29 @@
         "empty_state": "Trash is empty",
         "original_location": "Original location",
         "deleted_date": "Deletion date",
+        "remaining": "Remaining",
         "actions": "Actions",
         "restore": "Restore",
         "delete_permanently": "Delete permanently",
-        "empty_confirm": "Are you sure you want to empty the trash? This will permanently delete all items."
+        "empty_confirm": "Are you sure you want to empty the trash? This will permanently delete all items.",
+        "groupby": {
+            "remaining_days": "Remaining days",
+            "trashed_time": "Trashed time"
+        }
+    },
+    "daysRemaining": {
+        "expired": "Expired",
+        "today": "Today",
+        "tomorrow": "Tomorrow",
+        "inDays": "{{count}} days"
+    },
+    "expiryChip": {
+        "never": "Never expires",
+        "expired": "Expired",
+        "today": "Expires today",
+        "tomorrow": "Expires tomorrow",
+        "inDays": "Expires in {{count}} days",
+        "onDate": "Expires {{date}}"
     },
     "auth": {
         "login_title": "Sign in",

@@ -58,9 +58,6 @@
     --color-warning-bg: #3d2e00;
     --color-warning-bg-dark: #5a4200;
     --color-notification-bg: #1e293b;
-    --color-trash-surface: #1e293b;
-    --color-trash-border: #334155;
-    --color-trash-empty-bg: #334155;
     --color-user-menu-header-bg: linear-gradient(135deg, #1a2332 0%, #1e2940 100%);
     --color-user-menu-header-border: #3a2520;
     --color-info-bg: #0c1e35;
@@ -68,6 +65,20 @@
     --color-info-surface: #0c1e35;
     --color-danger-light-bg: #2a0c0c;
     --color-danger-lighter: #2a0c0c;
+    --color-error-text-dark: #f87171;
+
+    /* Pastel chip backgrounds need dark equivalents — otherwise the light
+     * cream / white-blue / pink-cream backdrops glow against dark surfaces
+     * and the saturated text colours become unreadable on the now-dark fill.
+     * Same pattern: dark tinted background + lighter pastel text. */
+    --color-badge-orange-bg: #2a1814;
+    --color-badge-orange-text: #ff8a65;
+    --color-badge-blue-bg: #0c2d48;
+    --color-badge-blue-text: #93c5fd;
+    --color-warning-bg-light: #2a2410;
+    --color-warning-text-amber: #fbbf24;
+    --color-warning-orange-bg: #2a1c10;
+    --color-warning-orange-text: #fb923c;
     --color-purple-bg: #1a0a33;
     --color-success-bg-alt: #0a2015;
     --color-success-bg-green: #0a2015;
@@ -104,21 +115,6 @@
 [data-theme="dark"] select:focus {
     border-color: #ff5e3a;
     background-color: #1e293b;
-}
-
-/* ── trash.css ── */
-/* FIXME avoir as much as possible specific cases */
-[data-theme="dark"] .trash-actions button,
-[data-theme="dark"] .actions-cell button {
-    background: var(--color-bg-surface);
-    border-color: var(--color-border);
-    color: var(--color-text);
-}
-
-[data-theme="dark"] .trash-actions button:hover,
-[data-theme="dark"] .actions-cell button:hover {
-    background: var(--color-bg-alt);
-    color: var(--color-accent);
 }
 
 [data-theme="dark"] .smd-expiry-date-input::-webkit-calendar-picker-indicator {

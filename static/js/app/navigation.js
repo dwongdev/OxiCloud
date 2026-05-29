@@ -15,10 +15,10 @@ import { favoritesView } from '../views/favorites/favoritesView.js';
 import { mySharesView } from '../views/myShares/mySharesView.js';
 import { recentView } from '../views/recent/recentView.js';
 import { sharedWithMeView } from '../views/sharedWithMe/sharedWithMeView.js';
+import { trashView } from '../views/trash/trashView.js';
 import { filesView, loadFiles, refreshSharedBadges } from './filesView.js';
 import { setActionsBarMode, setGroupByView, syncGroupByMenu } from './main.js';
 import { app, appElements } from './state.js';
-import { loadTrashItems } from './trashView.js';
 import { ui } from './ui.js';
 
 /**
@@ -184,6 +184,11 @@ function setCurrentSection(section) {
     // Hide recentView "Load more" button when leaving the recent section
     if (section !== 'recent' && recentView) {
         recentView.hide();
+    }
+
+    // Hide trashView "Load more" button when leaving the trash section
+    if (section !== 'trash' && trashView) {
+        trashView.hide();
     }
 
     // Reset owner column — sections that need it re-enable it explicitly below.
@@ -410,8 +415,8 @@ function switchToTrashSection() {
     toggleFileContainer(true);
 
     setActionsBarMode('trash');
-    setGroupByView(null);
-    syncGroupByMenu([]);
+    setGroupByView(trashView);
+    syncGroupByMenu(trashView.groupByDefs);
 
     //reset files view + remove any error
     ui.resetFilesList();
@@ -420,8 +425,8 @@ function switchToTrashSection() {
     restoreView('trash');
     syncViewContainers();
 
-    // Load trash items
-    loadTrashItems();
+    // Load trash items (cursor-based view)
+    trashView.init();
 
     if (batchToolbar) batchToolbar.clear();
 }

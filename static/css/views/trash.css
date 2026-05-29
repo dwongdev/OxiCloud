@@ -1,58 +1,52 @@
-.trash-item {
-    position: relative;
-}
+/*
+ * Trash-specific styling.
+ *
+ * The trash list reuses the generic ResourceList layout entirely. Only the
+ * permanent-delete tint, the "Empty trash" danger button, and the
+ * remaining-days badge live here — everything else inherits from
+ * `.btn-action` and the generic `--color-*` tokens.
+ *
+ * Restore is intentionally a NEUTRAL action (no tint) — it just undoes a
+ * previous delete and shouldn't compete visually with the destructive action.
+ */
 
-.trash-actions {
-    position: absolute;
-    top: 10px;
-    right: 10px;
-    display: none;
-    gap: 8px;
-}
-
-.files-grid-view .file-card.trash-item:hover .trash-actions,
-.files-list-view .file-item.trash-item:hover .actions-cell {
-    display: flex;
-}
-
-.trash-actions button,
-.actions-cell button {
-    background: var(--color-trash-surface);
-    border: 1px solid var(--color-trash-border);
-    border-radius: 4px;
-    padding: 4px 8px;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    width: 30px;
-    height: 30px;
-    transition: all 0.2s;
-}
-
-.trash-actions button:hover,
-.actions-cell button:hover {
-    background: var(--color-trash-empty-bg);
-}
-
-.btn-restore {
-    color: var(--color-trash-restore);
-}
-
-.btn-delete {
-    color: var(--color-trash-delete);
-}
-
-/* .file-item.trash-item > .path-cell → resourceList.css */
-
-.actions-cell {
-    display: flex;
-    gap: 8px;
-    justify-content: flex-start;
-    align-items: center;
+.btn-action--delete {
+    color: var(--color-danger-text-alt);
 }
 
 .btn-danger {
-    background-color: var(--color-trash-delete);
+    background-color: var(--color-danger-bg);
     color: var(--color-danger-text);
+}
+
+.btn-danger:hover {
+    background-color: var(--color-danger-bg-hover);
+}
+
+/* Expiry chip itself (`.expiry-chip`) lives in components/expiryChip.css
+ * since it's shared with My Shares. Below is just the Trash-specific
+ * grid-view overlay positioning. */
+
+/* ── Grid view: anchor the chip on the card's top-right corner ───────
+ * The generic `.date-cell` is hidden in grid view (resourceList.css);
+ * trash overrides this so the badge stays visible as an overlay.
+ * Scoped to `.trash-list` so other sections are unaffected.
+ *
+ * Negative offsets make the chip straddle the card edge so it visually
+ * "tags" the corner without eating into the centred icon/name area —
+ * no extra padding is needed on the card body.
+ */
+.files-grid-view.trash-list .file-item .date-cell {
+    display: block;
+    position: absolute;
+    top: -1px;
+    right: 3px;
+    z-index: 2;
+    padding: 0;
+}
+
+/* A subtle shadow lifts the chip above the card border so it reads as
+ * a tag sitting on top, not as misaligned content. */
+.files-grid-view.trash-list .file-item .date-cell .expiry-chip {
+    box-shadow: 0 1px 3px var(--color-shadow-xs);
 }

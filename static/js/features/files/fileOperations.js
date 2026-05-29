@@ -11,8 +11,6 @@ import { getCsrfHeaders, getCsrfToken } from '../../core/csrf.js';
 import { i18n } from '../../core/i18n.js';
 import { notifications } from '../../core/notifications.js';
 
-/** @import {TrashItem} from '../../core/types.js' */
-
 /**
  * @typedef {Object} BatchResult
  * @property {number} success number of files|folders sucessfully updated
@@ -1243,28 +1241,6 @@ const fileOps = {
             console.error('Error deleting folder:', error);
             ui.showNotification('Error', 'Error deleting the folder');
             return false;
-        }
-    },
-
-    /**
-     * Get trash items
-     * @returns {Promise<Array<TrashItem>>} - List of trash items
-     */
-    async getTrashItems() {
-        try {
-            const response = await fetch('/api/trash', {
-                headers: getAuthHeaders()
-            });
-
-            if (response.ok) {
-                return /** @type {TrashItem[]} */ (await response.json());
-            } else {
-                console.error('Error fetching trash items:', response.statusText);
-                return [];
-            }
-        } catch (error) {
-            console.error('Error fetching trash items:', error);
-            return [];
         }
     },
 

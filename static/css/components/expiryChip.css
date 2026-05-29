@@ -1,0 +1,63 @@
+/*
+ * Shared expiry chip — used by My Shares (link expiration), Trash
+ * (remaining lifetime), and any future expiry display.
+ *
+ * Produced by `formatExpiryChip(value)` in `core/formatters.js`.
+ * Six tiers map a date to an urgency colour:
+ *
+ *   never     → null value           — neutral, infinity icon
+ *   normal    → > 30 days away       — neutral grey
+ *   caution   → 8–30 days            — soft amber
+ *   soon      → 2–7 days             — soft orange
+ *   urgent    → today or tomorrow    — soft red
+ *   expired   → past                 — deeper red, warning icon
+ *
+ * Colours are pastel/tinted on purpose: the chip should give an
+ * at-a-glance cue without competing visually with surrounding content.
+ */
+
+.expiry-chip {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    gap: 4px;
+    padding: 2px 7px;
+    border-radius: 10px;
+    font-size: 11px;
+    white-space: nowrap;
+}
+
+.expiry-chip__icon {
+    font-size: 10px;
+    opacity: 0.7;
+}
+
+.expiry-chip--never {
+    background-color: var(--color-bg-muted);
+    color: var(--color-text-faint);
+}
+
+.expiry-chip--normal {
+    background-color: var(--color-bg-muted);
+    color: var(--color-text-muted);
+}
+
+.expiry-chip--caution {
+    background-color: var(--color-warning-bg-light);
+    color: var(--color-warning-text-amber);
+}
+
+.expiry-chip--soon {
+    background-color: var(--color-warning-orange-bg);
+    color: var(--color-warning-orange-text);
+}
+
+.expiry-chip--urgent {
+    background-color: var(--color-danger-light-bg);
+    color: var(--color-danger-text-alt);
+}
+
+.expiry-chip--expired {
+    background-color: var(--color-error-bg);
+    color: var(--color-error-text-dark);
+}

@@ -118,12 +118,32 @@
     align-items: center;
 }
 
-.list-header.trash-header {
-    grid-template-columns: minmax(180px, 1.5fr) 0.5fr 1fr 140px 100px;
+/* Trash view: Name → [Path] → Size → Date → Actions
+ * Override --files-list-columns so the trash header AND trash items align.
+ * No checkbox (selectable=false), no owner cell visible, no type column.
+ *
+ * Mobile-first: the Path column is hidden by default to keep the layout
+ * legible on narrow screens (path stays accessible via itemTooltip on hover).
+ * From 1000px upward, Path reappears and claims roughly half the table
+ * width via a 3fr share against Name's 1fr. */
+.files-list-view.trash-list {
+    --files-list-columns: minmax(180px, 1fr) 110px 130px 100px;
 }
 
-.trash-item.file-item {
-    grid-template-columns: minmax(180px, 1.5fr) 0.5fr 1fr 140px 100px;
+.files-list-view.trash-list .file-item .path-cell,
+.files-list-view.trash-list .list-header.trash-header > div:nth-child(2) {
+    display: none;
+}
+
+@media (min-width: 1000px) {
+    .files-list-view.trash-list {
+        --files-list-columns: minmax(180px, 1fr) 3fr 110px 130px 100px;
+    }
+
+    .files-list-view.trash-list .file-item .path-cell,
+    .files-list-view.trash-list .list-header.trash-header > div:nth-child(2) {
+        display: block;
+    }
 }
 
 .list-header > div,
@@ -238,7 +258,10 @@
     text-align: right;
 }
 
-.files-list-view .file-item .action-cell button,
+/* Styles for the built-in action-cell buttons (favorite-star, kebab).
+ * `.btn-action` is excluded — it owns its own colors via the generic
+ * `.btn-action` rule + variant modifiers (e.g. `.btn-action--delete`). */
+.files-list-view .file-item .action-cell button:not(.btn-action),
 .files-list-view .file-item .action-cell div {
     display: inline;
     width: 28px;
@@ -253,7 +276,7 @@
     font-size: 16px;
 }
 
-.files-list-view .file-item .action-cell button:hover {
+.files-list-view .file-item .action-cell button:not(.btn-action):hover {
     background: var(--color-border-subtle);
     color: var(--color-text-dark);
 }
@@ -677,9 +700,46 @@
     height: 30px;
 }
 
-/* — Trash — */
+/* ── Path column (opt-in via ResourceListConfig.showPath) ──────────
+ * Visible in list view only — grid cards hide it because they have no
+ * dedicated column slot. itemTooltip still surfaces the path on hover.
+ */
+.files-list-view .file-item .path-cell {
+    color: var(--color-text-secondary);
+    font-size: 13px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
 
-/* path-cell is shown in trashView; hide it in non-trash contexts */
-.file-item.trash-item > .path-cell {
+.files-grid-view .file-item .path-cell {
     display: none;
+}
+
+/* ── Custom inline actions (ResourceListConfig.customActions) ──────
+ * Always visible in both list and grid view — used by trash for the
+ * restore / permanent-delete buttons that must be one click away.
+ */
+.btn-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    border: none;
+    background: transparent;
+    cursor: pointer;
+    color: var(--color-text-subtle);
+    font-size: 16px;
+    padding: 0;
+}
+
+.btn-action:hover {
+    background: var(--color-border-subtle);
+    color: var(--color-text-dark);
+}
+
+.files-grid-view .file-item .btn-action {
+    margin-top: 4px;
 }

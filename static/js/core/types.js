@@ -115,17 +115,29 @@
  */
 
 /**
- * @typedef {Object} TrashItem
- * @property {string} id
- * @property {string} original_id
- * @property {ItemTypeEnum} item_type
- * @property {string} name
- * @property {string} original_path - timestamp
- * @property {number} trashed_at
- * @property {number} days_until_deletion
- * @property {string} category
- * @property {string} icon_class
- * @property {string} icon_special_class
+ * One item returned by `GET /api/trash/resources`.
+ * `resource_type` discriminates the shape of `resource`.
+ *
+ * `deletion_date` is the real timestamp at which the retention sweeper will
+ * permanently delete the item (= trashed_at + retention_days). Days remaining
+ * is derived client-side from `deletion_date` and the current clock — it is
+ * not duplicated in the wire format.
+ *
+ * `resource.path` carries the item's original location (soft-delete preserves
+ * the row's `path` column).
+ *
+ * @typedef {Object} TrashResourceItem
+ * @property {ResourceTypeEnum}    resource_type  - 'file' | 'folder'
+ * @property {string}              trashed_at     - ISO-8601: when the user sent it to trash.
+ * @property {string}              deletion_date  - ISO-8601: when retention will purge it.
+ * @property {FileItem|FolderItem} resource       - Full resource details; shape follows resource_type.
+ */
+
+/**
+ * Response for `GET /api/trash/resources`.
+ * @typedef {Object} TrashResourcesResponse
+ * @property {TrashResourceItem[]}  items
+ * @property {string|undefined}     [next_cursor]  - Absent when the last page is reached.
  */
 
 /**

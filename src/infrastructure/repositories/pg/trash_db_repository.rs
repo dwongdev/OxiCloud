@@ -5,13 +5,16 @@
 //! are files/folders with `is_trashed = TRUE`.
 
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use std::sync::Arc;
+use tracing::error;
 use uuid::Uuid;
 
-use crate::common::errors::{DomainError, Result};
+use crate::application::dtos::trash_dto::{TrashCursor, TrashResourceRow};
+use crate::common::errors::{DomainError, ErrorKind, Result};
 use crate::domain::entities::trashed_item::{TrashedItem, TrashedItemType};
 use crate::domain::repositories::trash_repository::TrashRepository;
+use crate::domain::services::authorization::ResourceKind;
 
 /// Default retention period (days) used when computing deletion_date.
 const _DEFAULT_RETENTION_DAYS: i64 = 30;
@@ -213,5 +216,273 @@ impl TrashRepository for TrashDbRepository {
             .map_err(|e| DomainError::internal_error("TrashDb", format!("commit tx: {e}")))?;
 
         Ok((files_deleted, folders_deleted))
+    }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// Cursor-paginated trash listing  (used by GET /api/trash/resources)
+// ════════════════════════════════════════════════════════════════════════════
+impl TrashDbRepository {
+    /// Cursor-paginated list of the user's trashed resources.
+    ///
+    /// Mirrors the favorites/grants pattern: a UNION-ALL CTE over folder and
+    /// file branches (each pre-computing sort columns), then a per-dimension
+    /// keyset WHERE + ORDER BY.
+    ///
+    /// Returns rows in caller-requested sort order. The caller is expected to
+    /// fetch `limit + 1` to detect end-of-results.
+    pub async fn list_resources_paged(
+        &self,
+        user_id: Uuid,
+        limit: usize,
+        cursor: Option<&TrashCursor>,
+        order_by: &str,
+        kinds: Option<&[ResourceKind]>,
+        reverse: bool,
+    ) -> Result<Vec<TrashResourceRow>> {
+        let include_folders =
+            kinds.is_none_or(|k| k.iter().any(|r| matches!(r, ResourceKind::Folder)));
+        let include_files = kinds.is_none_or(|k| k.iter().any(|r| matches!(r, ResourceKind::File)));
+
+        // ── Build the UNION ALL CTE ─────────────────────────────────────────
+        // Only top-level trashed items: a file/folder whose parent is itself
+        // trashed is implicitly in trash as a descendant, mirroring the
+        // `storage.trash_items` view's filter.
+        let mut cte_branches: Vec<&str> = Vec::new();
+
+        let folder_branch = r#"
+    SELECT
+        'folder'::text                                       AS resource_type,
+        fld.id                                               AS resource_id,
+        fld.name,
+        fld.parent_id,
+        NULL::text                                           AS mime_type,
+        -1::bigint                                           AS size,
+        fld.created_at                                       AS resource_created_at,
+        fld.updated_at                                       AS modified_at,
+        fld.user_id                                          AS owner_id,
+        fld.trashed_at                                       AS trashed_at,
+        (fld.trashed_at + ($7::int * INTERVAL '1 day'))      AS deletion_date,
+        fld.path::text                                       AS resource_path,
+        LOWER(fld.name)                                      AS sort_str,
+        0::bigint                                            AS type_order,
+        0::int                                               AS folder_first
+    FROM storage.folders fld
+    WHERE fld.user_id = $1::uuid
+      AND fld.is_trashed = TRUE
+      AND (fld.parent_id IS NULL
+           OR NOT EXISTS (
+               SELECT 1 FROM storage.folders p
+                WHERE p.id = fld.parent_id AND p.is_trashed = TRUE))"#;
+
+        let file_branch = r#"
+    SELECT
+        'file'::text                                         AS resource_type,
+        f.id                                                 AS resource_id,
+        f.name,
+        f.folder_id                                          AS parent_id,
+        f.mime_type,
+        f.size::bigint                                       AS size,
+        f.created_at                                         AS resource_created_at,
+        f.updated_at                                         AS modified_at,
+        f.user_id                                            AS owner_id,
+        f.trashed_at                                         AS trashed_at,
+        (f.trashed_at + ($7::int * INTERVAL '1 day'))        AS deletion_date,
+        COALESCE(pfld.path::text || '/' || f.name, f.name)   AS resource_path,
+        LOWER(f.name)                                        AS sort_str,
+        f.category_order::bigint                             AS type_order,
+        1::int                                               AS folder_first
+    FROM storage.files f
+    LEFT JOIN storage.folders pfld
+           ON pfld.id = f.folder_id
+    WHERE f.user_id = $1::uuid
+      AND f.is_trashed = TRUE
+      AND (f.folder_id IS NULL
+           OR NOT EXISTS (
+               SELECT 1 FROM storage.folders p
+                WHERE p.id = f.folder_id AND p.is_trashed = TRUE))"#;
+
+        if include_folders {
+            cte_branches.push(folder_branch);
+        }
+        if include_files {
+            cte_branches.push(file_branch);
+        }
+
+        if cte_branches.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let union_sql = cte_branches.join("\n    UNION ALL\n");
+        let cte = format!("WITH resources AS ({union_sql}\n)");
+
+        // ── Cursor values ───────────────────────────────────────────────────
+        let cur_str: Option<&str> = cursor.and_then(|c| c.sort_str.as_deref());
+        let cur_int: Option<i64> = cursor.and_then(|c| c.sort_int);
+        let cur_ts: Option<chrono::DateTime<chrono::Utc>> = cursor.and_then(|c| c.sort_ts);
+        let cur_id: Option<Uuid> = cursor.map(|c| c.resource_id);
+
+        // ── Per-dimension keyset WHERE + ORDER BY ───────────────────────────
+        // Binds: $1=user_id, $2=cur_str, $3=cur_int, $4=cur_ts,
+        //        $5=cur_id, $6=limit, $7=retention_days.
+        let (keyset, order_by_clause) = match (order_by, reverse) {
+            // ── deletion_date (DEFAULT) — ASC = expiring soonest first ───────
+            ("deletion_date", false) => (
+                "WHERE ($4::timestamptz IS NULL)
+                    OR (deletion_date > $4)
+                    OR (deletion_date = $4 AND resource_id > $5::uuid)",
+                "ORDER BY deletion_date ASC, resource_id ASC",
+            ),
+            ("deletion_date", true) => (
+                "WHERE ($4::timestamptz IS NULL)
+                    OR (deletion_date < $4)
+                    OR (deletion_date = $4 AND resource_id < $5::uuid)",
+                "ORDER BY deletion_date DESC, resource_id DESC",
+            ),
+            // ── trashed_at — DESC = most recently trashed first ──────────────
+            ("trashed_at", false) => (
+                "WHERE ($4::timestamptz IS NULL)
+                    OR (trashed_at < $4)
+                    OR (trashed_at = $4 AND resource_id < $5::uuid)",
+                "ORDER BY trashed_at DESC, resource_id DESC",
+            ),
+            ("trashed_at", true) => (
+                "WHERE ($4::timestamptz IS NULL)
+                    OR (trashed_at > $4)
+                    OR (trashed_at = $4 AND resource_id > $5::uuid)",
+                "ORDER BY trashed_at ASC, resource_id ASC",
+            ),
+            // ── name — folders first ─────────────────────────────────────────
+            ("name", false) => (
+                "WHERE ($3::bigint IS NULL)
+                    OR (folder_first::bigint > $3)
+                    OR (folder_first::bigint = $3 AND sort_str > $2)
+                    OR (folder_first::bigint = $3 AND sort_str = $2 AND resource_id > $5::uuid)",
+                "ORDER BY folder_first ASC, sort_str ASC, resource_id ASC",
+            ),
+            ("name", true) => (
+                "WHERE ($3::bigint IS NULL)
+                    OR (folder_first::bigint > $3)
+                    OR (folder_first::bigint = $3 AND sort_str < $2)
+                    OR (folder_first::bigint = $3 AND sort_str = $2 AND resource_id < $5::uuid)",
+                "ORDER BY folder_first ASC, sort_str DESC, resource_id DESC",
+            ),
+            // ── type — folders get type_order=0 so they sort first naturally ─
+            ("type", false) => (
+                "WHERE ($3::bigint IS NULL)
+                    OR (type_order > $3)
+                    OR (type_order = $3 AND sort_str > $2)
+                    OR (type_order = $3 AND sort_str = $2 AND resource_id > $5::uuid)",
+                "ORDER BY type_order ASC, sort_str ASC, resource_id ASC",
+            ),
+            ("type", true) => (
+                "WHERE ($3::bigint IS NULL)
+                    OR (type_order < $3)
+                    OR (type_order = $3 AND sort_str < $2)
+                    OR (type_order = $3 AND sort_str = $2 AND resource_id < $5::uuid)",
+                "ORDER BY type_order DESC, sort_str DESC, resource_id DESC",
+            ),
+            // ── size — folders first (via -1 sentinel grouping at top) ──────
+            ("size", false) => (
+                "WHERE ($3::bigint IS NULL)
+                    OR (size > $3)
+                    OR (size = $3 AND resource_id > $5::uuid)",
+                "ORDER BY size ASC, resource_id ASC",
+            ),
+            ("size", true) => (
+                "WHERE ($3::bigint IS NULL)
+                    OR (size < $3)
+                    OR (size = $3 AND resource_id < $5::uuid)",
+                "ORDER BY size DESC, resource_id DESC",
+            ),
+            // ── default = deletion_date ASC ─────────────────────────────────
+            (_, false) => (
+                "WHERE ($4::timestamptz IS NULL)
+                    OR (deletion_date > $4)
+                    OR (deletion_date = $4 AND resource_id > $5::uuid)",
+                "ORDER BY deletion_date ASC, resource_id ASC",
+            ),
+            (_, true) => (
+                "WHERE ($4::timestamptz IS NULL)
+                    OR (deletion_date < $4)
+                    OR (deletion_date = $4 AND resource_id < $5::uuid)",
+                "ORDER BY deletion_date DESC, resource_id DESC",
+            ),
+        };
+
+        let sql = format!(
+            "{cte}
+SELECT
+    r.resource_type, r.resource_id, r.name, r.parent_id,
+    r.mime_type, r.size, r.resource_created_at, r.modified_at,
+    r.owner_id, r.trashed_at, r.deletion_date, r.resource_path,
+    r.sort_str, r.type_order, r.folder_first
+FROM resources r
+{keyset}
+{order_by_clause}
+LIMIT $6"
+        );
+
+        let rows = sqlx::query(&sql)
+            .bind(user_id) // $1
+            .bind(cur_str) // $2
+            .bind(cur_int) // $3
+            .bind(cur_ts) // $4
+            .bind(cur_id) // $5
+            .bind(limit as i64) // $6
+            .bind(self.retention_days as i32) // $7
+            .fetch_all(self.pool.as_ref())
+            .await
+            .map_err(|e| {
+                error!("Database error listing trash resources: {e}");
+                DomainError::new(
+                    ErrorKind::InternalError,
+                    "Trash",
+                    format!("Failed to list trash resources: {e}"),
+                )
+            })?;
+
+        let result = rows
+            .iter()
+            .map(|row| {
+                let resource_type: String = row.get("resource_type");
+                let sort_str_val: Option<String> = row.try_get("sort_str").ok();
+                let type_order: i64 = row.try_get("type_order").unwrap_or(0);
+                let folder_first: i32 = row.try_get("folder_first").unwrap_or(0);
+                let size: i64 = row.get("size");
+                let trashed_at: DateTime<Utc> = row.get("trashed_at");
+                let deletion_date: DateTime<Utc> = row.get("deletion_date");
+
+                // Pre-compute the cursor sort fields based on order_by.
+                let (c_sort_str, c_sort_int, c_sort_ts) = match order_by {
+                    "deletion_date" => (None, None, Some(deletion_date)),
+                    "trashed_at" => (None, None, Some(trashed_at)),
+                    "name" => (sort_str_val, Some(folder_first as i64), None),
+                    "type" => (sort_str_val, Some(type_order), None),
+                    "size" => (None, Some(size), None),
+                    _ => (None, None, Some(deletion_date)),
+                };
+
+                TrashResourceRow {
+                    resource_type,
+                    resource_id: row.get("resource_id"),
+                    name: row.get("name"),
+                    parent_id: row.try_get("parent_id").ok(),
+                    mime_type: row.try_get("mime_type").ok(),
+                    size,
+                    resource_created_at: row.get("resource_created_at"),
+                    modified_at: row.get("modified_at"),
+                    owner_id: row.get("owner_id"),
+                    trashed_at,
+                    deletion_date,
+                    path: row.try_get("resource_path").ok(),
+                    sort_str: c_sort_str,
+                    sort_int: c_sort_int,
+                    sort_ts: c_sort_ts,
+                }
+            })
+            .collect();
+
+        Ok(result)
     }
 }

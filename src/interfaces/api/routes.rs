@@ -431,13 +431,17 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     if let Some(_trash_service_ref) = trash_service.clone() {
         tracing::info!("Setting up trash routes for trash view");
 
+        #[allow(deprecated)]
         let trash_router = Router::new()
-            .route("/", get(trash_handler::get_trash_items))
+            // Literal paths first — order matters for axum overlap handling
+            // when a wildcard like /{id} could otherwise capture them.
+            .route("/", get(trash_handler::get_trash_items)) // deprecated — kept for external compat
+            .route("/resources", get(trash_handler::get_trash_resources))
+            .route("/empty", delete(trash_handler::empty_trash))
             .route("/files/{id}", delete(trash_handler::move_file_to_trash))
             .route("/folders/{id}", delete(trash_handler::move_folder_to_trash))
             .route("/{id}/restore", post(trash_handler::restore_from_trash))
             .route("/{id}", delete(trash_handler::delete_permanently))
-            .route("/empty", delete(trash_handler::empty_trash))
             .with_state(app_state.clone());
 
         router = router.nest("/trash", trash_router);

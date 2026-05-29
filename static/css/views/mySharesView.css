@@ -132,13 +132,24 @@
 
 /* ── Grant row ───────────────────────────────────────────────────────────── */
 
+/* Four-column grid so the role pill and expiry chip line up vertically
+ * across every row in a lane. Reserved widths fit the longest expected
+ * label ("Can manage" → ~110px, "Expires Mar 5, 2026" → ~180px). */
 .ms-grant-row {
-    display: flex;
+    display: grid;
+    grid-template-columns: 1fr 110px 180px auto;
     align-items: center;
     gap: 8px;
     padding: 7px 14px 7px 28px;
     border-bottom: 1px solid var(--color-border-faint);
     transition: background 0.1s;
+}
+
+/* Pill / chip sit at the start of their column rather than stretching
+ * to fill it — keeps the natural rounded shape. */
+.ms-grant-row > .role-chip,
+.ms-grant-row > .expiry-chip {
+    justify-self: start;
 }
 
 .ms-grant-row:last-child {
@@ -212,65 +223,8 @@
     text-decoration: underline;
 }
 
-/* ── Role pill ───────────────────────────────────────────────────────────── */
-
-.ms-role-pill {
-    display: inline-block;
-    flex-shrink: 0;
-    padding: 2px 8px;
-    border-radius: 10px;
-    font-size: 11px;
-    font-weight: 600;
-    white-space: nowrap;
-}
-
-.ms-role-pill--manage {
-    background: var(--color-badge-orange-bg);
-    color: var(--color-badge-orange-text);
-}
-
-.ms-role-pill--edit {
-    background: var(--color-badge-blue-bg);
-    color: var(--color-badge-blue-text);
-}
-
-.ms-role-pill--view {
-    background: var(--color-bg-muted);
-    color: var(--color-text-muted);
-}
-
-/* ── Expiry chip ─────────────────────────────────────────────────────────── */
-
-.ms-expiry-chip {
-    display: inline-flex;
-    align-items: center;
-    flex-shrink: 0;
-    gap: 4px;
-    padding: 2px 7px;
-    border-radius: 10px;
-    font-size: 11px;
-    white-space: nowrap;
-}
-
-.ms-expiry-chip--never {
-    background: var(--color-bg-muted);
-    color: var(--color-text-faint);
-}
-
-.ms-expiry-chip--active {
-    background: var(--color-bg-muted);
-    color: var(--color-text-muted);
-}
-
-.ms-expiry-chip--soon {
-    background: var(--color-badge-amber-bg);
-    color: var(--color-badge-amber-text);
-}
-
-.ms-expiry-chip--expired {
-    background: var(--color-danger-lighter);
-    color: var(--color-danger-text-alt);
-}
+/* Role chip styles moved to components/roleChip.css (shared component).
+ * Expiry chip styles moved to components/expiryChip.css (shared with Trash). */
 
 /* ── Kebab / icon buttons ────────────────────────────────────────────────── */
 

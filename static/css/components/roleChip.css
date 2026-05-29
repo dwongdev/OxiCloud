@@ -1,0 +1,46 @@
+/*
+ * Shared role chip — used by My Shares (and any other surface that
+ * needs to display a permission role with consistent styling).
+ *
+ * Produced by `formatRoleChip(role)` / `buildRoleChip(role)` in
+ * `components/roleChip.js`. Three tiers:
+ *
+ *   manage → orange (admin)
+ *   edit   → blue   (editor)
+ *   view   → muted  (viewer)
+ *
+ * Sized to match `.expiry-chip` so the role and expiry chips line up
+ * visually side by side.
+ */
+
+.role-chip {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    gap: 4px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    white-space: nowrap;
+}
+
+.role-chip__icon {
+    font-size: 10px;
+    opacity: 0.85;
+}
+
+.role-chip--manage {
+    background: var(--color-badge-orange-bg);
+    color: var(--color-badge-orange-text);
+}
+
+.role-chip--edit {
+    background: var(--color-badge-blue-bg);
+    color: var(--color-badge-blue-text);
+}
+
+.role-chip--view {
+    background: var(--color-bg-muted);
+    color: var(--color-text-muted);
+}

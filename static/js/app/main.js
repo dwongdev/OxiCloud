@@ -18,6 +18,7 @@ import { recent } from '../features/library/recent.js';
 import { fileSharing } from '../features/sharing/fileSharing.js';
 import { grants } from '../model/grants.js';
 import { recentView } from '../views/recent/recentView.js';
+import { trashView } from '../views/trash/trashView.js';
 import { checkAuthentication } from './authSession.js';
 import { loadFiles } from './filesView.js';
 import {
@@ -34,7 +35,6 @@ import {
 } from './navigation.js';
 import { performSearch } from './searchView.js';
 import { app, appElements as elements } from './state.js';
-import { loadTrashItems } from './trashView.js';
 import { ui } from './ui.js';
 import { setupUserMenu } from './userMenu.js';
 
@@ -362,7 +362,7 @@ function setupActionsBarDelegation() {
                 break;
             case 'empty-trash-btn':
                 if (await fileOps.emptyTrash()) {
-                    loadTrashItems();
+                    await trashView.init();
                 }
                 break;
             case 'clear-recent-btn':

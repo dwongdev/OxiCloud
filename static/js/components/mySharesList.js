@@ -9,6 +9,7 @@
  *   'sharedWith' — lane = user | 'links:public' | 'links:password'; row identity = resource
  */
 
+import { formatExpiryChip } from '../core/formatters.js';
 import { i18n } from '../core/i18n.js';
 import { fileSharing } from '../features/sharing/fileSharing.js';
 import { grants } from '../model/grants.js';
@@ -16,6 +17,7 @@ import { buildExpiryChip } from '../utils/expiryChip.js';
 import { buildPasswordChip } from '../utils/passwordChip.js';
 import { buildLinkChip } from './linkChip.js';
 import { buildResourceIcon } from './resourceIcon.js';
+import { buildRoleChip, roleLabel } from './roleChip.js';
 import { createUserVignette } from './userVignette.js';
 
 /**
@@ -36,24 +38,6 @@ function _expiryState(expiresAt) {
     if (ms < 0) return 'expired';
     if (ms <= SOON_DAYS * 86_400_000) return 'soon';
     return 'active';
-}
-
-/** @param {string} role @returns {string} */
-function _roleLabel(role) {
-    /** @type {Record<string,string>} */
-    const m = {
-        admin: i18n.t('share.role.canManage', 'Can manage'),
-        editor: i18n.t('share.role.canEdit', 'Can edit'),
-        viewer: i18n.t('share.role.canView', 'Can view')
-    };
-    return m[role] ?? role;
-}
-
-/** @param {string} role @returns {'manage'|'edit'|'view'} */
-function _roleMod(role) {
-    if (role === 'admin') return 'manage';
-    if (role === 'editor') return 'edit';
-    return 'view';
 }
 
 class MySharesList {
@@ -307,53 +291,23 @@ class MySharesList {
 
     /** @param {string} role @returns {HTMLElement} */
     _buildRolePill(role) {
-        const pill = document.createElement('span');
-        pill.className = `ms-role-pill ms-role-pill--${_roleMod(role)}`;
-        pill.textContent = _roleLabel(role);
-        return pill;
+        return buildRoleChip(role);
     }
 
     /**
-     * 4-state expiry chip: never / active / soon / expired.
+     * Build the expiry chip as a DOM element.
+     *
+     * Delegates label/tier/icon decisions to the shared `formatExpiryChip`
+     * helper (used by Trash too) so all expiration chips look identical
+     * across the app and stay in sync as the design evolves.
+     *
      * @param {string|null} expiresAt
      * @returns {HTMLElement}
      */
     _buildExpiryChip(expiresAt) {
-        const state = _expiryState(expiresAt);
-        const chip = document.createElement('span');
-        chip.className = `ms-expiry-chip ms-expiry-chip--${state}`;
-
-        const icon = document.createElement('i');
-        const text = document.createTextNode('');
-
-        if (state === 'never') {
-            icon.className = 'fas fa-infinity';
-            chip.appendChild(icon);
-            chip.appendChild(document.createTextNode(` ${i18n.t('myshares.neverExpires', 'Never expires')}`));
-        } else if (state === 'expired') {
-            icon.className = 'fas fa-exclamation-triangle';
-            chip.appendChild(icon);
-            chip.appendChild(document.createTextNode(` ${i18n.t('myshares.expired', 'Expired')}`));
-        } else if (state === 'soon' && expiresAt) {
-            icon.className = 'fas fa-clock';
-            const days = Math.ceil((new Date(expiresAt).getTime() - Date.now()) / 86_400_000);
-            const label =
-                days <= 1
-                    ? i18n.t('myshares.expiresTomorrow', 'Expires tomorrow')
-                    : i18n.t('myshares.expiresInDays', 'Expires in {n} days').replace('{n}', String(days));
-            chip.appendChild(icon);
-            chip.appendChild(document.createTextNode(` ${label}`));
-        } else if (expiresAt) {
-            icon.className = 'fas fa-clock';
-            const d = new Date(expiresAt);
-            const fmt = d.toLocaleDateString('default', { day: 'numeric', month: 'short', year: 'numeric' });
-            chip.appendChild(icon);
-            chip.appendChild(document.createTextNode(` ${i18n.t('myshares.until', 'Until')} ${fmt}`));
-        }
-
-        // unused ref kept to avoid TS unused-var warning suppression
-        void text;
-        return chip;
+        const tpl = document.createElement('template');
+        tpl.innerHTML = formatExpiryChip(expiresAt);
+        return /** @type {HTMLElement} */ (tpl.content.firstElementChild);
     }
 
     // ── Kebab menu ────────────────────────────────────────────────────────────
@@ -395,7 +349,7 @@ class MySharesList {
         if (grant.subject_type === 'user') {
             for (const role of /** @type {('admin'|'editor'|'viewer')[]} */ (['admin', 'editor', 'viewer'])) {
                 const isCurrent = grant.role === role;
-                const mi = this._menuItem(isCurrent ? 'fas fa-check' : '', _roleLabel(role), false, async () => {
+                const mi = this._menuItem(isCurrent ? 'fas fa-check' : '', roleLabel(role), false, async () => {
                     menu.remove();
                     if (isCurrent) return;
                     await grants.updateRole({
@@ -403,11 +357,8 @@ class MySharesList {
                         resource: { type: item.resource_type, id: item.resource.id },
                         role
                     });
-                    const pill = rowEl.querySelector('.ms-role-pill');
-                    if (pill) {
-                        pill.className = `ms-role-pill ms-role-pill--${_roleMod(role)}`;
-                        pill.textContent = _roleLabel(role);
-                    }
+                    const pill = rowEl.querySelector('.role-chip');
+                    if (pill) pill.replaceWith(buildRoleChip(role));
                     grant.role = role;
                 });
                 if (isCurrent) mi.classList.add('ms-menu-item--current');

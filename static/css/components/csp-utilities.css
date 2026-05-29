@@ -7,7 +7,7 @@
     margin-bottom: 16px;
 }
 .empty-state-icon.error {
-    color: var(--color-trash-delete);
+    color: var(--color-danger-text-alt);
 }
 .empty-state-icon.spinner {
     color: var(--color-text-medium);

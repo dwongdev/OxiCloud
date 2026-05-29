@@ -10,17 +10,11 @@
  * live in shareModal.css.
  */
 
+import { formatExpiryDate } from '../core/formatters.js';
 import { i18n } from '../core/i18n.js';
 
-/**
- * Format a YYYY-MM-DD string for display ("Dec 31, 2026").
- * @param {string} dateStr
- * @returns {string}
- */
-export function formatExpiryDate(dateStr) {
-    const d = new Date(`${dateStr}T00:00:00`);
-    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
-}
+// Re-export so existing import sites keep working after the move to core/formatters.js.
+export { formatExpiryDate };
 
 /**
  * Build an interactive expiry chip.

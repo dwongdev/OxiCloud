@@ -1,6 +1,11 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use utoipa::{IntoParams, ToSchema};
+use uuid::Uuid;
+
+use super::cursor::{CursorListResponse, CursorQuery, PageCursor};
+use super::grant_dto::{ResourceContentDto, ResourceTypeDto};
+use crate::domain::services::authorization::ResourceKind;
 
 /// DTO representing an item in the trash
 #[derive(Debug, Serialize, Deserialize, ToSchema)]
@@ -38,3 +43,122 @@ pub struct RestoreFromTrashRequest {
 pub struct DeletePermanentlyRequest {
     pub trash_id: String,
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// Cursor-paginated trash resources  (GET /api/trash/resources)
+// ════════════════════════════════════════════════════════════════════════════
+
+/// Raw row returned by the UNION-ALL query over `storage.files`/`storage.folders`
+/// where `is_trashed = TRUE`. Never serialised directly.
+pub struct TrashResourceRow {
+    pub resource_type: String, // "file" | "folder"
+    pub resource_id: Uuid,
+    pub name: String,
+    pub parent_id: Option<Uuid>,
+    pub mime_type: Option<String>,
+    /// `-1` for folders (sentinel), actual byte-count for files.
+    pub size: i64,
+    pub resource_created_at: DateTime<Utc>,
+    pub modified_at: DateTime<Utc>,
+    pub owner_id: Uuid,
+    pub trashed_at: DateTime<Utc>,
+    pub deletion_date: DateTime<Utc>,
+    /// Original location path (for folders: `path`; for files: `parent.path || '/' || name`).
+    pub path: Option<String>,
+    // Pre-computed sort fields for cursor construction.
+    pub sort_str: Option<String>,
+    pub sort_int: Option<i64>,
+    pub sort_ts: Option<DateTime<Utc>>,
+}
+
+/// Opaque keyset-pagination cursor for `GET /api/trash/resources`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrashCursor {
+    /// Sort dimension active when this cursor was produced.
+    /// Values: `"deletion_date"` (default), `"trashed_at"`, `"name"`, `"type"`, `"size"`.
+    #[serde(default = "TrashCursor::default_order")]
+    pub order_by: String,
+    /// UUID of the last item on the previous page (tie-breaker).
+    pub resource_id: Uuid,
+    /// `LOWER(name)` for `name`/`type` sorts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_str: Option<String>,
+    /// Multipurpose integer: `folder_first` for `name`, `type_order` for `type`,
+    /// size in bytes for `size`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_int: Option<i64>,
+    /// Timestamp for `deletion_date` and `trashed_at` sorts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sort_ts: Option<DateTime<Utc>>,
+    /// Whether the result set was reversed — must match on every page.
+    #[serde(default)]
+    pub reverse: bool,
+}
+
+impl TrashCursor {
+    fn default_order() -> String {
+        "deletion_date".to_owned()
+    }
+}
+
+impl PageCursor for TrashCursor {}
+
+/// Query parameters for `GET /api/trash/resources`.
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct TrashResourcesQuery {
+    /// Maximum items per page (1–200, default 50).
+    #[serde(default = "CursorQuery::default_limit")]
+    pub limit: u32,
+    /// Opaque cursor from a previous response. Omit to start from the first page.
+    pub cursor: Option<String>,
+    /// Sort / group-by dimension. Supported: `"deletion_date"` (default — soonest
+    /// expiry first), `"trashed_at"` (most recently trashed first), `"name"`,
+    /// `"type"`, `"size"`.
+    pub order_by: Option<String>,
+    /// Comma-separated resource types to include, e.g. `"file,folder"`.
+    /// Omit to include both.
+    pub resource_types: Option<String>,
+    /// Reverse the sort order. Default `false`.
+    #[serde(default)]
+    pub reverse: bool,
+}
+
+impl TrashResourcesQuery {
+    pub fn limit_clamped(&self) -> usize {
+        self.limit.clamp(1, 200) as usize
+    }
+
+    pub fn decode_cursor(&self) -> Option<TrashCursor> {
+        self.cursor.as_deref().and_then(TrashCursor::decode)
+    }
+
+    /// Returns `None` when `resource_types` is absent (= include all).
+    pub fn resource_kinds(&self) -> Option<Vec<ResourceKind>> {
+        self.resource_types.as_deref().map(|s| {
+            s.split(',')
+                .filter_map(|t| ResourceKind::parse(t.trim()))
+                .collect()
+        })
+    }
+}
+
+/// One item in a `GET /api/trash/resources` page.
+///
+/// `deletion_date` is the real timestamp at which the item will be permanently
+/// deleted (= `trashed_at + retention_days`). The client derives "days until
+/// deletion" itself from this + the current clock — the wire format does not
+/// duplicate that derivation. `resource.path` carries the original location
+/// (soft-delete preserves the row's `path` column).
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TrashResourceItemDto {
+    pub resource_type: ResourceTypeDto,
+    /// When the user moved the item to trash.
+    pub trashed_at: DateTime<Utc>,
+    /// When the item will be permanently deleted by the retention sweeper.
+    pub deletion_date: DateTime<Utc>,
+    /// Full resource details — shape determined by `resource_type`.
+    pub resource: ResourceContentDto,
+}
+
+/// Response envelope for `GET /api/trash/resources`.
+pub type TrashResourcesDto = CursorListResponse<TrashResourceItemDto>;

@@ -1,20 +1,28 @@
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use serde_json::json;
 use tracing::{debug, error, instrument, warn};
 
+use crate::application::dtos::trash_dto::{TrashResourcesDto, TrashResourcesQuery};
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::common::di::AppState;
+use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::AuthUser;
 use std::sync::Arc;
 
-/// Gets all items in the trash for the current user
+/// Gets all items in the trash for the current user.
+///
+/// # Deprecated
+/// Use `GET /api/trash/resources` instead. This endpoint is kept for
+/// backwards compatibility but will be removed in a future release.
+#[deprecated = "Use GET /api/trash/resources instead"]
 #[utoipa::path(
     get,
     path = "/api/trash",
     responses(
-        (status = 200, description = "List of trashed items"),
+        (status = 200, description = "List of trashed items (deprecated — use /api/trash/resources)"),
         (status = 501, description = "Trash feature not enabled")
     ),
     security(("bearerAuth" = [])),
@@ -29,6 +37,10 @@ pub async fn get_trash_items(
     // Never allow user ID override via query parameters to prevent
     // privilege escalation attacks.
     let effective_user = auth_user.id;
+
+    warn!(
+        "Deprecated endpoint called: GET /api/trash — use GET /api/trash/resources instead (user {effective_user})"
+    );
 
     debug!("Request to list trash items for user {}", effective_user);
 
@@ -60,6 +72,74 @@ pub async fn get_trash_items(
                 })),
             )
         }
+    }
+}
+
+/// Cursor-paginated list of a user's trashed resources.
+///
+/// Sorts by `deletion_date` (default — soonest expiry first), `trashed_at`
+/// (most recently trashed first), `name`, `type`, or `size`. Filter on
+/// `resource_types=file` or `resource_types=folder` to narrow to one kind.
+/// Items implicitly trashed as descendants of a trashed parent are excluded
+/// (only top-level trashed items appear).
+#[utoipa::path(
+    get,
+    path = "/api/trash/resources",
+    params(TrashResourcesQuery),
+    responses(
+        (status = 200, description = "Paginated list of trashed resources",
+         body = crate::application::dtos::trash_dto::TrashResourcesDto),
+        (status = 400, description = "Invalid cursor or query parameters"),
+        (status = 501, description = "Trash feature not enabled"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "trash"
+)]
+#[instrument(skip_all)]
+pub async fn get_trash_resources(
+    State(state): State<Arc<AppState>>,
+    auth_user: AuthUser,
+    Query(q): Query<TrashResourcesQuery>,
+) -> axum::response::Response {
+    let user_id = auth_user.id;
+
+    let trash_service = match state.trash_service.as_ref() {
+        Some(service) => service,
+        None => {
+            return (
+                StatusCode::NOT_IMPLEMENTED,
+                Json(json!({ "error": "Trash feature is not enabled" })),
+            )
+                .into_response();
+        }
+    };
+
+    let order_by = q.order_by.as_deref().unwrap_or("deletion_date").to_owned();
+
+    // Discard cursor if sort dimension or direction changed between pages.
+    let cursor = q
+        .decode_cursor()
+        .filter(|c| c.order_by == order_by && c.reverse == q.reverse);
+
+    let kinds = q.resource_kinds();
+
+    match trash_service
+        .list_resources_paged(
+            user_id,
+            q.limit_clamped(),
+            cursor,
+            &order_by,
+            kinds.as_deref(),
+            q.reverse,
+        )
+        .await
+    {
+        Ok((items, next_cursor)) => (
+            StatusCode::OK,
+            Json(TrashResourcesDto::with_cursor(items, next_cursor)),
+        )
+            .into_response(),
+        Err(e) => AppError::from(e).into_response(),
     }
 }
 
