@@ -533,12 +533,18 @@ class MySharesList {
                     expires_at: expiresIso
                 });
                 grant.expires_at = expiresIso;
-                // Replace the display chip in the grant row
-                const displayChip = rowEl.querySelector('.ms-expiry-chip');
+                // Replace the display chip in the grant row. The chip class
+                // is `expiry-chip` (emitted by `formatExpiryChip` in
+                // core/formatters.js) — NOT `ms-expiry-chip`. The earlier
+                // selector silently no-op'd, which is why the row never
+                // refreshed after an expiry change.
+                const displayChip = rowEl.querySelector('.expiry-chip');
                 if (displayChip) {
                     const newChip = this._buildExpiryChip(expiresIso);
                     displayChip.replaceWith(newChip);
                 }
+                // Keep the row's expired styling in sync (0.6 opacity).
+                rowEl.classList.toggle('ms-grant-row--expired', _expiryState(expiresIso) === 'expired');
             } catch (err) {
                 console.error('mySharesList: setExpiry failed', err);
             }
