@@ -47,13 +47,13 @@ jsonpath "$[0].parent_id" == null
 # ─────────────────────────────────────────────────────────────
 # Step 3 – Browse the home folder: sub-folders must be empty
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/folders/{{home_folder_id}}/contents
+GET {{base_url}}/api/folders/{{home_folder_id}}/resources?resource_types=folder
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" isCollection
-jsonpath "$" count == 0
+jsonpath "$.items" isCollection
+jsonpath "$.items" count == 0
 
 
 # ─────────────────────────────────────────────────────────────
@@ -127,28 +127,28 @@ jsonpath "$.parent_id" == {{test1_id}}
 # ─────────────────────────────────────────────────────────────
 # Step 8 – Home folder now has exactly one sub-folder (test1)
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/folders/{{home_folder_id}}/contents
+GET {{base_url}}/api/folders/{{home_folder_id}}/resources?resource_types=folder
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" count == 1
-jsonpath "$[0].id" == {{test1_id}}
-jsonpath "$[0].name" == "test1"
+jsonpath "$.items" count == 1
+jsonpath "$.items[0].resource.id" == {{test1_id}}
+jsonpath "$.items[0].resource.name" == "test1"
 
 
 # ─────────────────────────────────────────────────────────────
 # Step 9 – test1 has exactly one sub-folder (test2)
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/folders/{{test1_id}}/contents
+GET {{base_url}}/api/folders/{{test1_id}}/resources?resource_types=folder
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" count == 1
-jsonpath "$[0].id" == {{test2_id}}
-jsonpath "$[0].name" == "test2"
-jsonpath "$[0].parent_id" == {{test1_id}}
+jsonpath "$.items" count == 1
+jsonpath "$.items[0].resource.id" == {{test2_id}}
+jsonpath "$.items[0].resource.name" == "test2"
+jsonpath "$.items[0].resource.parent_id" == {{test1_id}}
 
 
 # ─────────────────────────────────────────────────────────────
@@ -208,25 +208,25 @@ jsonpath "$.parent_id" == {{home_folder_id}}
 # ─────────────────────────────────────────────────────────────
 # Step 13 – test1 is now empty (test2 was its only child)
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/folders/{{test1_id}}/contents
+GET {{base_url}}/api/folders/{{test1_id}}/resources?resource_types=folder
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" count == 0
+jsonpath "$.items" count == 0
 
 
 # ─────────────────────────────────────────────────────────────
 # Step 14 – Home folder now has two sub-folders: test1 and test2
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/folders/{{home_folder_id}}/contents
+GET {{base_url}}/api/folders/{{home_folder_id}}/resources?resource_types=folder
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" count == 2
-jsonpath "$[*].id" contains {{test1_id}}
-jsonpath "$[*].id" contains {{test2_id}}
+jsonpath "$.items" count == 2
+jsonpath "$.items[*].resource.id" contains {{test1_id}}
+jsonpath "$.items[*].resource.id" contains {{test2_id}}
 
 
 # ─────────────────────────────────────────────────────────────

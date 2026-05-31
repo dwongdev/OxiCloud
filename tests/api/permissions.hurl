@@ -267,14 +267,14 @@ jsonpath "$.error_type" == "Not Found"
 # Step 15 – Admin's private folder still exists & is untouched.
 #            Bob's attacks must not have polluted admin's tree.
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/folders/{{admin_home_id}}/contents
+GET {{base_url}}/api/folders/{{admin_home_id}}/resources?resource_types=folder
 Authorization: Bearer {{admin_token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$[*].id" contains {{admin_private_id}}
-jsonpath "$[*].name" not contains "bob-attack-1"
-jsonpath "$[*].name" not contains "bob-attack-2"
+jsonpath "$.items[*].resource.id" contains {{admin_private_id}}
+jsonpath "$.items[*].resource.name" not contains "bob-attack-1"
+jsonpath "$.items[*].resource.name" not contains "bob-attack-2"
 
 
 # ═════════════════════════════════════════════════════════════
@@ -323,22 +323,22 @@ HTTP 201
 #            This proves the path prefix re-rooted the attack
 #            into bob's own namespace.
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/folders/{{bob_home_id}}/contents
+GET {{base_url}}/api/folders/{{bob_home_id}}/resources?resource_types=folder
 Authorization: Bearer {{bob_token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$[*].name" contains "bob-webdav-own"
-jsonpath "$[*].name" contains "My Folder - admin"
+jsonpath "$.items[*].resource.name" contains "bob-webdav-own"
+jsonpath "$.items[*].resource.name" contains "My Folder - admin"
 
 
 # ─────────────────────────────────────────────────────────────
 # Step 19 – Admin's tree is unchanged by bob's WebDAV traffic.
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/folders/{{admin_home_id}}/contents
+GET {{base_url}}/api/folders/{{admin_home_id}}/resources?resource_types=folder
 Authorization: Bearer {{admin_token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$[*].name" not contains "bob-webdav-attack"
-jsonpath "$[*].name" not contains "bob-webdav-own"
+jsonpath "$.items[*].resource.name" not contains "bob-webdav-attack"
+jsonpath "$.items[*].resource.name" not contains "bob-webdav-own"

@@ -139,7 +139,7 @@ log "Trash emptied."
 
 # ── 3b. Verify trash is empty according to the API ───────────────────────────
 
-TRASH_COUNT=$(curl -sf -H "$AUTH" "$base_url/api/trash" | jq 'length')
+TRASH_COUNT=$(curl -sf -H "$AUTH" "$base_url/api/trash/resources" | jq '.items | length')
 if [[ "$TRASH_COUNT" -ne 0 ]]; then
     fail "trash still contains $TRASH_COUNT item(s) after empty"
 fi

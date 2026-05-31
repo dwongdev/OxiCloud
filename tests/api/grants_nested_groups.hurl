@@ -154,7 +154,7 @@ perm_file_id: jsonpath "$.id"
 # ════════════════════════════════════════════════════════════════════
 
 # ── Folder reads ─────────────────────────────────────────────
-GET {{base_url}}/api/folders/{{perm_folder_id}}/contents
+GET {{base_url}}/api/folders/{{perm_folder_id}}/resources?resource_types=folder
 Authorization: Bearer {{henry_token}}
 
 HTTP 404
@@ -288,13 +288,13 @@ jsonpath "$[0].subject.type" == "group"
 jsonpath "$[0].subject.id"   == "{{group_a_id}}"
 
 # ── Read endpoints now succeed ──────────────────────────────
-GET {{base_url}}/api/folders/{{perm_folder_id}}/contents
+GET {{base_url}}/api/folders/{{perm_folder_id}}/resources?resource_types=folder
 Authorization: Bearer {{henry_token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" count == 1
-jsonpath "$[0].id" == "{{perm_child_id}}"
+jsonpath "$.items" count == 1
+jsonpath "$.items[0].resource.id" == "{{perm_child_id}}"
 
 GET {{base_url}}/api/folders/{{perm_folder_id}}/resources
 Authorization: Bearer {{henry_token}}
@@ -339,7 +339,7 @@ HTTP 200
 header "Content-Type" startsWith "image/"
 
 # ── Folder cascade through ltree: child also readable. ──────
-GET {{base_url}}/api/folders/{{perm_child_id}}/contents
+GET {{base_url}}/api/folders/{{perm_child_id}}/resources?resource_types=folder
 Authorization: Bearer {{henry_token}}
 
 HTTP 200
@@ -582,7 +582,7 @@ Authorization: Bearer {{alice_token}}
 HTTP 204
 
 # Confirm access is gone.
-GET {{base_url}}/api/folders/{{perm_folder_id}}/contents
+GET {{base_url}}/api/folders/{{perm_folder_id}}/resources?resource_types=folder
 Authorization: Bearer {{henry_token}}
 
 HTTP 404
@@ -599,7 +599,7 @@ Content-Type: application/json
 
 HTTP 201
 
-GET {{base_url}}/api/folders/{{perm_folder_id}}/contents
+GET {{base_url}}/api/folders/{{perm_folder_id}}/resources?resource_types=folder
 Authorization: Bearer {{henry_token}}
 
 HTTP 200

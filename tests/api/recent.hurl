@@ -39,14 +39,14 @@ HTTP 200
 home_folder_id: jsonpath "$[0].id"
 
 
-GET {{base_url}}/api/folders/{{home_folder_id}}/contents
+GET {{base_url}}/api/folders/{{home_folder_id}}/resources?resource_types=folder
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Captures]
-test2_id: jsonpath "$[1].id"
+test2_id: jsonpath "$.items[1].resource.id"
 [Asserts]
-jsonpath "$[1].name" == "test2-renamed"
+jsonpath "$.items[1].resource.name" == "test2-renamed"
 
 
 GET {{base_url}}/api/files?folder_id={{test2_id}}

@@ -386,7 +386,7 @@ perm_file_id: jsonpath "$.id"
 # ════════════════════════════════════════════════════════════════════
 
 # ── Folder reads ─────────────────────────────────────────────
-GET {{base_url}}/api/folders/{{perm_folder_id}}/contents
+GET {{base_url}}/api/folders/{{perm_folder_id}}/resources?resource_types=folder
 Authorization: Bearer {{adam_token}}
 
 HTTP 404
@@ -506,13 +506,13 @@ Content-Type: application/json
 HTTP 201
 
 # ── Read endpoints now succeed ──────────────────────────────
-GET {{base_url}}/api/folders/{{perm_folder_id}}/contents
+GET {{base_url}}/api/folders/{{perm_folder_id}}/resources?resource_types=folder
 Authorization: Bearer {{adam_token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" count == 1
-jsonpath "$[0].id" == "{{perm_child_id}}"
+jsonpath "$.items" count == 1
+jsonpath "$.items[0].resource.id" == "{{perm_child_id}}"
 
 GET {{base_url}}/api/folders/{{perm_folder_id}}/resources
 Authorization: Bearer {{adam_token}}
@@ -557,7 +557,7 @@ HTTP 200
 header "Content-Type" startsWith "image/"
 
 # ── Cascading: child folder also readable via parent's grant ─
-GET {{base_url}}/api/folders/{{perm_child_id}}/contents
+GET {{base_url}}/api/folders/{{perm_child_id}}/resources?resource_types=folder
 Authorization: Bearer {{adam_token}}
 
 HTTP 200

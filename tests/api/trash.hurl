@@ -29,13 +29,13 @@ jsonpath "$.access_token" isString
 # ─────────────────────────────────────────────────────────────
 # Step 2 – Trash is empty at the start
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/trash
+GET {{base_url}}/api/trash/resources
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" isCollection
-jsonpath "$" count == 0
+jsonpath "$.items" isCollection
+jsonpath "$.items" count == 0
 
 
 # ─────────────────────────────────────────────────────────────
@@ -93,30 +93,35 @@ HTTP 204
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 7 – Trash contains exactly the "to-delete" folder
+# Step 7 – Trash contains exactly the "to-delete" folder.
+#           In the soft-delete trash model, the trash entry id
+#           equals the original resource id (see
+#           `storage.trash_items` view + `row_to_trashed_item`),
+#           so `resource.id` is what `POST /api/trash/{id}/restore`
+#           and `DELETE /api/trash/{id}` accept.
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/trash
+GET {{base_url}}/api/trash/resources
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Captures]
-trash_id: jsonpath "$[0].id"
+trash_id: jsonpath "$.items[0].resource.id"
 [Asserts]
-jsonpath "$" count == 1
-jsonpath "$[0].item_type" == "folder"
-jsonpath "$[0].name" == "to-delete"
-jsonpath "$[0].original_id" == {{to_delete_id}}
+jsonpath "$.items" count == 1
+jsonpath "$.items[0].resource_type" == "folder"
+jsonpath "$.items[0].resource.name" == "to-delete"
+jsonpath "$.items[0].resource.id" == {{to_delete_id}}
 
 
 # ─────────────────────────────────────────────────────────────
 # Step 8 – "to-delete" is no longer listed in the home folder
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/folders/{{home_folder_id}}/contents
+GET {{base_url}}/api/folders/{{home_folder_id}}/resources?resource_types=folder
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$[*].name" not contains "to-delete"
+jsonpath "$.items[*].resource.name" not contains "to-delete"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -133,12 +138,12 @@ jsonpath "$.success" == true
 # ─────────────────────────────────────────────────────────────
 # Step 10 – "to-delete" folder is back in the home folder
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/folders/{{home_folder_id}}/contents
+GET {{base_url}}/api/folders/{{home_folder_id}}/resources?resource_types=folder
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$[*].name" contains "to-delete"
+jsonpath "$.items[*].resource.name" contains "to-delete"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -156,12 +161,12 @@ jsonpath "$[0].name" == "hello.txt"
 # ─────────────────────────────────────────────────────────────
 # Step 12 – Trash is empty after restore
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/trash
+GET {{base_url}}/api/trash/resources
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" count == 0
+jsonpath "$.items" count == 0
 
 
 # ─────────────────────────────────────────────────────────────
@@ -187,20 +192,20 @@ jsonpath "$.success" == true
 # ─────────────────────────────────────────────────────────────
 # Step 15 – Trash is empty after purge
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/trash
+GET {{base_url}}/api/trash/resources
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" count == 0
+jsonpath "$.items" count == 0
 
 
 # ─────────────────────────────────────────────────────────────
 # Step 16 – "to-delete" folder no longer exists in home folder
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/folders/{{home_folder_id}}/contents
+GET {{base_url}}/api/folders/{{home_folder_id}}/resources?resource_types=folder
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$[*].name" not contains "to-delete"
+jsonpath "$.items[*].resource.name" not contains "to-delete"

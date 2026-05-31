@@ -164,15 +164,15 @@ HTTP 204
 # ─────────────────────────────────────────────────────────────
 # Step 7 – Permanently delete file 1 from trash
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/trash
+GET {{base_url}}/api/trash/resources
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Captures]
-trash_item1_id: jsonpath "$[?(@.original_id == '{{file1_id}}')].id"
+trash_item1_id: jsonpath "$.items[?(@.resource.id == '{{file1_id}}')].resource.id"
 [Asserts]
-jsonpath "$[?(@.original_id == '{{file1_id}}')].id" isString
-jsonpath "$[?(@.original_id == '{{file1_id}}')].item_type" == "file"
+jsonpath "$.items[?(@.resource.id == '{{file1_id}}')].resource.id" isString
+jsonpath "$.items[?(@.resource.id == '{{file1_id}}')].resource_type" == "file"
 
 
 DELETE {{base_url}}/api/trash/{{trash_item1_id}}
@@ -219,15 +219,15 @@ HTTP 204
 # Step 10 – Permanently delete file 2 from trash
 #           ref_count hits 0 → blob and its disk thumbnail deleted
 # ─────────────────────────────────────────────────────────────
-GET {{base_url}}/api/trash
+GET {{base_url}}/api/trash/resources
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Captures]
-trash_item2_id: jsonpath "$[?(@.original_id == '{{file2_id}}')].id"
+trash_item2_id: jsonpath "$.items[?(@.resource.id == '{{file2_id}}')].resource.id"
 [Asserts]
-jsonpath "$[?(@.original_id == '{{file2_id}}')].id" isString
-jsonpath "$[?(@.original_id == '{{file2_id}}')].item_type" == "file"
+jsonpath "$.items[?(@.resource.id == '{{file2_id}}')].resource.id" isString
+jsonpath "$.items[?(@.resource.id == '{{file2_id}}')].resource_type" == "file"
 
 
 DELETE {{base_url}}/api/trash/{{trash_item2_id}}
@@ -254,15 +254,15 @@ Authorization: Bearer {{token}}
 HTTP 204
 
 
-GET {{base_url}}/api/trash
+GET {{base_url}}/api/trash/resources
 Authorization: Bearer {{token}}
 
 HTTP 200
 [Captures]
-trash_folder_id: jsonpath "$[?(@.original_id == '{{test_folder_id}}')].id"
+trash_folder_id: jsonpath "$.items[?(@.resource.id == '{{test_folder_id}}')].resource.id"
 [Asserts]
-jsonpath "$[?(@.original_id == '{{test_folder_id}}')].id" isString
-jsonpath "$[?(@.original_id == '{{test_folder_id}}')].item_type" == "folder"
+jsonpath "$.items[?(@.resource.id == '{{test_folder_id}}')].resource.id" isString
+jsonpath "$.items[?(@.resource.id == '{{test_folder_id}}')].resource_type" == "folder"
 
 
 DELETE {{base_url}}/api/trash/{{trash_folder_id}}
