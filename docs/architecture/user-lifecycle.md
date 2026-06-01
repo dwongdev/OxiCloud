@@ -124,10 +124,7 @@ These are codified in the module-level docstring of `application/ports/user_life
 | `AuthzCacheLifecycleHook` | `src/infrastructure/services/pg_acl_engine.rs` (same module as the Moka cache it invalidates) | `on_user_logout` + `on_user_deleted`: `engine.invalidate_user_groups_cache(user.id())` — drops the cached transitive-group expansion immediately so a re-login (or a re-created account with the same id) sees fresh memberships without waiting for the 30 s TTL. `on_user_created` + `on_user_login`: `Ok(())` (no stale entry could exist for these). |
 | `SessionRevocationLifecycleHook` | `src/application/services/user_lifecycle_service.rs` (co-located with dispatcher; no dedicated session service module today) | `on_user_deleted`: explicit `session_storage.revoke_all_user_sessions(user.id())` + aggregate audit event (`event = "user.sessions_revoked_on_delete", count = N`). Replaces the silent FK CASCADE with an observable revocation. All other events: `Ok(())`. |
 | `DeletionMode` | enum on the trait | Distinguishes admin-initiated delete (`AdminDelete` — currently identical to GDPR but reserved for a future trash-with-retention policy) from GDPR right-to-erasure purge (`GdprPurge` — for a future sweeper). PR 4 ships the variants; future PRs may add per-mode behaviour. |
-
-Subsequent PRs add:
-
-- `ExternalIdentityLifecycleHook` (PR 5, stub for now) — populated by the upcoming magic-link external-user feature.
+| `ExternalIdentityLifecycleHook` *(no-op stub)* | `src/application/services/external_identity_service.rs` (own module — the future home of the magic-link / OIDC / OCM provenance service) | All four methods are explicit `Ok(())` today. The magic-link PR sequence will populate them: `on_user_created` will INSERT into the future `auth.user_external_identity` side-table for `is_external` users; `on_user_login` will bump `last_verified_at` for GDPR-sweeper purposes; `on_user_logout` and `on_user_deleted` will stay no-ops (FK CASCADE handles row removal). The stub lands now so the magic-link PR fills in hook bodies without touching DI registration. |
 
 ### How the delete transaction composes
 

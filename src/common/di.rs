@@ -711,7 +711,16 @@ impl AppServiceFactory {
             //                                       delete (with audit) —
             //                                       replaces the silent FK
             //                                       CASCADE.
-            // PR 5 will append ExternalIdentityLifecycleHook (stub).
+            //   5. ExternalIdentityLifecycleHook  — STUB. No-op for every
+            //                                       event today; the
+            //                                       magic-link / OIDC-only /
+            //                                       OCM PR will fill it in
+            //                                       to populate
+            //                                       `auth.user_external_identity`.
+            //                                       Last in the chain so it
+            //                                       observes the latest user
+            //                                       state before the chain
+            //                                       commits.
             let session_repo_for_hook = Arc::new(SessionPgRepository::new(pool.clone()));
             let user_lifecycle = Arc::new(
                 crate::application::services::user_lifecycle_service::UserLifecycleService::new()
@@ -732,6 +741,9 @@ impl AppServiceFactory {
                         crate::application::services::user_lifecycle_service::SessionRevocationLifecycleHook::new(
                             session_repo_for_hook,
                         ),
+                    ))
+                    .with_hook(Arc::new(
+                        crate::application::services::external_identity_service::ExternalIdentityLifecycleHook,
                     )),
             );
 

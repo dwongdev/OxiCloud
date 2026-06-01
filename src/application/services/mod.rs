@@ -6,6 +6,7 @@ pub mod blob_lifecycle_service;
 pub mod calendar_service;
 pub mod contact_service;
 pub mod device_auth_service;
+pub mod external_identity_service;
 pub mod favorites_service;
 pub mod file_lifecycle_service;
 pub mod file_management_service;
