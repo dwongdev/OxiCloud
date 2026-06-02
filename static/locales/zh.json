@@ -381,6 +381,8 @@
         "login_title": "登录",
         "username": "用户名",
         "username_placeholder": "输入你的用户名",
+        "login_identifier": "用户名或邮箱",
+        "login_identifier_placeholder": "请输入用户名或邮箱",
         "password": "密码",
         "password_placeholder": "输入你的密码",
         "login_button": "登录",

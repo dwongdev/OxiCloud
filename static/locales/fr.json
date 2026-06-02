@@ -382,6 +382,8 @@
         "login_title": "Se connecter",
         "username": "Nom d'utilisateur",
         "username_placeholder": "Entrez votre nom d'utilisateur",
+        "login_identifier": "Nom d'utilisateur ou e-mail",
+        "login_identifier_placeholder": "Saisissez votre nom d'utilisateur ou e-mail",
         "password": "Mot de passe",
         "password_placeholder": "Entrez votre mot de passe",
         "login_button": "Se connecter",

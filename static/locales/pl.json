@@ -381,6 +381,8 @@
         "login_title": "Zaloguj się",
         "username": "Nazwa użytkownika",
         "username_placeholder": "Wprowadź nazwę użytkownika",
+        "login_identifier": "Nazwa użytkownika lub e-mail",
+        "login_identifier_placeholder": "Wpisz nazwę użytkownika lub e-mail",
         "password": "Hasło",
         "password_placeholder": "Wprowadź hasło",
         "login_button": "Zaloguj się",

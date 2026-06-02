@@ -381,6 +381,8 @@
         "login_title": "サインイン",
         "username": "ユーザー名",
         "username_placeholder": "ユーザー名を入力",
+        "login_identifier": "ユーザー名またはメールアドレス",
+        "login_identifier_placeholder": "ユーザー名またはメールアドレスを入力",
         "password": "パスワード",
         "password_placeholder": "パスワードを入力",
         "login_button": "サインイン",

@@ -67,6 +67,13 @@ impl From<User> for UserDto {
 
 #[derive(Debug, Serialize, Deserialize, Clone, ToSchema)]
 pub struct LoginDto {
+    /// Identifier the user typed. Accepts BOTH a username (no `@`) and
+    /// an email address (`@` present). The server dispatches on
+    /// `@`-in-input: with `@` it looks up by email; without, by
+    /// username. The two namespaces are provably disjoint (PR 16
+    /// forbids `@` in usernames), so a single field handles both
+    /// without ambiguity. The frontend submits whatever the user
+    /// typed in the "Username or email" field as-is.
     pub username: String,
     pub password: String,
 }

@@ -381,6 +381,8 @@
         "login_title": "Inloggen",
         "username": "Gebruikersnaam",
         "username_placeholder": "Voer je gebruikersnaam in",
+        "login_identifier": "Gebruikersnaam of e-mail",
+        "login_identifier_placeholder": "Voer uw gebruikersnaam of e-mailadres in",
         "password": "Wachtwoord",
         "password_placeholder": "Voer je wachtwoord in",
         "login_button": "Inloggen",

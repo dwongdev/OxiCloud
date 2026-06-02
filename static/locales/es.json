@@ -381,6 +381,8 @@
         "login_title": "Iniciar sesión",
         "username": "Usuario",
         "username_placeholder": "Ingresa tu nombre de usuario",
+        "login_identifier": "Usuario o correo electrónico",
+        "login_identifier_placeholder": "Ingresa tu usuario o correo electrónico",
         "password": "Contraseña",
         "password_placeholder": "Ingresa tu contraseña",
         "login_button": "Iniciar sesión",

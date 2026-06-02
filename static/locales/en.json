@@ -382,6 +382,8 @@
         "login_title": "Sign in",
         "username": "Username",
         "username_placeholder": "Enter your username",
+        "login_identifier": "Username or email",
+        "login_identifier_placeholder": "Enter your username or email",
         "password": "Password",
         "password_placeholder": "Enter your password",
         "login_button": "Sign in",

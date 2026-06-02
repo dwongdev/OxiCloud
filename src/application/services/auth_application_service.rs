@@ -432,26 +432,30 @@ impl AuthApplicationService {
     }
 
     pub async fn login(&self, dto: LoginDto) -> Result<AuthResponseDto, DomainError> {
-        // Find user
-        let mut user = self
-            .user_storage
-            .get_user_by_username(&dto.username)
-            .await
-            .map_err(|_| {
-                // Audit: unknown-username login attempt. Reason key kept
-                // stable so log search can aggregate without parsing the
-                // human-readable message. Caller's client IP + request id
-                // are attached automatically by the request-scope span.
-                tracing::info!(
-                    target: "audit",
-                    event = "auth.login_rejected",
-                    reason = "unknown_user",
-                    attempted_username = %dto.username,
-                    "🔐 login rejected: no such user '{}'",
-                    dto.username,
-                );
-                DomainError::new(ErrorKind::AccessDenied, "Auth", "Invalid credentials")
-            })?;
+        // Dispatch on `@` in the input: presence of `@` means an email
+        // was typed, absence means a username. The two namespaces are
+        // provably disjoint (PR 16 forbids `@` in usernames), so this
+        // is unambiguous — one DB lookup, no fallback chain.
+        let lookup = if dto.username.contains('@') {
+            self.user_storage.get_user_by_email(&dto.username).await
+        } else {
+            self.user_storage.get_user_by_username(&dto.username).await
+        };
+        let mut user = lookup.map_err(|_| {
+            // Audit: unknown-identifier login attempt. Reason key kept
+            // stable so log search can aggregate without parsing the
+            // human-readable message. Caller's client IP + request id
+            // are attached automatically by the request-scope span.
+            tracing::info!(
+                target: "audit",
+                event = "auth.login_rejected",
+                reason = "unknown_user",
+                attempted_username = %dto.username,
+                "🔐 login rejected: no such user '{}'",
+                dto.username,
+            );
+            DomainError::new(ErrorKind::AccessDenied, "Auth", "Invalid credentials")
+        })?;
 
         // Check if user is active
         if !user.is_active() {

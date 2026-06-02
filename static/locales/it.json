@@ -381,6 +381,8 @@
         "login_title": "Accedi",
         "username": "Nome utente",
         "username_placeholder": "Inserisci il tuo nome utente",
+        "login_identifier": "Nome utente o email",
+        "login_identifier_placeholder": "Inserisci il tuo nome utente o email",
         "password": "Password",
         "password_placeholder": "Inserisci la tua password",
         "login_button": "Accedi",

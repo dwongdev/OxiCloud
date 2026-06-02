@@ -381,6 +381,8 @@
         "login_title": "로그인",
         "username": "사용자 이름",
         "username_placeholder": "사용자 이름을 입력하세요",
+        "login_identifier": "사용자 이름 또는 이메일",
+        "login_identifier_placeholder": "사용자 이름 또는 이메일을 입력하세요",
         "password": "비밀번호",
         "password_placeholder": "비밀번호를 입력하세요",
         "login_button": "로그인",

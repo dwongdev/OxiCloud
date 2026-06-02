@@ -381,6 +381,8 @@
         "login_title": "تسجيل الدخول",
         "username": "اسم المستخدم",
         "username_placeholder": "أدخل اسم المستخدم",
+        "login_identifier": "اسم المستخدم أو البريد الإلكتروني",
+        "login_identifier_placeholder": "أدخل اسم المستخدم أو البريد الإلكتروني",
         "password": "كلمة المرور",
         "password_placeholder": "أدخل كلمة المرور",
         "login_button": "تسجيل الدخول",

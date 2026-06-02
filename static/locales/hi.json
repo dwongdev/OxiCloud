@@ -381,6 +381,8 @@
         "login_title": "साइन इन",
         "username": "उपयोगकर्ता नाम",
         "username_placeholder": "अपना उपयोगकर्ता नाम दर्ज करें",
+        "login_identifier": "उपयोगकर्ता नाम या ईमेल",
+        "login_identifier_placeholder": "अपना उपयोगकर्ता नाम या ईमेल दर्ज करें",
         "password": "पासवर्ड",
         "password_placeholder": "अपना पासवर्ड दर्ज करें",
         "login_button": "साइन इन",

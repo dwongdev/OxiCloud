@@ -381,6 +381,8 @@
         "login_title": "Вход",
         "username": "Имя пользователя",
         "username_placeholder": "Введите имя пользователя",
+        "login_identifier": "Имя пользователя или email",
+        "login_identifier_placeholder": "Введите имя пользователя или email",
         "password": "Пароль",
         "password_placeholder": "Введите пароль",
         "login_button": "Войти",

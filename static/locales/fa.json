@@ -381,6 +381,8 @@
         "login_title": "ورود",
         "username": "نام‌کاربری",
         "username_placeholder": "نام‌کاربری خود را وارد کنید",
+        "login_identifier": "نام کاربری یا ایمیل",
+        "login_identifier_placeholder": "نام کاربری یا ایمیل خود را وارد کنید",
         "password": "گذرواژه",
         "password_placeholder": "گذرواژه خود را وارد کنید",
         "login_button": "ورود",
