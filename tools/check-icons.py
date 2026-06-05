@@ -3,9 +3,18 @@
 check-icons.py — Audit FA icon usage against the inline SVG registry.
 
 Usage:
-    python3 tools/check-icons.py [--dry-run]
+    python3 tools/check-icons.py [--dry-run] [--check-only]
 
-What it does:
+Modes:
+    (default)     Scan, diff, and **patch** icons.js — clones Font-Awesome
+                  to tmp/ if missing so SVG paths can be resolved.
+    --dry-run     Same as default but print the proposed insertions
+                  instead of writing icons.js.
+    --check-only  CI-friendly: just scan + diff and exit with status 1
+                  if any used FA icon is absent from OxiIcons. No
+                  Font-Awesome clone, no file writes, no SVG parsing.
+
+What the full mode does:
   1. Scans every file under static/ for  fas fa-<name>  occurrences.
   2. Reads the OxiIcons registry from static/js/core/icons.js.
   3. For each icon name that is missing from the registry, looks up
@@ -29,25 +38,30 @@ STATIC_DIR  = REPO_ROOT / "static"
 ICONS_JS    = STATIC_DIR / "js" / "core" / "icons.js"
 FA_SVG_DIR  = REPO_ROOT / "tmp" / "Font-Awesome" / "svgs" / "solid"
 
-DRY_RUN = "--dry-run" in sys.argv
+DRY_RUN    = "--dry-run"    in sys.argv
+CHECK_ONLY = "--check-only" in sys.argv
 
 # ── 0. Ensure Font-Awesome source is available ────────────────────────────────
-TMP_DIR = REPO_ROOT / "tmp"
-if not TMP_DIR.exists():
-    print(f"Creating {TMP_DIR.relative_to(REPO_ROOT)}/")
-    TMP_DIR.mkdir(parents=True, exist_ok=True)
+# Skipped in --check-only mode — that path stops after the diff (step 3)
+# so it never needs to resolve SVG sources. This keeps CI runs offline,
+# fast, and free of clone side effects in the checkout dir.
+if not CHECK_ONLY:
+    TMP_DIR = REPO_ROOT / "tmp"
+    if not TMP_DIR.exists():
+        print(f"Creating {TMP_DIR.relative_to(REPO_ROOT)}/")
+        TMP_DIR.mkdir(parents=True, exist_ok=True)
 
-FA_REPO = TMP_DIR / "Font-Awesome"
-if not FA_REPO.exists():
-    print(f"Font-Awesome not found at {FA_REPO.relative_to(REPO_ROOT)} — cloning …")
-    result = subprocess.run(
-        ["git", "clone", "https://github.com/FortAwesome/Font-Awesome.git", str(FA_REPO)],
-        check=False,
-    )
-    if result.returncode != 0:
-        print("✗ git clone failed — cannot continue without Font-Awesome source.")
-        sys.exit(1)
-    print("✓ Font-Awesome cloned successfully.\n")
+    FA_REPO = TMP_DIR / "Font-Awesome"
+    if not FA_REPO.exists():
+        print(f"Font-Awesome not found at {FA_REPO.relative_to(REPO_ROOT)} — cloning …")
+        result = subprocess.run(
+            ["git", "clone", "https://github.com/FortAwesome/Font-Awesome.git", str(FA_REPO)],
+            check=False,
+        )
+        if result.returncode != 0:
+            print("✗ git clone failed — cannot continue without Font-Awesome source.")
+            sys.exit(1)
+        print("✓ Font-Awesome cloned successfully.\n")
 
 # ── 1. Scan static/ for all  fas fa-<name>  occurrences ───────────────────────
 FA_RE = re.compile(r'\bfas fa-([\w-]+)')
@@ -103,6 +117,22 @@ if not missing:
     sys.exit(0)
 
 print(f"\n{len(missing)} missing icon(s):")
+
+# ── 3b. CI gate ───────────────────────────────────────────────────────────────
+# In --check-only mode we report the missing names and stop here. The
+# default mode continues into the SVG-resolve + patch path below.
+if CHECK_ONLY:
+    for name, files in sorted(missing.items()):
+        print(f"  • {name:30s}  used in: {', '.join(files)}")
+    print(
+        f"\n✗ {len(missing)} icon(s) referenced in static/ are absent from "
+        f"OxiIcons in {ICONS_JS.relative_to(REPO_ROOT)}."
+    )
+    print(
+        "  Run `python3 tools/check-icons.py` locally (without "
+        "--check-only) to auto-add them from Font-Awesome."
+    )
+    sys.exit(1)
 
 # ── 4. Resolve each missing icon from FA SVG files ────────────────────────────
 VIEWBOX_RE = re.compile(r'viewBox="0 0 (\d+) (\d+)"')
