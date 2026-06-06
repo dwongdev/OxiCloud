@@ -411,7 +411,11 @@ impl UserRepository for UserPgRepository {
         Ok(user)
     }
 
-    /// Updates only the storage usage of a user
+    /// Updates only the storage usage of a user.
+    ///
+    /// The `IS DISTINCT FROM` guard makes this a no-op when the value is
+    /// unchanged — which is the common case for the periodic reconciliation
+    /// sweep — so it produces no dead tuple and no WAL when nothing changed.
     async fn update_storage_usage(
         &self,
         user_id: Uuid,
@@ -420,10 +424,10 @@ impl UserRepository for UserPgRepository {
         sqlx::query(
             r#"
             UPDATE auth.users
-            SET 
+            SET
                 storage_used_bytes = $2,
                 updated_at = NOW()
-            WHERE id = $1
+            WHERE id = $1 AND storage_used_bytes IS DISTINCT FROM $2
             "#,
         )
         .bind(user_id)

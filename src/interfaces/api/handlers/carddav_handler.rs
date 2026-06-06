@@ -141,12 +141,10 @@ fn strip_username_prefix(path: &str) -> &str {
         } else {
             &path[pos + 1..]
         }
+    } else if uuid::Uuid::parse_str(path).is_ok() {
+        path
     } else {
-        if uuid::Uuid::parse_str(path).is_ok() {
-            path
-        } else {
-            ""
-        }
+        ""
     }
 }
 

@@ -633,6 +633,10 @@ impl AppServiceFactory {
                 user_repository,
             ),
         );
+        // Keep cached storage usage fresh off the request path: GET /api/auth/me
+        // no longer recomputes the O(N) SUM per call; a periodic sweep does it
+        // instead (on the maintenance pool).
+        service.start_reconciliation_job(self.config.storage.usage_reconcile_secs);
         tracing::info!("Storage usage service initialized");
         service
     }

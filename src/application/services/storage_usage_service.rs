@@ -52,7 +52,12 @@ impl StorageUsageService {
     }
 
     /// Calculates a user's storage usage by summing all their file sizes.
-    /// Uses a direct SQL query for O(1) performance.
+    ///
+    /// This is `SUM(size)` over the user's non-trashed files — O(number of
+    /// files), backed by the `idx_files_user_size_active` covering partial
+    /// index so it runs as an index-only scan. It is NOT called on the request
+    /// path; only by the per-upload update and the background reconciliation
+    /// sweep.
     async fn calculate_user_storage_usage(&self, user_id: Uuid) -> Result<i64, DomainError> {
         debug!("Calculating storage for user: {}", user_id);
 
@@ -104,6 +109,37 @@ impl StorageUsageService {
         );
 
         Ok(total_usage)
+    }
+
+    /// Spawn a background task that periodically reconciles every user's cached
+    /// `storage_used_bytes` against the actual sum of their files.
+    ///
+    /// `GET /api/auth/me` no longer recomputes usage on the request path; this
+    /// sweep (plus the per-upload update) keeps the cached value current for
+    /// all mutations — including deletes and trash — without any O(N) work on a
+    /// hot endpoint. Runs on the maintenance pool. The first sweep is deferred
+    /// by one interval so it never adds load at boot.
+    pub fn start_reconciliation_job(&self, interval_secs: u64) {
+        // Floor the interval so a misconfiguration can't busy-loop the sweep.
+        let interval_secs = interval_secs.max(30);
+        let service = self.clone();
+        info!(
+            "Starting storage-usage reconciliation job (every {}s)",
+            interval_secs
+        );
+        task::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+            // tokio's first `tick()` fires immediately — consume it so the
+            // first real sweep happens one interval after startup.
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                debug!("Running scheduled storage-usage reconciliation");
+                if let Err(e) = service.update_all_users_storage_usage().await {
+                    error!("Scheduled storage-usage reconciliation failed: {}", e);
+                }
+            }
+        });
     }
 }
 

@@ -211,6 +211,11 @@ pub struct StorageConfig {
     /// Maximum upload file size in bytes (default: 10 GB).
     /// Applied as a hard limit to WebDAV PUT and streaming uploads.
     pub max_upload_size: usize,
+    /// Interval (seconds) of the background sweep that reconciles every user's
+    /// cached `storage_used_bytes` with the real sum of their files. Keeps the
+    /// quota fresh for all mutations without recomputing on the request path.
+    /// Default: 600 (10 min). Env: `OXICLOUD_STORAGE_USAGE_RECONCILE_SECS`.
+    pub usage_reconcile_secs: u64,
     /// Which blob storage backend to use (`local`, `s3`, or `azure`).
     pub backend: StorageBackendType,
     /// S3-compatible backend configuration (used when `backend == S3`).
@@ -348,6 +353,7 @@ impl Default for StorageConfig {
             parallel_threshold: 100 * 1024 * 1024, // 100 MB
             trash_retention_days: 30,              // 30 days
             max_upload_size: MAX_UPLOAD_SIZE,
+            usage_reconcile_secs: 600, // 10 minutes
             backend: StorageBackendType::Local,
             s3: None,
             azure: None,
@@ -1210,6 +1216,14 @@ impl AppConfig {
             && let Ok(val) = max_upload
         {
             config.storage.max_upload_size = val;
+        }
+
+        // Background storage-usage reconciliation interval
+        if let Ok(secs) =
+            env::var("OXICLOUD_STORAGE_USAGE_RECONCILE_SECS").map(|v| v.parse::<u64>())
+            && let Ok(val) = secs
+        {
+            config.storage.usage_reconcile_secs = val;
         }
 
         // Storage backend selection

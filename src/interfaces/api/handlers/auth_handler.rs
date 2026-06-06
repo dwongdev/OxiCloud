@@ -434,7 +434,7 @@ pub async fn refresh_token(
     Ok(response)
 }
 
-/// Return the authenticated user's profile, including live storage usage.
+/// Return the authenticated user's profile, including cached storage usage.
 #[utoipa::path(
     get,
     path = "/api/auth/me",
@@ -454,29 +454,13 @@ pub async fn get_current_user(
         .as_ref()
         .ok_or_else(|| AppError::internal_error("Authentication service not configured"))?;
 
-    // First, update the storage usage statistics
-    // IMPORTANT: We await the calculation to return updated data
-    if let Some(storage_usage_service) = state.storage_usage_service.as_ref() {
-        // Calculate storage synchronously (we await the result)
-        match storage_usage_service
-            .update_user_storage_usage(user_id)
-            .await
-        {
-            Ok(usage) => {
-                tracing::info!(
-                    "Updated storage usage for user {}: {} bytes",
-                    user_id,
-                    usage
-                );
-            }
-            Err(e) => {
-                // Only log a warning, don't fail the entire request
-                tracing::warn!("Failed to update storage usage for user {}: {}", user_id, e);
-            }
-        }
-    }
-
-    // Now get the user data WITH the updated storage
+    // Storage usage is served from the cached `storage_used_bytes` column —
+    // it is NOT recomputed here. Recomputing on this hot endpoint meant an
+    // O(N) `SUM(size)` over all the user's files plus an `UPDATE` of
+    // `auth.users` on every single call (one of the most frequent endpoints).
+    // The cached value is kept current by the per-upload update and a periodic
+    // background reconciliation sweep
+    // (see `StorageUsageService::start_reconciliation_job`).
     let user = auth_service
         .auth_application_service
         .get_user_by_id(user_id)
