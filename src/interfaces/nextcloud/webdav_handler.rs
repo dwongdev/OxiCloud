@@ -61,10 +61,32 @@ pub fn nc_to_internal_path(username: &str, subpath: &str) -> Result<String, AppE
     Ok(format!("{}/{}", home, subpath))
 }
 
+/// Build the Nextcloud DAV href for a **collection** (folder). Always
+/// terminates with `/` — RFC 4918 §5.2 requires collection URLs to end
+/// in a slash, and the Nextcloud desktop client strictly enforces this
+/// for the "own entry" href in PROPFIND multi-status responses: a
+/// PROPFIND on `/remote.php/dav/files/admin/ext/` whose first response
+/// `<d:href>` doesn't end in `/` aborts the parse with
+/// `Invalid href "<…>" expected starting with "<requested-url>"` and
+/// surfaces as `Network request error "Erreur inconnue" HTTP status
+/// 207` in the client log. Files use [`nc_href`] (no trailing slash).
+pub fn nc_collection_href(username: &str, subpath: &str) -> String {
+    let h = nc_href(username, subpath);
+    if h.ends_with('/') {
+        h
+    } else {
+        format!("{}/", h)
+    }
+}
+
 /// Build the Nextcloud DAV href for a resource.
 ///
 /// Each path segment is URL-encoded individually so filenames with spaces,
 /// `#`, `%`, or non-ASCII characters produce valid PROPFIND hrefs.
+///
+/// Returns NO trailing slash for non-empty subpaths. Callers rendering
+/// a **collection** must use [`nc_collection_href`] (or append `/`
+/// manually) to satisfy RFC 4918 §5.2 and the NC client's parser.
 pub fn nc_href(username: &str, subpath: &str) -> String {
     let subpath = subpath.trim_matches('/');
     let encoded_user = urlencoding::encode(username);
@@ -119,9 +141,18 @@ pub async fn handle_nc_webdav(
 // ──────────────────── OPTIONS ────────────────────
 
 fn handle_options() -> Result<Response<Body>, AppError> {
+    // Advertise WebDAV compliance classes 1 + 3 only.
+    // Class 2 (LOCK/UNLOCK) is intentionally omitted because the NC
+    // surface has no LOCK/UNLOCK dispatch arm — claiming class 2
+    // would invite clients (notably the NC desktop sync engine) to
+    // start sending LOCK requests we then 405. Class 3 covers the
+    // weak-resource-validators behaviour PROPFIND already implements.
+    // If LOCK is ever wired in here, restore "1, 2, 3" in the same
+    // commit as the LOCK arm — never split the advertisement from
+    // the implementation.
     Ok(Response::builder()
         .status(StatusCode::OK)
-        .header(HEADER_DAV, "1, 2, 3")
+        .header(HEADER_DAV, "1, 3")
         .header(
             header::ALLOW,
             "OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, MOVE, PROPFIND, PROPPATCH, REPORT, SEARCH",
@@ -393,23 +424,40 @@ async fn handle_proppatch(
 
     let body_str = String::from_utf8_lossy(&body_bytes);
 
+    // Resolve the target resource once — needed for two things:
+    //  1. Applying the oc:favorite mutation when the PROPPATCH body
+    //     carries one (`item_type` distinguishes file vs folder rows
+    //     in the favorites table).
+    //  2. Picking the right `<d:href>` shape in the multi-status
+    //     response: collection (folder) hrefs MUST end in `/` per
+    //     RFC 4918 §5.2 — see `nc_collection_href` for the full
+    //     reasoning. Without this distinction the NC desktop client
+    //     parser aborted on PROPFIND; PROPPATCH would hit the same
+    //     wall the moment the user favourited a folder.
+    //
+    // When the resource is missing we tolerate it for the no-op
+    // PROPPATCH path (no favorite directive in the body) — matches
+    // the prior behaviour. A PROPPATCH that *does* try to set
+    // favorite on a missing resource still returns NotFound.
+    let internal_path = nc_to_internal_path(&user.username, subpath)?;
+    let file_service = &state.applications.file_retrieval_service;
+    let folder_service = &state.applications.folder_service;
+    let resource = if let Ok(file) = file_service.get_file_by_path(&internal_path).await {
+        Some((file.id, "file"))
+    } else if let Ok(folder) = folder_service.get_folder_by_path(&internal_path).await {
+        Some((folder.id, "folder"))
+    } else {
+        None
+    };
+    let is_collection = matches!(resource, Some((_, "folder")));
+
     // Parse oc:favorite value from PROPPATCH XML.
     let favorite_value = parse_proppatch_favorite(&body_str);
 
     if let Some(value) = favorite_value {
-        let internal_path = nc_to_internal_path(&user.username, subpath)?;
-        let file_service = &state.applications.file_retrieval_service;
-        let folder_service = &state.applications.folder_service;
-
-        // Determine item_id and item_type.
-        let (item_id, item_type) =
-            if let Ok(file) = file_service.get_file_by_path(&internal_path).await {
-                (file.id, "file")
-            } else if let Ok(folder) = folder_service.get_folder_by_path(&internal_path).await {
-                (folder.id, "folder")
-            } else {
-                return Err(AppError::not_found("Resource not found"));
-            };
+        let Some((item_id, item_type)) = resource else {
+            return Err(AppError::not_found("Resource not found"));
+        };
 
         if let Some(fav_svc) = state.favorites_service.as_ref() {
             if value == 1 {
@@ -430,8 +478,15 @@ async fn handle_proppatch(
         }
     }
 
-    // Return 207 Multi-Status with success response using quick_xml for safe escaping.
-    let href = nc_href(&user.username, subpath);
+    // Return 207 Multi-Status with success response using quick_xml
+    // for safe escaping. Collection vs file href chosen by resource
+    // type to satisfy the RFC 4918 §5.2 trailing-slash invariant —
+    // see the comment block at the top of this function.
+    let href = if is_collection {
+        nc_collection_href(&user.username, subpath)
+    } else {
+        nc_href(&user.username, subpath)
+    };
     let mut buf = Vec::new();
     {
         let mut xml = Writer::new(&mut buf);
@@ -926,9 +981,10 @@ async fn write_nc_multistatus<W: std::io::Write>(
     ms.push_attribute(("xmlns:ocs", "http://open-collaboration-services.org/ns"));
     xml.write_event(Event::Start(ms)).xml_err()?;
 
-    // Current folder entry.
+    // Current folder entry. Collection hrefs MUST end in `/` (RFC 4918
+    // §5.2 + strict NC-client enforcement — see `nc_collection_href`).
     if let Some(f) = folder {
-        let href = nc_href(username, subpath);
+        let href = nc_collection_href(username, subpath);
         let file_id = resolve_folder_id(file_id_svc, &f.id).await;
         let oc_id = file_id.map(|id| format_oc_id(id, file_id_svc));
         write_folder_response(
@@ -972,14 +1028,14 @@ async fn write_nc_multistatus<W: std::io::Write>(
             )?;
         }
 
-        // Subfolders.
+        // Subfolders — also collections, same trailing-slash rule.
         for sf in subfolders {
             let child_sub = if subpath.is_empty() {
                 sf.name.clone()
             } else {
                 format!("{}/{}", subpath.trim_end_matches('/'), sf.name)
             };
-            let href = format!("{}/", nc_href(username, &child_sub));
+            let href = nc_collection_href(username, &child_sub);
             let file_id = resolve_folder_id(file_id_svc, &sf.id).await;
             let oc_id = file_id.map(|id| format_oc_id(id, file_id_svc));
             write_folder_response(
@@ -1266,6 +1322,41 @@ mod tests {
     fn test_href_encodes_special_chars() {
         let href = nc_href("alice", "file#1.txt");
         assert!(href.contains("file%231.txt"));
+    }
+
+    // ── nc_collection_href ──
+    // RFC 4918 §5.2 requires a collection URL to end in '/'. The NC
+    // desktop client at `networkjobs.cpp:234` aborts the PROPFIND
+    // parse with `Invalid href "<…>" expected starting with
+    // "<requested-url>"` if the own-entry href is missing the slash.
+    // These tests pin the helper's behaviour so the regression can't
+    // come back silently.
+
+    #[test]
+    fn test_collection_href_appends_slash_when_missing() {
+        assert_eq!(
+            nc_collection_href("alice", "ext"),
+            "/remote.php/dav/files/alice/ext/"
+        );
+    }
+
+    #[test]
+    fn test_collection_href_idempotent_at_root() {
+        // Root subpath already ends in '/' — don't double-append.
+        assert_eq!(
+            nc_collection_href("alice", ""),
+            "/remote.php/dav/files/alice/"
+        );
+    }
+
+    #[test]
+    fn test_collection_href_preserves_encoding() {
+        // Wrapping must not re-encode or double-encode already-encoded
+        // segments.
+        assert_eq!(
+            nc_collection_href("alice", "My Photos/2024"),
+            "/remote.php/dav/files/alice/My%20Photos/2024/"
+        );
     }
 
     // ── extract_nc_subpath_from_dest ──
