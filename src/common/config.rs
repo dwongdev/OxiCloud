@@ -254,6 +254,14 @@ pub struct StorageConfig {
     /// bound on how stale an ancestor folder's ETag can be after a change.
     /// Default: 500. Env: `OXICLOUD_TREE_ETAG_FLUSH_MS`.
     pub tree_etag_flush_ms: u64,
+    /// Startup background migration that re-chunks legacy whole-file blobs
+    /// (written before CDC chunking landed) into chunk manifests, so Range
+    /// reads stop paying a full-blob read — and, with encryption enabled, a
+    /// full-blob decrypt. Idempotent and incremental; a no-op (one COUNT
+    /// query) once no legacy blobs remain. Disable on metered remote
+    /// backends where the one-time re-read of every legacy blob should be
+    /// scheduled deliberately. Default: true. Env: `OXICLOUD_LEGACY_RECHUNK`.
+    pub legacy_rechunk_enabled: bool,
     /// Which blob storage backend to use (`local`, `s3`, or `azure`).
     pub backend: StorageBackendType,
     /// S3-compatible backend configuration (used when `backend == S3`).
@@ -397,6 +405,7 @@ impl Default for StorageConfig {
             chunk_dir: None,
             usage_reconcile_secs: 600, // 10 minutes
             tree_etag_flush_ms: 500,
+            legacy_rechunk_enabled: true,
             backend: StorageBackendType::Local,
             s3: None,
             azure: None,
@@ -1303,6 +1312,12 @@ impl AppConfig {
             && let Ok(val) = ms
         {
             config.storage.tree_etag_flush_ms = val;
+        }
+
+        // Legacy whole-file blob re-chunk migration (startup background task)
+        if let Ok(enabled) = env::var("OXICLOUD_LEGACY_RECHUNK") {
+            config.storage.legacy_rechunk_enabled =
+                enabled.eq_ignore_ascii_case("true") || enabled == "1";
         }
 
         // Storage backend selection

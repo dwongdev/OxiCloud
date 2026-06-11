@@ -319,6 +319,18 @@ impl AppServiceFactory {
         );
         dedup_service.initialize().await?;
 
+        // One-time background migration: re-chunk pre-CDC whole-file blobs
+        // into chunk manifests so Range reads (and, with encryption, partial
+        // decrypts) stop paying for the entire blob. No-op once converged.
+        if self.config.storage.legacy_rechunk_enabled {
+            dedup_service.spawn_legacy_rechunk();
+        } else {
+            tracing::info!(
+                "Legacy re-chunk migration disabled (OXICLOUD_LEGACY_RECHUNK=false) — \
+                 pre-CDC whole-file blobs, if any, will keep using the legacy read path"
+            );
+        }
+
         tracing::info!(
             "Core services initialized: path service, file content cache, thumbnails, chunked upload, image transcode, dedup (PRIMARY blob storage)"
         );

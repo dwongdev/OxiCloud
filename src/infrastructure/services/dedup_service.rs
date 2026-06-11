@@ -1515,6 +1515,401 @@ impl DedupService {
 
         Ok((total_deleted, total_bytes))
     }
+
+    // ── Legacy whole-file blob re-chunk migration ────────────────
+    //
+    // Files uploaded before CDC chunking landed (migration
+    // 20260414000000_chunk_manifests) are stored as ONE whole-file blob with
+    // no manifest. Every legacy fallback in this service exists to serve
+    // them — and with encryption enabled, a Range read of one decrypts the
+    // ENTIRE blob (AES-GCM is all-or-nothing per blob).
+    //
+    // This migration converts each legacy blob into a regular CDC file:
+    // after it, the converted file is indistinguishable from a native CDC
+    // upload, every read takes the chunked path, and the legacy fallbacks
+    // go permanently cold (they remain as the safety net while a deployment
+    // is mid-migration; they can be deleted from the codebase once fleets
+    // report `legacy re-chunk: nothing to do`).
+    //
+    // Per-hash algorithm:
+    //   1. Spool the blob to a temp file via the normal read path (this
+    //      decrypts it when encryption is on), verifying BLAKE3 == hash.
+    //   2. CDC-chunk the spool + store chunks (`store_chunks` bumps each
+    //      distinct chunk once — the manifest's reference).
+    //   3. One short accounting TX with the blob row locked:
+    //      manifest INSERT with ref_count = N (current file rows referencing
+    //      the hash), blob ref_count -= N (those references now live on the
+    //      manifest), DELETE the blob row only if it hits exactly 0.
+    //   4. Physically delete the whole-file blob only when its row was
+    //      removed. Single-chunk files (chunk hash == file hash) keep the
+    //      physical blob — it IS the chunk; only the bookkeeping moves.
+    //
+    // Concurrency: the row lock serializes against the file-delete trigger
+    // and the legacy dedup-hit path. A racing identical upload can land one
+    // legacy reference after our commit; the blob row then survives (> 0)
+    // and that file stays readable through the legacy fallback — a bounded
+    // space leak, never data loss. A crash between step 2 and 3 leaks one
+    // +1 on that file's chunk refs (re-run re-bumps); also a bounded leak,
+    // never data loss.
+
+    /// Count legacy whole-file blobs still referenced by at least one file
+    /// row (the migration's work queue). Runs on the maintenance pool.
+    pub async fn count_legacy_blobs(&self) -> Result<i64, DomainError> {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM storage.blobs b
+              WHERE NOT EXISTS (SELECT 1 FROM storage.chunk_manifests m
+                                 WHERE m.file_hash = b.hash)
+                AND EXISTS (SELECT 1 FROM storage.files f
+                             WHERE f.blob_hash = b.hash)",
+        )
+        .fetch_one(self.maintenance_pool.as_ref())
+        .await
+        .map_err(|e| DomainError::internal_error("Dedup", format!("Count legacy blobs: {e}")))
+    }
+
+    /// Spawn the legacy re-chunk migration as a background task.
+    ///
+    /// Zero-cost when no legacy blobs exist (one COUNT query, debug log).
+    /// Called from the composition root after `initialize()`.
+    pub fn spawn_legacy_rechunk(self: &Arc<Self>) {
+        let svc = Arc::clone(self);
+        tokio::spawn(async move {
+            match svc.count_legacy_blobs().await {
+                Ok(0) => {
+                    tracing::debug!("Legacy re-chunk: no legacy whole-file blobs — nothing to do");
+                }
+                Ok(n) => {
+                    tracing::info!(
+                        "Legacy re-chunk: {n} pre-CDC whole-file blob(s) referenced by files — \
+                         starting background migration (maintenance pool)"
+                    );
+                    match svc.rechunk_legacy_blobs().await {
+                        Ok(report) => tracing::info!(
+                            migrated = report.migrated,
+                            failed = report.failed,
+                            freed_bytes = report.freed_bytes,
+                            "Legacy re-chunk complete: {} blob(s) converted to CDC manifests, \
+                             {} failed (left untouched), {} bytes of whole-file blobs freed",
+                            report.migrated,
+                            report.failed,
+                            report.freed_bytes,
+                        ),
+                        Err(e) => tracing::error!("Legacy re-chunk aborted: {e}"),
+                    }
+                }
+                Err(e) => tracing::error!("Legacy re-chunk: startup count failed: {e}"),
+            }
+        });
+    }
+
+    /// Convert every legacy whole-file blob into CDC chunks + manifest.
+    ///
+    /// Incremental and resumable: a manifest row is the per-hash "done"
+    /// marker, so re-running after a crash continues where it left off.
+    /// Per-hash failures (e.g. a corrupt blob that no longer matches its
+    /// hash) are logged, counted, and skipped — they never block the sweep.
+    pub async fn rechunk_legacy_blobs(&self) -> Result<LegacyRechunkReport, DomainError> {
+        const BATCH_SIZE: i64 = 64;
+        /// Hard cap on per-hash failures before aborting the sweep — if
+        /// this many blobs are corrupt something is systemically wrong and
+        /// an operator should look before we touch anything else.
+        const MAX_FAILURES: usize = 1_000;
+
+        let mut report = LegacyRechunkReport::default();
+        // Failed hashes are excluded from the candidate query so a corrupt
+        // blob cannot make the sweep loop forever.
+        let mut failed_hashes: Vec<String> = Vec::new();
+
+        loop {
+            let batch: Vec<(String, Option<String>)> = sqlx::query_as(
+                "SELECT b.hash, b.content_type FROM storage.blobs b
+                  WHERE NOT EXISTS (SELECT 1 FROM storage.chunk_manifests m
+                                     WHERE m.file_hash = b.hash)
+                    AND EXISTS (SELECT 1 FROM storage.files f
+                                 WHERE f.blob_hash = b.hash)
+                    AND NOT (b.hash = ANY($2))
+                  ORDER BY b.hash
+                  LIMIT $1",
+            )
+            .bind(BATCH_SIZE)
+            .bind(&failed_hashes)
+            .fetch_all(self.maintenance_pool.as_ref())
+            .await
+            .map_err(|e| {
+                DomainError::internal_error("Dedup", format!("Legacy candidate query: {e}"))
+            })?;
+
+            if batch.is_empty() {
+                break;
+            }
+
+            for (hash, content_type) in batch {
+                match self.rechunk_one_legacy_blob(&hash, content_type).await {
+                    Ok(freed) => {
+                        report.migrated += 1;
+                        report.freed_bytes += freed;
+                        if report.migrated % 50 == 0 {
+                            tracing::info!(
+                                "Legacy re-chunk progress: {} migrated, {} failed",
+                                report.migrated,
+                                report.failed
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        report.failed += 1;
+                        tracing::error!(
+                            "Legacy re-chunk: blob {} failed (left untouched): {e}",
+                            &hash[..hash.len().min(12)],
+                        );
+                        failed_hashes.push(hash);
+                        if failed_hashes.len() >= MAX_FAILURES {
+                            return Err(DomainError::internal_error(
+                                "Dedup",
+                                format!(
+                                    "Legacy re-chunk: aborting after {MAX_FAILURES} per-blob \
+                                     failures — inspect blob storage integrity"
+                                ),
+                            ));
+                        }
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        }
+
+        Ok(report)
+    }
+
+    /// Migrate a single legacy whole-file blob. Returns the number of
+    /// physical bytes freed (0 when the blob doubles as its own chunk).
+    async fn rechunk_one_legacy_blob(
+        &self,
+        hash: &str,
+        content_type: Option<String>,
+    ) -> Result<u64, DomainError> {
+        // ── 1. Spool + verify (decrypts via the normal read path) ──
+        // The spooled, hash-verified plaintext is the source of truth for
+        // sizes — `storage.blobs.size` is legacy metadata we don't trust
+        // for the manifest's Range arithmetic.
+        //
+        // The path carries a per-attempt UUID: two processes sharing a temp
+        // dir and racing on the same hash must never truncate or delete each
+        // other's in-flight spool.
+        let spool = std::env::temp_dir().join(format!(
+            "oxicloud-rechunk-{}-{}.tmp",
+            &hash[..hash.len().min(16)],
+            uuid::Uuid::new_v4()
+        ));
+        let result = self.spool_and_chunk(hash, &spool).await;
+        let _ = fs::remove_file(&spool).await;
+        let (chunk_hashes, chunk_sizes) = result?;
+        let total_size: u64 = chunk_sizes.iter().sum();
+
+        // ── 2. Accounting TX: move the file references onto the manifest ──
+        let mut tx =
+            self.maintenance_pool.begin().await.map_err(|e| {
+                DomainError::internal_error("Dedup", format!("Rechunk TX begin: {e}"))
+            })?;
+
+        // Lock the legacy blob row — serializes against the file-delete
+        // trigger and the legacy dedup-hit path for this hash.
+        let blob_row_exists = sqlx::query_scalar::<_, i32>(
+            "SELECT ref_count FROM storage.blobs WHERE hash = $1 FOR UPDATE",
+        )
+        .bind(hash)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| DomainError::internal_error("Dedup", format!("Rechunk lock blob: {e}")))?
+        .is_some();
+
+        let file_refs: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM storage.files WHERE blob_hash = $1")
+                .bind(hash)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| {
+                    DomainError::internal_error("Dedup", format!("Rechunk count refs: {e}"))
+                })?;
+
+        // ref_count = N file references; if every reference vanished while
+        // we were spooling, the zero-ref manifest is swept by the existing
+        // GC (which also unwinds the chunk refs taken in store_chunks).
+        let inserted = sqlx::query(
+            "INSERT INTO storage.chunk_manifests
+                 (file_hash, chunk_hashes, chunk_sizes, total_size, chunk_count,
+                  content_type, ref_count)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             ON CONFLICT (file_hash) DO NOTHING",
+        )
+        .bind(hash)
+        .bind(&chunk_hashes)
+        .bind(chunk_sizes.iter().map(|s| *s as i64).collect::<Vec<_>>())
+        .bind(total_size as i64)
+        .bind(chunk_hashes.len() as i32)
+        .bind(&content_type)
+        .bind(file_refs as i32)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| DomainError::internal_error("Dedup", format!("Rechunk manifest: {e}")))?
+        .rows_affected();
+
+        if inserted == 0 {
+            // A manifest appeared concurrently — only possible if the same
+            // content was re-uploaded and fully stored during our spool.
+            // Their bookkeeping is already correct; drop ours.
+            tx.rollback().await.ok();
+            self.release_chunk_refs(&chunk_hashes).await;
+            return Ok(0);
+        }
+
+        // The N file references now live on the manifest; remove them from
+        // the legacy blob and drop its row only when nothing else (other
+        // manifests using this blob as a chunk, racing legacy references)
+        // still points at it.
+        let mut blob_row_deleted = false;
+        if blob_row_exists {
+            sqlx::query(
+                "UPDATE storage.blobs
+                    SET ref_count = GREATEST(ref_count - $2, 0)
+                  WHERE hash = $1",
+            )
+            .bind(hash)
+            .bind(file_refs as i32)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                DomainError::internal_error("Dedup", format!("Rechunk deref blob: {e}"))
+            })?;
+
+            blob_row_deleted =
+                sqlx::query("DELETE FROM storage.blobs WHERE hash = $1 AND ref_count = 0")
+                    .bind(hash)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| {
+                        DomainError::internal_error("Dedup", format!("Rechunk drop blob: {e}"))
+                    })?
+                    .rows_affected()
+                    > 0;
+        }
+
+        tx.commit()
+            .await
+            .map_err(|e| DomainError::internal_error("Dedup", format!("Rechunk commit: {e}")))?;
+
+        // ── 3. Physical cleanup (after commit) ──
+        // Deleted row ⇒ the hash is not one of its own chunks (a single-chunk
+        // file keeps ref_count ≥ 1 from the manifest), but guard anyway.
+        let mut freed = 0;
+        if blob_row_deleted && !chunk_hashes.iter().any(|c| c == hash) {
+            match self.backend.delete_blob(hash).await {
+                Ok(()) => freed = total_size,
+                Err(e) => tracing::warn!(
+                    "Legacy re-chunk: converted {} but failed to delete the \
+                     old whole-file blob (GC will not retry — row is gone): {e}",
+                    &hash[..hash.len().min(12)],
+                ),
+            }
+        }
+
+        tracing::debug!(
+            "Legacy re-chunk: {} → {} chunk(s), {} file ref(s) moved to manifest{}",
+            &hash[..hash.len().min(12)],
+            chunk_hashes.len(),
+            file_refs,
+            if blob_row_deleted {
+                ", whole-file blob freed"
+            } else {
+                ""
+            },
+        );
+
+        Ok(freed)
+    }
+
+    /// Spool a legacy blob to `spool`, verify its BLAKE3 matches `hash`,
+    /// CDC-chunk it and store the chunks. Returns (chunk_hashes, chunk_sizes).
+    async fn spool_and_chunk(
+        &self,
+        hash: &str,
+        spool: &Path,
+    ) -> Result<(Vec<String>, Vec<u64>), DomainError> {
+        use tokio::io::AsyncWriteExt;
+
+        let mut stream = self.read_blob_stream(hash).await?;
+        let file = fs::File::create(spool)
+            .await
+            .map_err(|e| DomainError::internal_error("Dedup", format!("Rechunk spool: {e}")))?;
+        let mut writer = tokio::io::BufWriter::with_capacity(512 * 1024, file);
+        let mut hasher = blake3::Hasher::new();
+
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk
+                .map_err(|e| DomainError::internal_error("Dedup", format!("Rechunk read: {e}")))?;
+            hasher.update(&chunk);
+            writer
+                .write_all(&chunk)
+                .await
+                .map_err(|e| DomainError::internal_error("Dedup", format!("Rechunk write: {e}")))?;
+        }
+        writer
+            .flush()
+            .await
+            .map_err(|e| DomainError::internal_error("Dedup", format!("Rechunk flush: {e}")))?;
+
+        let actual = hasher.finalize().to_hex().to_string();
+        if actual != hash {
+            return Err(DomainError::internal_error(
+                "Dedup",
+                format!("Blob content does not match its hash (expected {hash}, got {actual})"),
+            ));
+        }
+
+        // Empty blobs can't be mmap'd by the CDC analyser; they become an
+        // empty manifest (the chunked read path streams zero chunks).
+        let spooled_len = fs::metadata(spool)
+            .await
+            .map_err(|e| DomainError::internal_error("Dedup", format!("Rechunk stat: {e}")))?
+            .len();
+        if spooled_len == 0 {
+            return Ok((Vec::new(), Vec::new()));
+        }
+
+        let chunks = Self::cdc_chunk_file(spool)
+            .await
+            .map_err(DomainError::from)?;
+        self.store_chunks(spool, &chunks).await
+    }
+
+    /// Best-effort compensation: drop the per-manifest chunk references
+    /// taken by `store_chunks` when the manifest insert was abandoned.
+    async fn release_chunk_refs(&self, chunk_hashes: &[String]) {
+        if chunk_hashes.is_empty() {
+            return;
+        }
+        if let Err(e) = sqlx::query(
+            "UPDATE storage.blobs SET ref_count = GREATEST(ref_count - 1, 0)
+              WHERE hash = ANY($1)",
+        )
+        .bind(chunk_hashes)
+        .execute(self.maintenance_pool.as_ref())
+        .await
+        {
+            tracing::warn!("Legacy re-chunk: failed to release chunk refs: {e}");
+        }
+    }
+}
+
+/// Outcome of a [`DedupService::rechunk_legacy_blobs`] sweep.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct LegacyRechunkReport {
+    /// Legacy blobs successfully converted to CDC manifests.
+    pub migrated: u64,
+    /// Blobs that failed (corrupt / unreadable) and were left untouched.
+    pub failed: u64,
+    /// Physical bytes of whole-file blobs deleted after conversion.
+    pub freed_bytes: u64,
 }
 
 // ─── Port implementation ─────────────────────────────────────────────────────
@@ -1935,5 +2330,357 @@ mod tests {
             chunks_base.len(),
             chunks_prefix.len()
         );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Integration tests for the legacy re-chunk migration — require the test
+// database (run via `just test-integration`, which spawns it and applies
+// migrations). Gated on `--cfg integration_tests` like the other PG suites.
+//
+// Each test seeds its own synthetic "legacy" state (a whole-file blob row in
+// `storage.blobs` + file rows pointing at it, no manifest) with unique
+// `rust-test-rechunk-*` names, then runs the sweep and asserts on the DB
+// state for ITS hash only — concurrent test sweeps may migrate each other's
+// blobs first, which is fine (and exercises the idempotency paths).
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(integration_tests)]
+#[allow(dead_code)]
+mod rechunk_integration_tests {
+    use super::*;
+    use crate::infrastructure::services::encrypted_blob_backend::EncryptedBlobBackend;
+    use crate::infrastructure::services::local_blob_backend::LocalBlobBackend;
+    use crate::integration_test_support::{ensure_clean_test_db, test_db_url};
+    use sqlx::Row;
+    use sqlx::postgres::PgPoolOptions;
+    use tempfile::TempDir;
+    use uuid::Uuid;
+
+    async fn test_pool() -> Arc<PgPool> {
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&test_db_url())
+            .await
+            .expect("connect to test DB — run tests/common/spawn-db.sh first");
+        ensure_clean_test_db(&pool).await;
+        Arc::new(pool)
+    }
+
+    async fn seed_user(pool: &PgPool) -> Uuid {
+        sqlx::query("SELECT id FROM auth.users LIMIT 1")
+            .fetch_one(pool)
+            .await
+            .map(|r| r.get::<Uuid, _>("id"))
+            .expect("auth.users must be seeded (init-test-schema.sh)")
+    }
+
+    /// Plain local backend in a fresh temp dir.
+    async fn local_svc(pool: &Arc<PgPool>, dir: &TempDir) -> DedupService {
+        let backend = Arc::new(LocalBlobBackend::new(&dir.path().join("blobs")));
+        backend.initialize().await.expect("init backend");
+        DedupService::new(backend, pool.clone(), pool.clone())
+    }
+
+    /// AES-256-GCM-encrypted local backend in a fresh temp dir.
+    async fn encrypted_svc(pool: &Arc<PgPool>, dir: &TempDir) -> DedupService {
+        let inner = Arc::new(LocalBlobBackend::new(&dir.path().join("blobs")));
+        inner.initialize().await.expect("init backend");
+        let key = EncryptedBlobBackend::generate_key();
+        let backend = Arc::new(EncryptedBlobBackend::new(inner, &key));
+        DedupService::new(backend, pool.clone(), pool.clone())
+    }
+
+    /// Non-trivial content of `len` bytes + a random 16-byte tail, so every
+    /// invocation produces a unique hash — stale rows left behind by a
+    /// previously failed run (panics skip cleanup) can never collide with
+    /// the current one.
+    fn content(len: usize, salt: u8) -> Vec<u8> {
+        let mut data: Vec<u8> = (0..len)
+            .map(|i| {
+                ((i % 251) as u8)
+                    .wrapping_add(salt)
+                    .wrapping_add((i / 7919) as u8)
+            })
+            .collect();
+        data.extend_from_slice(Uuid::new_v4().as_bytes());
+        data
+    }
+
+    /// Seed a pre-CDC legacy blob: physical blob via the backend + a
+    /// `storage.blobs` row (ref_count = n_files) + `n_files` file rows.
+    /// Returns (hash, file row ids). When `corrupt_stored_bytes` is Some,
+    /// the PHYSICAL content differs from the indexed hash.
+    async fn seed_legacy(
+        svc: &DedupService,
+        pool: &PgPool,
+        dir: &TempDir,
+        data: &[u8],
+        n_files: i32,
+        label: &str,
+        corrupt_stored_bytes: Option<&[u8]>,
+    ) -> (String, Vec<Uuid>) {
+        let hash = blake3::hash(data).to_hex().to_string();
+        let stored = corrupt_stored_bytes.unwrap_or(data);
+
+        let src = dir.path().join(format!("seed-{label}.tmp"));
+        tokio::fs::write(&src, stored).await.expect("write seed");
+        svc.backend().put_blob(&hash, &src).await.expect("put blob");
+
+        sqlx::query(
+            "INSERT INTO storage.blobs (hash, size, ref_count, content_type)
+             VALUES ($1, $2, $3, 'application/octet-stream')
+             ON CONFLICT (hash) DO UPDATE SET ref_count = storage.blobs.ref_count + $3",
+        )
+        .bind(&hash)
+        .bind(data.len() as i64)
+        .bind(n_files)
+        .execute(pool)
+        .await
+        .expect("insert legacy blob row");
+
+        let user_id = seed_user(pool).await;
+        let mut file_ids = Vec::new();
+        for i in 0..n_files {
+            let name = format!(
+                "rust-test-rechunk-{label}-{}-{i}",
+                &Uuid::new_v4().to_string()[..8]
+            );
+            let id: Uuid = sqlx::query_scalar(
+                "INSERT INTO storage.files (name, user_id, blob_hash, size)
+                 VALUES ($1, $2, $3, $4) RETURNING id",
+            )
+            .bind(&name)
+            .bind(user_id)
+            .bind(&hash)
+            .bind(data.len() as i64)
+            .fetch_one(pool)
+            .await
+            .expect("insert file row");
+            file_ids.push(id);
+        }
+        (hash, file_ids)
+    }
+
+    /// Best-effort cleanup of everything a test seeded/created for `hash`.
+    async fn cleanup(pool: &PgPool, hash: &str, file_ids: &[Uuid]) {
+        let chunks: Option<Vec<String>> = sqlx::query_scalar(
+            "SELECT chunk_hashes FROM storage.chunk_manifests WHERE file_hash = $1",
+        )
+        .bind(hash)
+        .fetch_optional(pool)
+        .await
+        .unwrap_or(None);
+
+        let _ = sqlx::query("DELETE FROM storage.files WHERE id = ANY($1)")
+            .bind(file_ids)
+            .execute(pool)
+            .await;
+        // Also scrub test-named rows from previously failed runs (panics
+        // skip the end-of-test cleanup) that reference the same hash.
+        let _ = sqlx::query(
+            "DELETE FROM storage.files
+              WHERE blob_hash = $1 AND name LIKE 'rust-test-rechunk-%'",
+        )
+        .bind(hash)
+        .execute(pool)
+        .await;
+        let _ = sqlx::query("DELETE FROM storage.chunk_manifests WHERE file_hash = $1")
+            .bind(hash)
+            .execute(pool)
+            .await;
+        let mut to_drop = chunks.unwrap_or_default();
+        to_drop.push(hash.to_string());
+        let _ = sqlx::query("DELETE FROM storage.blobs WHERE hash = ANY($1)")
+            .bind(&to_drop)
+            .execute(pool)
+            .await;
+    }
+
+    async fn collect(svc: &DedupService, hash: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut stream = svc.read_blob_stream(hash).await.expect("stream");
+        while let Some(chunk) = stream.next().await {
+            out.extend_from_slice(&chunk.expect("chunk"));
+        }
+        out
+    }
+
+    /// Manifest row (ref_count, total_size, chunk_hashes), if present.
+    async fn manifest(pool: &PgPool, hash: &str) -> Option<(i32, i64, Vec<String>)> {
+        sqlx::query_as(
+            "SELECT ref_count, total_size, chunk_hashes
+               FROM storage.chunk_manifests WHERE file_hash = $1",
+        )
+        .bind(hash)
+        .fetch_optional(pool)
+        .await
+        .expect("manifest query")
+    }
+
+    async fn blob_row(pool: &PgPool, hash: &str) -> Option<i32> {
+        sqlx::query_scalar("SELECT ref_count FROM storage.blobs WHERE hash = $1")
+            .bind(hash)
+            .fetch_optional(pool)
+            .await
+            .expect("blob query")
+    }
+
+    // ── 1. Multi-chunk blob: refs move to manifest, whole-file blob freed ──
+    #[tokio::test]
+    async fn rechunk_multi_chunk_moves_refs_and_frees_blob() {
+        let pool = test_pool().await;
+        let dir = TempDir::new().unwrap();
+        let svc = local_svc(&pool, &dir).await;
+
+        // 3 MiB ⇒ ≥ 3 CDC chunks (max chunk = 1 MiB), 2 referencing files.
+        let data = content(3 * 1024 * 1024, 1);
+        let (hash, files) = seed_legacy(&svc, &pool, &dir, &data, 2, "multi", None).await;
+
+        assert!(svc.count_legacy_blobs().await.unwrap() >= 1);
+        svc.rechunk_legacy_blobs().await.expect("sweep");
+
+        let (rc, total, chunks) = manifest(&pool, &hash).await.expect("manifest created");
+        assert_eq!(rc, 2, "both file references must move to the manifest");
+        assert_eq!(total, data.len() as i64);
+        assert!(chunks.len() >= 3, "3 MiB must split into ≥3 chunks");
+
+        // Whole-file blob fully dereferenced: row gone, physical file gone.
+        assert_eq!(blob_row(&pool, &hash).await, None);
+        assert!(!svc.backend().blob_exists(&hash).await.unwrap());
+
+        // Every chunk row carries exactly the manifest's reference.
+        for c in &chunks {
+            assert_eq!(blob_row(&pool, c).await, Some(1), "chunk {c}");
+        }
+
+        // Content integrity through the chunked read path + a Range that
+        // crosses a chunk boundary.
+        assert_eq!(collect(&svc, &hash).await, data);
+        let mut ranged = Vec::new();
+        let mut s = svc
+            .read_blob_range_stream(&hash, 1_500_000, Some(1_500_100))
+            .await
+            .expect("range");
+        while let Some(chunk) = s.next().await {
+            ranged.extend_from_slice(&chunk.expect("chunk"));
+        }
+        assert_eq!(ranged, &data[1_500_000..1_500_100]);
+
+        cleanup(&pool, &hash, &files).await;
+    }
+
+    // ── 2. Single-chunk blob: physical blob IS the chunk and must survive ──
+    #[tokio::test]
+    async fn rechunk_single_chunk_keeps_physical_blob() {
+        let pool = test_pool().await;
+        let dir = TempDir::new().unwrap();
+        let svc = local_svc(&pool, &dir).await;
+
+        // 50 KB < CDC_MIN_CHUNK ⇒ exactly one chunk whose hash == file hash.
+        let data = content(50 * 1024, 2);
+        let (hash, files) = seed_legacy(&svc, &pool, &dir, &data, 1, "single", None).await;
+
+        svc.rechunk_legacy_blobs().await.expect("sweep");
+
+        let (rc, total, chunks) = manifest(&pool, &hash).await.expect("manifest created");
+        assert_eq!(rc, 1);
+        assert_eq!(total, data.len() as i64);
+        assert_eq!(chunks, vec![hash.clone()], "the file IS its single chunk");
+
+        // Blob row survives with exactly the manifest's chunk reference;
+        // the physical bytes were never rewritten.
+        assert_eq!(blob_row(&pool, &hash).await, Some(1));
+        assert!(svc.backend().blob_exists(&hash).await.unwrap());
+        assert_eq!(collect(&svc, &hash).await, data);
+
+        cleanup(&pool, &hash, &files).await;
+    }
+
+    // ── 3. Corrupt blob (content ≠ hash): fail, count, leave untouched ──
+    #[tokio::test]
+    async fn rechunk_corrupt_blob_left_untouched() {
+        let pool = test_pool().await;
+        let dir = TempDir::new().unwrap();
+        let svc = local_svc(&pool, &dir).await;
+
+        let data = content(100 * 1024, 3);
+        let mut wrong = data.clone();
+        wrong[0] ^= 0xFF;
+        let (hash, files) = seed_legacy(&svc, &pool, &dir, &data, 1, "corrupt", Some(&wrong)).await;
+
+        let report = svc.rechunk_legacy_blobs().await.expect("sweep");
+        assert!(report.failed >= 1, "the corrupt blob must be counted");
+
+        // Nothing was touched: no manifest, blob row + refs + file intact.
+        assert_eq!(manifest(&pool, &hash).await, None);
+        assert_eq!(blob_row(&pool, &hash).await, Some(1));
+        assert!(svc.backend().blob_exists(&hash).await.unwrap());
+        let files_left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM storage.files WHERE blob_hash = $1")
+                .bind(&hash)
+                .fetch_one(pool.as_ref())
+                .await
+                .unwrap();
+        assert_eq!(files_left, 1);
+
+        cleanup(&pool, &hash, &files).await;
+    }
+
+    // ── 4. Empty blob: empty manifest, empty stream ──
+    #[tokio::test]
+    async fn rechunk_empty_blob() {
+        let pool = test_pool().await;
+        let dir = TempDir::new().unwrap();
+        let svc = local_svc(&pool, &dir).await;
+
+        // The empty-content hash is a constant (no per-run uniqueness is
+        // possible), so scrub any leftovers from a previously failed run.
+        let empty_hash = blake3::hash(&[]).to_hex().to_string();
+        cleanup(&pool, &empty_hash, &[]).await;
+
+        let (hash, files) = seed_legacy(&svc, &pool, &dir, &[], 1, "empty", None).await;
+
+        svc.rechunk_legacy_blobs().await.expect("sweep");
+
+        let (rc, total, chunks) = manifest(&pool, &hash).await.expect("manifest created");
+        assert_eq!((rc, total), (1, 0));
+        assert!(chunks.is_empty());
+        assert!(collect(&svc, &hash).await.is_empty());
+
+        cleanup(&pool, &hash, &files).await;
+    }
+
+    // ── 5. Encrypted backend: spool decrypts, chunks re-encrypt, Range works ──
+    #[tokio::test]
+    async fn rechunk_encrypted_multi_chunk_roundtrip() {
+        let pool = test_pool().await;
+        let dir = TempDir::new().unwrap();
+        let svc = encrypted_svc(&pool, &dir).await;
+
+        let data = content(2 * 1024 * 1024 + 333, 4);
+        let (hash, files) = seed_legacy(&svc, &pool, &dir, &data, 1, "enc", None).await;
+
+        svc.rechunk_legacy_blobs().await.expect("sweep");
+
+        let (rc, total, chunks) = manifest(&pool, &hash).await.expect("manifest created");
+        assert_eq!(rc, 1);
+        assert_eq!(total, data.len() as i64);
+        assert!(chunks.len() >= 2);
+        assert_eq!(blob_row(&pool, &hash).await, None, "whole-file blob freed");
+
+        // The point of the whole migration: a Range read now decrypts only
+        // the overlapping ≤1 MiB chunks, and returns correct plaintext.
+        assert_eq!(collect(&svc, &hash).await, data);
+        let mut ranged = Vec::new();
+        let mut s = svc
+            .read_blob_range_stream(&hash, 1_100_000, Some(1_100_064))
+            .await
+            .expect("range");
+        while let Some(chunk) = s.next().await {
+            ranged.extend_from_slice(&chunk.expect("chunk"));
+        }
+        assert_eq!(ranged, &data[1_100_000..1_100_064]);
+
+        cleanup(&pool, &hash, &files).await;
     }
 }
