@@ -557,9 +557,12 @@ impl AppServiceFactory {
             .with_file_deleted_hook(core.file_lifecycle.clone()),
         );
 
-        // Initialize cleanup service (bulk-deletes expired items in 2 SQL queries)
+        // Initialize cleanup service (bulk-deletes expired items in 2 SQL
+        // queries, then GCs zero-reference blobs — including chunks orphaned
+        // by aborted streaming uploads).
         let cleanup_service = TrashCleanupService::new(
             trash_repo.clone(),
+            core.dedup_service.clone(),
             24, // Run cleanup every 24 hours
         );
 
