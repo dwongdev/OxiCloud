@@ -36,6 +36,13 @@ function buildResourceIcon(item, resourceType) {
 
     const canThumbnail = thumbnail?.canHandle(file) ?? false;
     if (canThumbnail) {
+        // A PDF just entered the list: warm up the pdf.js stack (~1.3 MB)
+        // in the background now, so a thumbnail cache-miss below doesn't
+        // stall its first render on the library download. Idempotent.
+        if (file.mime_type === 'application/pdf') {
+            thumbnail.preloadPdf();
+        }
+
         const img = document.createElement('img');
         img.className = 'file-thumb';
         img.src = `/api/files/${file.id}/thumbnail/icon`;

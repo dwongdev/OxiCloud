@@ -141,6 +141,18 @@ export class ResourceListComponent {
         this._lastGroupEl = null;
 
         /**
+         * Live swimlane wrappers currently in the DOM, keyed by group key —
+         * lets `_findLaneByKey()` resolve in O(1) instead of a container-wide
+         * `querySelector` per lookup. Kept in sync with the DOM: entries are
+         * added where lanes are created (`_appendItems`,
+         * `_ensureJustAddedLane`) and the map is cleared on the full-container
+         * wipes in `render()` / `clear()`; lanes are never removed
+         * individually anywhere else.
+         * @type {Map<string, HTMLElement>}
+         */
+        this._lanes = new Map();
+
+        /**
          * Optional grouping-key resolver stored between `render()` / `append()`
          * calls so `addItem()` can place a new row in the correct swimlane
          * without the caller having to re-supply it. `undefined` means the
@@ -203,6 +215,7 @@ export class ResourceListComponent {
         // Reset group tracking for the fresh render
         this._lastGroupKey = undefined;
         this._lastGroupEl = null;
+        this._lanes.clear();
         this._groupFn = groupFn;
         this._groupLabelFn = groupLabelFn;
         this._headerNodeFn = headerNodeFn;
@@ -244,6 +257,7 @@ export class ResourceListComponent {
         this._lastClickedIndex = -1;
         this._lastGroupKey = undefined;
         this._lastGroupEl = null;
+        this._lanes.clear();
         this._groupFn = undefined;
         this._groupLabelFn = undefined;
         this._headerNodeFn = undefined;
@@ -348,7 +362,8 @@ export class ResourceListComponent {
             // "New" swimlane, creating it on first call.
             const lane = this._ensureJustAddedLane();
             this._items.set(item.id, item);
-            row = isFile ? this._createFileItem(/** @type {FileItem} */ (item)) : this._createFolderItem(/** @type {FolderItem} */ (item));
+            const labels = this._buildItemLabels();
+            row = isFile ? this._createFileItem(/** @type {FileItem} */ (item), labels) : this._createFolderItem(/** @type {FolderItem} */ (item), labels);
             lane.appendChild(row);
         } else {
             // Flat list (no grouping) — append at the end like before.
@@ -394,6 +409,7 @@ export class ResourceListComponent {
         const lane = document.createElement('div');
         lane.className = 'resource-list__swimlane-group resource-list__swimlane-group--just-added';
         lane.dataset.groupKey = JUST_ADDED_KEY;
+        this._lanes.set(JUST_ADDED_KEY, lane);
 
         const header = document.createElement('div');
         header.className = 'resource-list__swimlane-header';
@@ -420,13 +436,14 @@ export class ResourceListComponent {
      * Locate an on-screen swimlane wrapper by its group key. Returns
      * `null` when no swimlane currently matches.
      *
+     * O(1) via the `_lanes` registry — see its declaration for how it is
+     * kept in sync with the DOM.
+     *
      * @param {string} key
      * @returns {HTMLElement | null}
      */
     _findLaneByKey(key) {
-        // CSS.escape covers arbitrary key shapes (dates with colons,
-        // UUIDs with dashes, etc.) so the attribute selector is safe.
-        return /** @type {HTMLElement | null} */ (this._container.querySelector(`.resource-list__swimlane-group[data-group-key="${CSS.escape(String(key))}"]`));
+        return this._lanes.get(String(key)) ?? null;
     }
 
     /**
@@ -523,6 +540,9 @@ export class ResourceListComponent {
     _appendItems(items, groupFn, groupLabelFn, headerNodeFn) {
         const fragment = document.createDocumentFragment();
 
+        // Resolve batch-invariant labels once, not once per row.
+        const labels = this._buildItemLabels();
+
         // Start from the persisted key so load-more pages continue seamlessly.
         let lastGroupKey = this._lastGroupKey;
 
@@ -545,11 +565,12 @@ export class ResourceListComponent {
                     if (key !== null) {
                         fragmentGroup = document.createElement('div');
                         fragmentGroup.className = 'resource-list__swimlane-group';
-                        // Stamp the group key on the wrapper so `addItem()`
-                        // can locate this swimlane later via
-                        // `_findLaneByKey()` and append into it without a
-                        // full re-render.
+                        // Stamp the group key on the wrapper (handy in
+                        // devtools) and register it in `_lanes` so
+                        // `_findLaneByKey()` can locate this swimlane later
+                        // without a container-wide query.
                         fragmentGroup.dataset.groupKey = key;
+                        this._lanes.set(key, fragmentGroup);
                         fragmentGroup.appendChild(this._createGroupHeader(key, groupLabelFn, headerNodeFn));
                         fragment.appendChild(fragmentGroup);
                     }
@@ -558,7 +579,9 @@ export class ResourceListComponent {
 
             // Dispatch to the correct renderer: files have mime_type, folders do not.
             const isFile = 'mime_type' in item;
-            const itemEl = isFile ? this._createFileItem(/** @type {FileItem} */ (item)) : this._createFolderItem(/** @type {FolderItem} */ (item));
+            const itemEl = isFile
+                ? this._createFileItem(/** @type {FileItem} */ (item), labels)
+                : this._createFolderItem(/** @type {FolderItem} */ (item), labels);
 
             // Priority: live DOM group (load-more continuation) > current fragment group > bare container
             const target = liveGroup ?? fragmentGroup;
@@ -601,11 +624,49 @@ export class ResourceListComponent {
     }
 
     /**
+     * @typedef {Object} ItemLabels
+     * @property {string} folderTypeLabel - Type-cell label for folders.
+     * @property {string} customActionsHtml - Pre-rendered inline-action buttons.
+     * @property {(category: string) => string} fileTypeLabel - Type-cell label
+     *   for a file category (memoized per batch).
+     */
+
+    /**
+     * Resolve every per-row value that does not depend on the item once per
+     * batch: the i18n lookups for the type cell and the custom-actions HTML
+     * are identical for all 50 rows of a page, so repeating them in
+     * `_createFileItem` / `_createFolderItem` was pure overhead. Built fresh
+     * on every call (never cached on the instance), so a locale switch is
+     * picked up naturally by the next render/append.
+     *
+     * @returns {ItemLabels}
+     */
+    _buildItemLabels() {
+        const fallbackTypeLabel = i18n.t('files.file_types.document');
+        /** @type {Map<string, string>} */
+        const byCategory = new Map();
+        return {
+            folderTypeLabel: i18n.t('files.file_types.folder'),
+            customActionsHtml: this._renderCustomActions(),
+            fileTypeLabel(category) {
+                if (!category) return fallbackTypeLabel;
+                let label = byCategory.get(category);
+                if (label === undefined) {
+                    label = i18n.t(`files.file_types.${category.toLowerCase()}`) || category;
+                    byCategory.set(category, label);
+                }
+                return label;
+            }
+        };
+    }
+
+    /**
      * Build a .file-item DOM element for a folder.
      * @param {FolderItem} folder
+     * @param {ItemLabels} labels - Batch-invariant labels from `_buildItemLabels()`.
      * @returns {HTMLElement}
      */
-    _createFolderItem(folder) {
+    _createFolderItem(folder, labels) {
         const cfg = this._cfg;
         const el = document.createElement('div');
         const modClass = cfg.itemModifierClass ? ` ${cfg.itemModifierClass}` : '';
@@ -632,11 +693,11 @@ export class ResourceListComponent {
             </div>
             <div class="owner-cell${this._ownerVisible ? '' : ' hidden'}" data-owner-id="${escapeHtml(folder.owner_id || '')}"></div>
             ${cfg.showPath ? `<div class="path-cell" title="${escapeHtml(folder.path || '')}">${escapeHtml(folder.path || '')}</div>` : ''}
-            ${cfg.showType ? `<div class="type-cell">${i18n.t('files.file_types.folder')}</div>` : ''}
+            ${cfg.showType ? `<div class="type-cell">${labels.folderTypeLabel}</div>` : ''}
             <div class="size-cell">--</div>
             <div class="date-cell">${formattedDate}</div>
             <div class="action-cell">
-                ${this._renderCustomActions()}
+                ${labels.customActionsHtml}
                 ${cfg.showFavorite ? `<button class="favorite-star${isFav ? ' active' : ''}"><i class="${isFav ? 'fas' : 'far'} fa-star"></i></button>` : ''}
                 ${cfg.showContextMenu ? '<button class="file-actions"><i class="fas fa-ellipsis-v"></i></button>' : ''}
             </div>
@@ -649,12 +710,12 @@ export class ResourceListComponent {
     /**
      * Build a .file-item DOM element for a file.
      * @param {FileItem} file
+     * @param {ItemLabels} labels - Batch-invariant labels from `_buildItemLabels()`.
      * @returns {HTMLElement}
      */
-    _createFileItem(file) {
+    _createFileItem(file, labels) {
         const cfg = this._cfg;
-        const cat = file.category || '';
-        const typeLabel = cat ? i18n.t(`files.file_types.${cat.toLowerCase()}`) || cat : i18n.t('files.file_types.document');
+        const typeLabel = labels.fileTypeLabel(file.category || '');
         const fileSize = file.size_formatted || formatFileSize(file.size);
         const dateVal = /** @type {Record<string,string>} */ (/** @type {unknown} */ (file))[cfg.dateField] ?? file.modified_at;
         const formattedDate = cfg.dateFormatter ? cfg.dateFormatter(dateVal) : formatDateTime(new Date(dateVal));
@@ -685,7 +746,7 @@ export class ResourceListComponent {
             <div class="size-cell">${fileSize}</div>
             <div class="date-cell">${formattedDate}</div>
             <div class="action-cell">
-                ${this._renderCustomActions()}
+                ${labels.customActionsHtml}
                 ${cfg.showFavorite ? `<button class="favorite-star${isFav ? ' active' : ''}"><i class="${isFav ? 'fas' : 'far'} fa-star"></i></button>` : ''}
                 ${cfg.showContextMenu ? '<button class="file-actions"><i class="fas fa-ellipsis-v"></i></button>' : ''}
             </div>

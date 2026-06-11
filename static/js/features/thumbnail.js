@@ -2,29 +2,47 @@ import { getCsrfHeaders } from '../core/csrf.js';
 
 /** @import {FileItem} from '../core/types.js' */
 
+// IMPORTANT: absolute paths so the dynamic import resolves correctly both in
+// dev mode (native ESM, module at /js/features/thumbnail.js) and in release
+// mode (IIFE bundle at /js/app.{hash}.js — relative '../vendors/…' would
+// incorrectly resolve to /vendors/… instead of /js/vendors/…).
+const PDFJS_LIB_URL = '/js/vendors/pdf.min.mjs';
+const PDFJS_WORKER_URL = '/js/vendors/pdf.worker.min.mjs';
+
 /**
- * use any type so tsc will not scan library
- * @type {any}
+ * Memoized import of pdf.min.mjs (in-flight or settled).
+ * use any type so tsc will not scan library.
+ * Reset to null on failure so a later call retries (e.g. transient offline).
+ * @type {Promise<any> | null}
  */
-let _pdfjsLib = null;
+let _pdfjsLibPromise = null;
+
+/** True once the worker script warm-up fetch has completed successfully. */
+let _pdfWorkerWarmed = false;
 
 // TODO: do we need to add a max concurrncy ?
 
 /**
  * Lazy-loads pdf.min.mjs on first use via dynamic import so it is never
  * bundled into the IIFE (it uses top-level await which breaks IIFE wrapping).
+ * Memoizing the promise (rather than the resolved module) lets concurrent
+ * callers — e.g. `preloadPdf()` racing the first real thumbnail — share a
+ * single network fetch.
  * @returns {Promise<any>}
  */
-async function getPdfjsLib() {
-    if (_pdfjsLib) return _pdfjsLib;
-    // IMPORTANT: use an absolute path so the import resolves correctly both in
-    // dev mode (native ESM, module at /js/features/thumbnail.js) and in release
-    // mode (IIFE bundle at /js/app.{hash}.js — relative '../vendors/…' would
-    // incorrectly resolve to /vendors/… instead of /js/vendors/…).
-    const lib = '/js/vendors/pdf.min.mjs';
-    _pdfjsLib = /** @type {any} */ (await import(lib));
-    _pdfjsLib.GlobalWorkerOptions.workerSrc = '/js/vendors/pdf.worker.min.mjs';
-    return _pdfjsLib;
+function getPdfjsLib() {
+    if (!_pdfjsLibPromise) {
+        _pdfjsLibPromise = import(PDFJS_LIB_URL)
+            .then((lib) => {
+                lib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
+                return lib;
+            })
+            .catch((err) => {
+                _pdfjsLibPromise = null; // allow retry after a failed load
+                throw err;
+            });
+    }
+    return _pdfjsLibPromise;
 }
 
 export const thumbnail = {
@@ -41,6 +59,33 @@ export const thumbnail = {
             }
         }
         return false;
+    },
+
+    /**
+     * Fire-and-forget warm-up of the pdf.js stack (module + worker script).
+     *
+     * Called the moment a PDF row enters the DOM (see resourceIcon.js), so
+     * the ~1.3 MB library downloads in the background while the user is
+     * still looking at the list — instead of stalling the first thumbnail
+     * render on it. Idempotent and cheap after the first call, and only
+     * folders that actually contain PDFs ever pay the download.
+     */
+    preloadPdf() {
+        // Module (≈300 KB): shares the memoized promise with real users.
+        getPdfjsLib().catch(() => {
+            /* transient failure — the first real use retries */
+        });
+
+        // Worker (≈1 MB): pdf.js only fetches it via `new Worker(...)` on the
+        // first getDocument(), so prime the HTTP cache with a plain fetch.
+        // Reading the body ensures the download completes and is cacheable.
+        if (_pdfWorkerWarmed) return;
+        _pdfWorkerWarmed = true;
+        fetch(PDFJS_WORKER_URL)
+            .then((r) => (r.ok ? r.blob() : Promise.reject(new Error(`HTTP ${r.status}`))))
+            .catch(() => {
+                _pdfWorkerWarmed = false; // allow retry on a later sighting
+            });
     },
 
     // TODO: use these informations from server ?

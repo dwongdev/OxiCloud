@@ -151,6 +151,10 @@ function switchTab(name, el) {
     }
 
     activeTabName = name;
+    // The migration auto-poll only makes sense while the Storage tab is
+    // visible — without this it would keep hitting the API every 2 s
+    // (and updating hidden DOM) for as long as a migration runs.
+    if (name !== 'storage') stopMigrationPolling();
     if (name === 'users') loadUsers();
     if (name === 'dashboard') loadDashboard();
     if (name === 'storage') loadStorage();
@@ -909,6 +913,22 @@ async function testStorageConnection() {
 let migrationPollTimer = null;
 
 /**
+ * Stop the 2 s migration auto-poll if it is armed.
+ *
+ * Called when the poll observes a non-running status, when a poll request
+ * fails (an expired admin session would otherwise be retried every 2 s
+ * forever), and when the user leaves the Storage tab. Re-entering the tab
+ * re-arms it via `loadStorage()` → `loadMigrationStatus()` while a
+ * migration is running.
+ */
+function stopMigrationPolling() {
+    if (migrationPollTimer) {
+        clearInterval(migrationPollTimer);
+        migrationPollTimer = null;
+    }
+}
+
+/**
  * @param {string} msg
  * @param {string} type
  */
@@ -979,7 +999,12 @@ async function loadMigrationStatus() {
             headers: headers(),
             credentials: 'same-origin'
         });
-        if (!resp.ok) return;
+        if (!resp.ok) {
+            // Don't keep hammering a failing endpoint (e.g. expired session);
+            // any migration button or tab re-entry re-arms the poll.
+            stopMigrationPolling();
+            return;
+        }
         const m = await resp.json();
         updateMigrationUI(m);
 
@@ -988,9 +1013,8 @@ async function loadMigrationStatus() {
             if (!migrationPollTimer) {
                 migrationPollTimer = setInterval(loadMigrationStatus, 2000);
             }
-        } else if (migrationPollTimer) {
-            clearInterval(migrationPollTimer);
-            migrationPollTimer = null;
+        } else {
+            stopMigrationPolling();
         }
     } catch (_e) {
         /* ignore */
