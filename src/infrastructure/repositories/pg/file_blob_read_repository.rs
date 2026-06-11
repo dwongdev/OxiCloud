@@ -53,6 +53,93 @@ type FileRow = (
     Option<Uuid>,
 );
 
+/// Append the optional type/date/size filters from `criteria` to
+/// `conditions`, continuing placeholder numbering from `bind_idx`. Returns
+/// the last placeholder index used. The name filter is NOT handled here —
+/// it is search-flavour specific (ILIKE for name search, absent for
+/// content-hit hydration). Mirror of [`bind_criteria_filters`]; the two
+/// must stay in sync.
+fn push_criteria_filters(
+    conditions: &mut Vec<String>,
+    mut bind_idx: u32,
+    criteria: &SearchCriteriaDto,
+) -> u32 {
+    if let Some(types) = &criteria.file_types
+        && !types.is_empty()
+    {
+        bind_idx += 1;
+        conditions.push(format!(
+            "LOWER(SUBSTRING(fi.name FROM '\\.([^.]+)$')) = ANY(${bind_idx})"
+        ));
+    }
+    if criteria.created_after.is_some() {
+        bind_idx += 1;
+        conditions.push(format!(
+            "EXTRACT(EPOCH FROM fi.created_at)::bigint >= ${bind_idx}"
+        ));
+    }
+    if criteria.created_before.is_some() {
+        bind_idx += 1;
+        conditions.push(format!(
+            "EXTRACT(EPOCH FROM fi.created_at)::bigint <= ${bind_idx}"
+        ));
+    }
+    if criteria.modified_after.is_some() {
+        bind_idx += 1;
+        conditions.push(format!(
+            "EXTRACT(EPOCH FROM fi.updated_at)::bigint >= ${bind_idx}"
+        ));
+    }
+    if criteria.modified_before.is_some() {
+        bind_idx += 1;
+        conditions.push(format!(
+            "EXTRACT(EPOCH FROM fi.updated_at)::bigint <= ${bind_idx}"
+        ));
+    }
+    if criteria.min_size.is_some() {
+        bind_idx += 1;
+        conditions.push(format!("fi.size >= ${bind_idx}"));
+    }
+    if criteria.max_size.is_some() {
+        bind_idx += 1;
+        conditions.push(format!("fi.size <= ${bind_idx}"));
+    }
+    bind_idx
+}
+
+/// Bind the values for the filters appended by [`push_criteria_filters`],
+/// in the same order.
+fn bind_criteria_filters<'q, O>(
+    mut query: sqlx::query::QueryAs<'q, sqlx::Postgres, O, sqlx::postgres::PgArguments>,
+    criteria: &SearchCriteriaDto,
+) -> sqlx::query::QueryAs<'q, sqlx::Postgres, O, sqlx::postgres::PgArguments> {
+    if let Some(types) = &criteria.file_types
+        && !types.is_empty()
+    {
+        let lower_types: Vec<String> = types.iter().map(|t| t.to_lowercase()).collect();
+        query = query.bind(lower_types);
+    }
+    if let Some(v) = criteria.created_after {
+        query = query.bind(v as i64);
+    }
+    if let Some(v) = criteria.created_before {
+        query = query.bind(v as i64);
+    }
+    if let Some(v) = criteria.modified_after {
+        query = query.bind(v as i64);
+    }
+    if let Some(v) = criteria.modified_before {
+        query = query.bind(v as i64);
+    }
+    if let Some(v) = criteria.min_size {
+        query = query.bind(v as i64);
+    }
+    if let Some(v) = criteria.max_size {
+        query = query.bind(v as i64);
+    }
+    query
+}
+
 /// File read repository backed by PostgreSQL metadata + blob storage.
 pub struct FileBlobReadRepository {
     pool: Arc<PgPool>,
@@ -92,6 +179,80 @@ impl FileBlobReadRepository {
     /// moment they commit.
     pub fn blob_hash_cache(&self) -> Cache<String, String> {
         self.hash_cache.clone()
+    }
+
+    /// Hydrate content-index candidate ids into `File`s, re-applying the
+    /// caller's scope and the active search filters (owner, trash state,
+    /// folder scope, types, dates, sizes). The NAME filter is deliberately
+    /// NOT applied — content hits don't need to match it. Ids that fail any
+    /// filter (or no longer exist — the index is eventually consistent)
+    /// simply drop out, so a stale index can never leak a result.
+    pub async fn fetch_files_by_ids_filtered(
+        &self,
+        ids: &[String],
+        criteria: &SearchCriteriaDto,
+        user_id: Uuid,
+    ) -> Result<Vec<File>, DomainError> {
+        // Index hits are externally produced strings — parse defensively.
+        let uuid_ids: Vec<Uuid> = ids.iter().filter_map(|id| id.parse().ok()).collect();
+        if uuid_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut conditions: Vec<String> = vec![
+            "fi.id = ANY($1)".to_string(),
+            "fi.user_id = $2".to_string(),
+            "fi.is_trashed = false".to_string(),
+        ];
+        let mut bind_idx = 2u32;
+
+        if criteria.folder_id.is_some() {
+            bind_idx += 1;
+            if criteria.recursive {
+                conditions.push(format!(
+                    "fo.lpath <@ (SELECT lpath FROM storage.folders WHERE id = ${bind_idx}::uuid)"
+                ));
+            } else {
+                conditions.push(format!("fi.folder_id = ${bind_idx}::uuid"));
+            }
+        }
+        push_criteria_filters(&mut conditions, bind_idx, criteria);
+
+        let where_clause = conditions.join(" AND ");
+        let sql = format!(
+            "SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path, \
+                    fi.size, fi.mime_type, \
+                    EXTRACT(EPOCH FROM fi.created_at)::bigint, \
+                    EXTRACT(EPOCH FROM fi.updated_at)::bigint, \
+                    fi.blob_hash, \
+                    fi.user_id \
+               FROM storage.files fi \
+               LEFT JOIN storage.folders fo ON fo.id = fi.folder_id \
+              WHERE {where_clause}"
+        );
+
+        let mut query = sqlx::query_as::<_, FileRow>(&sql)
+            .bind(uuid_ids)
+            .bind(user_id);
+        if let Some(folder_id) = criteria.folder_id.as_deref() {
+            query = query.bind(folder_id);
+        }
+        query = bind_criteria_filters(query, criteria);
+
+        let rows = query.fetch_all(self.pool.as_ref()).await.map_err(|e| {
+            DomainError::internal_error("FileBlobRead", format!("hydrate by ids: {e}"))
+        })?;
+
+        rows.into_iter()
+            .map(
+                |(id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid)| {
+                    Self::row_to_file(id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid)
+                },
+            )
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                DomainError::internal_error("FileBlobRead", format!("hydrate mapping: {e}"))
+            })
     }
 
     /// Returns the user_id (owner) for a given file ID.
@@ -1021,46 +1182,7 @@ impl FileReadPort for FileBlobReadRepository {
             bind_idx += 1;
             conditions.push(format!("fi.name ILIKE ${bind_idx}"));
         }
-        if let Some(types) = &criteria.file_types
-            && !types.is_empty()
-        {
-            bind_idx += 1;
-            conditions.push(format!(
-                "LOWER(SUBSTRING(fi.name FROM '\\.([^.]+)$')) = ANY(${bind_idx})"
-            ));
-        }
-        if criteria.created_after.is_some() {
-            bind_idx += 1;
-            conditions.push(format!(
-                "EXTRACT(EPOCH FROM fi.created_at)::bigint >= ${bind_idx}"
-            ));
-        }
-        if criteria.created_before.is_some() {
-            bind_idx += 1;
-            conditions.push(format!(
-                "EXTRACT(EPOCH FROM fi.created_at)::bigint <= ${bind_idx}"
-            ));
-        }
-        if criteria.modified_after.is_some() {
-            bind_idx += 1;
-            conditions.push(format!(
-                "EXTRACT(EPOCH FROM fi.updated_at)::bigint >= ${bind_idx}"
-            ));
-        }
-        if criteria.modified_before.is_some() {
-            bind_idx += 1;
-            conditions.push(format!(
-                "EXTRACT(EPOCH FROM fi.updated_at)::bigint <= ${bind_idx}"
-            ));
-        }
-        if criteria.min_size.is_some() {
-            bind_idx += 1;
-            conditions.push(format!("fi.size >= ${bind_idx}"));
-        }
-        if criteria.max_size.is_some() {
-            bind_idx += 1;
-            conditions.push(format!("fi.size <= ${bind_idx}"));
-        }
+        bind_idx = push_criteria_filters(&mut conditions, bind_idx, criteria);
 
         let where_clause = conditions.join(" AND ");
         let limit_bind = bind_idx + 1;
@@ -1107,30 +1229,7 @@ impl FileReadPort for FileBlobReadRepository {
         {
             query = query.bind(super::like_escape(name));
         }
-        if let Some(types) = &criteria.file_types
-            && !types.is_empty()
-        {
-            let lower_types: Vec<String> = types.iter().map(|t| t.to_lowercase()).collect();
-            query = query.bind(lower_types);
-        }
-        if let Some(v) = criteria.created_after {
-            query = query.bind(v as i64);
-        }
-        if let Some(v) = criteria.created_before {
-            query = query.bind(v as i64);
-        }
-        if let Some(v) = criteria.modified_after {
-            query = query.bind(v as i64);
-        }
-        if let Some(v) = criteria.modified_before {
-            query = query.bind(v as i64);
-        }
-        if let Some(v) = criteria.min_size {
-            query = query.bind(v as i64);
-        }
-        if let Some(v) = criteria.max_size {
-            query = query.bind(v as i64);
-        }
+        query = bind_criteria_filters(query, criteria);
 
         query = query.bind(limit).bind(offset);
 

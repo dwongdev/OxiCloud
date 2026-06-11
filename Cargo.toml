@@ -75,6 +75,9 @@ idna = "1.1"
 smol_str = { version = "0.3.2", features = ["serde"] }
 accept-language = "3.1.0"
 askama = "0.16.0"
+tantivy = "0.26.1"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+pdf-extract = "0.10.0"
 
 [features]
 default = []

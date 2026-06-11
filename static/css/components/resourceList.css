@@ -269,6 +269,26 @@
     text-overflow: ellipsis;
 }
 
+/* Content-search snippet — fragment of the file body that matched the
+   query. Wraps onto a second line inside the flex name-cell. */
+.files-list-view .file-item .name-cell:has(.file-item__snippet) {
+    flex-wrap: wrap;
+    row-gap: 2px;
+}
+
+.files-list-view .file-item .file-item__snippet {
+    flex-basis: 100%;
+    /* icon width (36px) + cell gap (12px) — aligns under the name */
+    padding-left: 48px;
+    font-size: 12px;
+    color: var(--color-text-muted);
+}
+
+/* Grid cards are too compact for body fragments. */
+.files-grid-view .file-item .file-item__snippet {
+    display: none;
+}
+
 .files-list-view .file-item .file-icon {
     width: 36px;
     height: 36px;

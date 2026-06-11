@@ -47,6 +47,8 @@
  * @property {number} sort_date
  * @property {string} etag opaque HTTP ETag, for If-Match / If-None-Match
  * @property {string} content_hash raw BLAKE3 content hash, for dedup checks
+ * @property {string} [snippet] plain-text fragment around a content match (search results only)
+ * @property {string} [match_source] "name" or "content" — how the search found this file
  */
 
 /**

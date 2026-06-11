@@ -905,6 +905,44 @@ impl Default for FeaturesConfig {
     }
 }
 
+/// Content-search configuration (embedded Tantivy index over file names and
+/// extracted file content).
+///
+/// The index is a derived artifact fed by a background worker on the
+/// maintenance pool — none of these knobs affect request-path latency.
+#[derive(Debug, Clone)]
+pub struct ContentSearchConfig {
+    /// Master switch. When disabled, search falls back to name-only SQL and
+    /// a janitor keeps the (always-installed) dirty queue empty.
+    /// Env: `OXICLOUD_ENABLE_CONTENT_SEARCH`.
+    pub enabled: bool,
+    /// Index directory. Default: `{storage_path}/.search-index`.
+    /// Env: `OXICLOUD_CONTENT_INDEX_DIR`.
+    pub index_dir: Option<PathBuf>,
+    /// Worker drain cadence in milliseconds — the upper bound on how long a
+    /// new upload takes to become content-searchable. Default: 1500.
+    /// Env: `OXICLOUD_CONTENT_INDEX_FLUSH_MS`.
+    pub flush_interval_ms: u64,
+    /// Files larger than this are indexed by NAME only (no text extraction).
+    /// Default: 32 MiB. Env: `OXICLOUD_CONTENT_INDEX_MAX_FILE_BYTES`.
+    pub max_extract_file_bytes: u64,
+    /// Hard cap on extracted text per blob fed to the index. Default: 1 MiB.
+    /// Env: `OXICLOUD_CONTENT_INDEX_MAX_TEXT_BYTES`.
+    pub max_text_bytes: usize,
+}
+
+impl Default for ContentSearchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            index_dir: None,
+            flush_interval_ms: 1500,
+            max_extract_file_bytes: 32 * 1024 * 1024,
+            max_text_bytes: 1024 * 1024,
+        }
+    }
+}
+
 /// Global application configuration
 #[derive(Debug, Clone)]
 pub struct AppConfig {
@@ -944,6 +982,8 @@ pub struct AppConfig {
     pub magic_link: MagicLinkConfig,
     /// I18n configuration (default locale for server-rendered surfaces)
     pub i18n: I18nConfig,
+    /// Content-search configuration (embedded full-text index)
+    pub content_search: ContentSearchConfig,
 }
 
 /// Server-side i18n knobs.
@@ -995,6 +1035,7 @@ impl Default for AppConfig {
             smtp: SmtpConfig::default(),
             magic_link: MagicLinkConfig::default(),
             i18n: I18nConfig::default(),
+            content_search: ContentSearchConfig::default(),
         }
     }
 }
@@ -1255,6 +1296,33 @@ impl AppConfig {
             && let Ok(val) = enable_music
         {
             config.features.enable_music = val;
+        }
+
+        // Content search (embedded Tantivy index)
+        if let Ok(v) = env::var("OXICLOUD_ENABLE_CONTENT_SEARCH").map(|v| v.parse::<bool>())
+            && let Ok(val) = v
+        {
+            config.content_search.enabled = val;
+        }
+        if let Ok(dir) = env::var("OXICLOUD_CONTENT_INDEX_DIR")
+            && !dir.trim().is_empty()
+        {
+            config.content_search.index_dir = Some(PathBuf::from(dir.trim()));
+        }
+        if let Ok(v) = env::var("OXICLOUD_CONTENT_INDEX_FLUSH_MS").map(|v| v.parse::<u64>())
+            && let Ok(val) = v
+        {
+            config.content_search.flush_interval_ms = val;
+        }
+        if let Ok(v) = env::var("OXICLOUD_CONTENT_INDEX_MAX_FILE_BYTES").map(|v| v.parse::<u64>())
+            && let Ok(val) = v
+        {
+            config.content_search.max_extract_file_bytes = val;
+        }
+        if let Ok(v) = env::var("OXICLOUD_CONTENT_INDEX_MAX_TEXT_BYTES").map(|v| v.parse::<usize>())
+            && let Ok(val) = v
+        {
+            config.content_search.max_text_bytes = val;
         }
 
         if let Ok(v) = env::var("OXICLOUD_EXPOSE_SYSTEM_USERS").map(|v| v.parse::<bool>())

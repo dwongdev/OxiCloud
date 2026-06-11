@@ -40,6 +40,8 @@ use crate::infrastructure::services::file_system_i18n_service::FileSystemI18nSer
 use crate::infrastructure::services::nextcloud_chunked_upload_service::NextcloudChunkedUploadService;
 use crate::infrastructure::services::path_service::PathService;
 use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
+use crate::infrastructure::services::search_index::content_index_worker::ContentIndexWorker;
+use crate::infrastructure::services::search_index::tantivy_content_index::TantivyContentIndex;
 use crate::infrastructure::services::trash_cleanup_service::TrashCleanupService;
 
 use crate::application::services::app_password_service::AppPasswordService;
@@ -439,6 +441,7 @@ impl AppServiceFactory {
         repos: &RepositoryServices,
         trash_service: Option<Arc<TrashService>>,
         authz: &Arc<PgAclEngine>,
+        content_index: Option<Arc<TantivyContentIndex>>,
     ) -> ApplicationServices {
         // Main services
         let folder_service = Arc::new(FolderService::new(
@@ -484,10 +487,15 @@ impl AppServiceFactory {
 
         let i18n_service = Arc::new(I18nApplicationService::new(repos.i18n_repository.clone()));
 
-        // Search service with cache
+        // Search service with cache. The optional content index widens the
+        // same `/api/search` endpoint to full-text content matches.
+        let content_index_port: Option<
+            Arc<dyn crate::application::ports::content_index_ports::ContentIndexPort>,
+        > = content_index.map(|idx| idx as _);
         let search_service: Option<Arc<SearchService>> = Some(Arc::new(SearchService::new(
             repos.file_read_repository.clone(),
             repos.folder_repository.clone(),
+            content_index_port,
             300,  // Cache TTL in seconds (5 minutes)
             1000, // Maximum cache entries
         )));
@@ -688,6 +696,66 @@ impl AppServiceFactory {
         tracing::info!("Tree-ETag flush service initialized");
     }
 
+    /// Opens (or rebuilds) the embedded Tantivy content index. Returns the
+    /// index plus a reseed flag (true when the on-disk index was missing or
+    /// version-stale and must be repopulated from `storage.files`). Any
+    /// failure degrades to name-only search instead of failing startup.
+    fn create_content_index(&self) -> Option<(Arc<TantivyContentIndex>, bool)> {
+        if !self.config.content_search.enabled {
+            tracing::info!("Content search is disabled in configuration");
+            return None;
+        }
+        let dir = self
+            .config
+            .content_search
+            .index_dir
+            .clone()
+            .unwrap_or_else(|| self.storage_path.join(".search-index"));
+
+        match TantivyContentIndex::open_or_rebuild(&dir) {
+            Ok((index, needs_reseed)) => {
+                tracing::info!(
+                    "Content index ready at {} ({} doc(s), reseed: {})",
+                    dir.display(),
+                    index.num_docs(),
+                    needs_reseed
+                );
+                Some((Arc::new(index), needs_reseed))
+            }
+            Err(e) => {
+                tracing::error!("Content index unavailable — search will be name-only: {e}");
+                None
+            }
+        }
+    }
+
+    /// Starts the content-index pipeline on the maintenance pool. The
+    /// `storage.files` triggers enqueue unconditionally, so when the feature
+    /// is off (or the index failed to open) a discard-only janitor keeps the
+    /// dirty queue bounded instead.
+    fn start_content_index_job(
+        &self,
+        maintenance_pool: &Arc<PgPool>,
+        core: &CoreServices,
+        content_index: Option<(Arc<TantivyContentIndex>, bool)>,
+    ) {
+        match content_index {
+            Some((index, needs_reseed)) => {
+                ContentIndexWorker::new(
+                    maintenance_pool.clone(),
+                    core.dedup_service.clone(),
+                    index,
+                    self.config.content_search.flush_interval_ms,
+                    self.config.content_search.max_extract_file_bytes,
+                    self.config.content_search.max_text_bytes,
+                )
+                .start(needs_reseed);
+                tracing::info!("Content-index worker initialized");
+            }
+            None => ContentIndexWorker::start_drain_only_janitor(maintenance_pool.clone()),
+        }
+    }
+
     /// Builds the complete AppState using all factory services.
     ///
     /// This is the main entry point that replaces all manual logic in `main.rs`.
@@ -731,9 +799,19 @@ impl AppServiceFactory {
             .create_trash_service(&repos, &core, &authorization)
             .await;
 
+        // 3c. Content index (embedded Tantivy) — opened before application
+        // services so SearchService can hold the query port; the feeding
+        // worker starts further down with the maintenance pool.
+        let content_index = self.create_content_index();
+
         // 4. Application services (with trash + authz already wired)
-        let mut apps =
-            self.create_application_services(&core, &repos, trash_service.clone(), &authorization);
+        let mut apps = self.create_application_services(
+            &core,
+            &repos,
+            trash_service.clone(),
+            &authorization,
+            content_index.as_ref().map(|(idx, _)| idx.clone()),
+        );
 
         // 5. Share service
         let share_service = self.create_share_service(&repos, &pool, &authorization);
@@ -777,6 +855,8 @@ impl AppServiceFactory {
                 Some(self.create_storage_usage_service(&repos, &pool, &maintenance_pool));
 
             self.start_tree_etag_flush_job(&maintenance_pool);
+
+            self.start_content_index_job(&maintenance_pool, &core, content_index);
 
             // User-lifecycle dispatcher. Hook order is registration order;
             // document dependencies inline if/when any arise. Today:

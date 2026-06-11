@@ -134,6 +134,14 @@ pub struct SearchFileResultDto {
     /// that pre-date the column.
     #[serde(default)]
     pub blob_hash: String,
+    /// Plain-text fragment around the first content match, present only for
+    /// hits discovered through the full-text content index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snippet: Option<String>,
+    /// Where the match came from: "name" (filename matched the query) or
+    /// "content" (discovered via the full-text content index).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_source: Option<String>,
 }
 
 /// A folder search result enriched with server-computed metadata

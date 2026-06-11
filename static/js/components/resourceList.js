@@ -739,6 +739,7 @@ export class ResourceListComponent {
                 <span>${escapeHtml(file.name)}</span>
                 ${cfg.showFavorite ? `<div class="file-badge file-badge-favorite${isFav ? '' : ' hidden'}"><i class="fas fa-star favorite-star-inline"></i></div>` : ''}
                 ${cfg.showShareBadge ? `<div class="file-badge file-badge-shared${isShared ? '' : ' hidden'}"><i class="fas fa-oxiexport"></i></div>` : ''}
+                ${file.snippet ? `<span class="file-item__snippet" title="${escapeHtml(file.snippet)}">${escapeHtml(file.snippet)}</span>` : ''}
             </div>
             <div class="owner-cell${this._ownerVisible ? '' : ' hidden'}" data-owner-id="${escapeHtml(file.owner_id || '')}"></div>
             ${cfg.showPath ? `<div class="path-cell" title="${escapeHtml(file.path || '')}">${escapeHtml(file.path || '')}</div>` : ''}
