@@ -730,9 +730,10 @@ impl ContactUseCase for ContactStorageAdapter {
         Ok(contact.map(ContactDto::from))
     }
 
-    async fn list_contacts(
+    async fn get_contacts_by_uids(
         &self,
         address_book_id: &str,
+        uids: &[String],
         user_id: Uuid,
     ) -> Result<Vec<ContactDto>, DomainError> {
         let uuid = Self::parse_uuid(address_book_id, "AddressBook")?;
@@ -740,10 +741,40 @@ impl ContactUseCase for ContactStorageAdapter {
         // Check read access
         self.check_address_book_access(&uuid, user_id).await?;
 
+        if uids.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let contacts = self
             .contact_repository
-            .get_contacts_by_address_book(&uuid)
+            .get_contacts_by_uids(&uuid, uids)
             .await?;
+        Ok(contacts.into_iter().map(ContactDto::from).collect())
+    }
+
+    async fn list_contacts(
+        &self,
+        address_book_id: &str,
+        limit: Option<i64>,
+        offset: Option<i64>,
+        user_id: Uuid,
+    ) -> Result<Vec<ContactDto>, DomainError> {
+        let uuid = Self::parse_uuid(address_book_id, "AddressBook")?;
+
+        // Check read access
+        self.check_address_book_access(&uuid, user_id).await?;
+
+        let contacts = if limit.is_some() || offset.is_some() {
+            let limit = limit.unwrap_or(100);
+            let offset = offset.unwrap_or(0);
+            self.contact_repository
+                .get_contacts_by_address_book_paginated(&uuid, limit, offset)
+                .await?
+        } else {
+            self.contact_repository
+                .get_contacts_by_address_book(&uuid)
+                .await?
+        };
         Ok(contacts.into_iter().map(ContactDto::from).collect())
     }
 

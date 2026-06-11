@@ -95,6 +95,14 @@ pub trait CalendarStoragePort: Send + Sync + 'static {
         calendar_id: &str,
         ical_uid: &str,
     ) -> Result<Option<CalendarEventDto>, DomainError>;
+    /// Indexed batch lookup by iCalendar UID (`ical_uid = ANY(...)`) — the
+    /// CalDAV multiget REPORT must use this instead of listing the whole
+    /// calendar (every row + its `ical_data`) and filtering client-side.
+    async fn find_events_by_ical_uids(
+        &self,
+        calendar_id: &str,
+        ical_uids: &[String],
+    ) -> Result<Vec<CalendarEventDto>, DomainError>;
     async fn list_events_by_calendar(
         &self,
         calendar_id: &str,
@@ -197,6 +205,15 @@ pub trait CalendarUseCase: Send + Sync + 'static {
         ical_uid: &str,
         user_id: Uuid,
     ) -> Result<Option<CalendarEventDto>, DomainError>;
+    /// Resolve a batch of events by their iCalendar UIDs with a single
+    /// indexed query. UIDs without a matching event are silently absent
+    /// from the result (CalDAV multiget semantics).
+    async fn get_events_by_ical_uids(
+        &self,
+        calendar_id: &str,
+        ical_uids: &[String],
+        user_id: Uuid,
+    ) -> Result<Vec<CalendarEventDto>, DomainError>;
     async fn list_events(
         &self,
         calendar_id: &str,

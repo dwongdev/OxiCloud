@@ -27,6 +27,7 @@ use std::fmt::Write;
 use std::sync::Arc;
 
 use crate::application::adapters::caldav_adapter::{CalDavAdapter, CalDavReportType};
+use crate::application::adapters::uid_from_multiget_href;
 use crate::application::adapters::webdav_adapter::{PropFindRequest, PropFindType};
 use crate::application::dtos::calendar_dto::{
     CreateCalendarDto, CreateEventICalDto, UpdateCalendarDto,
@@ -422,17 +423,13 @@ async fn handle_propfind(
                 }
             };
 
-            // Individual event .ics
+            // Individual event .ics — indexed lookup by iCalendar UID.
             let ical_uid = event_path.trim_end_matches(".ics");
 
-            let events = calendar_service
-                .list_events(calendar_id, None, None, user.id)
+            let event = calendar_service
+                .get_event_by_ical_uid(calendar_id, ical_uid, user.id)
                 .await
-                .map_err(|e| AppError::internal_error(format!("Failed to list events: {}", e)))?;
-
-            let event = events
-                .iter()
-                .find(|e| e.ical_uid == ical_uid)
+                .map_err(|e| AppError::internal_error(format!("Failed to look up event: {}", e)))?
                 .ok_or_else(|| AppError::not_found(format!("Event not found: {}", ical_uid)))?;
 
             let base_href = &format!("/caldav/{}/", calendar_id);
@@ -444,7 +441,7 @@ async fn handle_propfind(
             let mut response_body = Vec::new();
             CalDavAdapter::generate_calendar_events_response(
                 &mut response_body,
-                std::slice::from_ref(event),
+                std::slice::from_ref(&event),
                 &report_type,
                 base_href,
             )
@@ -502,15 +499,18 @@ async fn handle_report(
             }
         }
         CalDavReportType::CalendarMultiget { hrefs, .. } => {
-            let all_events = calendar_service
-                .list_events(calendar_id, None, None, user.id)
-                .await
-                .map_err(|e| AppError::internal_error(format!("Failed to list events: {}", e)))?;
+            // Indexed batch lookup (`ical_uid = ANY(...)`) — a multiget for
+            // a handful of events must not pay for listing the whole
+            // calendar and filtering client-side.
+            let uids: Vec<String> = hrefs
+                .iter()
+                .filter_map(|href| uid_from_multiget_href(href, ".ics"))
+                .collect();
 
-            all_events
-                .into_iter()
-                .filter(|evt| hrefs.iter().any(|href| href.contains(&evt.ical_uid)))
-                .collect()
+            calendar_service
+                .get_events_by_ical_uids(calendar_id, &uids, user.id)
+                .await
+                .map_err(|e| AppError::internal_error(format!("Failed to fetch events: {}", e)))?
         }
         CalDavReportType::SyncCollection { .. } => calendar_service
             .list_events(calendar_id, None, None, user.id)

@@ -370,6 +370,56 @@ impl CalendarEventRepository for CalendarEventPgRepository {
         }
     }
 
+    async fn find_events_by_ical_uids(
+        &self,
+        calendar_id: &Uuid,
+        ical_uids: &[String],
+    ) -> CalendarEventRepositoryResult<Vec<CalendarEvent>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id, calendar_id, summary, description, location,
+                start_time, end_time, all_day, rrule,
+                created_at, updated_at, ical_uid, ical_data
+            FROM caldav.calendar_events
+            WHERE calendar_id = $1 AND ical_uid = ANY($2)
+            ORDER BY start_time
+            "#,
+        )
+        .bind(calendar_id)
+        .bind(ical_uids)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| {
+            DomainError::database_error(format!("Failed to get calendar events by UIDs: {}", e))
+        })?;
+
+        let mut events = Vec::new();
+        for row in rows {
+            let event = CalendarEvent::with_id(
+                row.get("id"),
+                row.get("calendar_id"),
+                row.get("summary"),
+                row.get::<Option<String>, _>("description"),
+                row.get::<Option<String>, _>("location"),
+                row.get("start_time"),
+                row.get("end_time"),
+                row.get("all_day"),
+                row.get::<Option<String>, _>("rrule"),
+                row.get("ical_uid"),
+                row.get("ical_data"),
+                row.get("created_at"),
+                row.get("updated_at"),
+            )
+            .map_err(|e| {
+                DomainError::database_error(format!("Error creating calendar event: {}", e))
+            })?;
+            events.push(event);
+        }
+
+        Ok(events)
+    }
+
     async fn count_events_in_calendar(
         &self,
         calendar_id: &Uuid,

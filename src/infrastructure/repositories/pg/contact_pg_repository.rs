@@ -247,13 +247,44 @@ impl ContactRepository for ContactPgRepository {
         }
     }
 
+    async fn get_contacts_by_uids(
+        &self,
+        address_book_id: &Uuid,
+        uids: &[String],
+    ) -> ContactRepositoryResult<Vec<Contact>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id, address_book_id, uid, full_name, first_name, last_name, nickname,
+                email, phone, address, organization, title, notes, photo_url,
+                birthday, anniversary, vcard, etag, created_at, updated_at
+            FROM carddav.contacts
+            WHERE address_book_id = $1 AND uid = ANY($2)
+            ORDER BY full_name, first_name, last_name
+            "#,
+        )
+        .bind(address_book_id)
+        .bind(uids)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| {
+            DomainError::database_error(format!("Failed to get contacts by uids: {}", e))
+        })?;
+
+        let mut contacts = Vec::new();
+        for row in &rows {
+            contacts.push(Self::row_to_contact(row)?);
+        }
+        Ok(contacts)
+    }
+
     async fn get_contacts_by_address_book(
         &self,
         address_book_id: &Uuid,
     ) -> ContactRepositoryResult<Vec<Contact>> {
         let rows = sqlx::query(
             r#"
-            SELECT 
+            SELECT
                 id, address_book_id, uid, full_name, first_name, last_name, nickname,
                 email, phone, address, organization, title, notes, photo_url,
                 birthday, anniversary, vcard, etag, created_at, updated_at
@@ -267,6 +298,43 @@ impl ContactRepository for ContactPgRepository {
         .await
         .map_err(|e| {
             DomainError::database_error(format!("Failed to get contacts by address book: {}", e))
+        })?;
+
+        let mut contacts = Vec::new();
+        for row in &rows {
+            contacts.push(Self::row_to_contact(row)?);
+        }
+        Ok(contacts)
+    }
+
+    async fn get_contacts_by_address_book_paginated(
+        &self,
+        address_book_id: &Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> ContactRepositoryResult<Vec<Contact>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT
+                id, address_book_id, uid, full_name, first_name, last_name, nickname,
+                email, phone, address, organization, title, notes, photo_url,
+                birthday, anniversary, vcard, etag, created_at, updated_at
+            FROM carddav.contacts
+            WHERE address_book_id = $1
+            ORDER BY full_name, first_name, last_name
+            LIMIT $2 OFFSET $3
+            "#,
+        )
+        .bind(address_book_id)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| {
+            DomainError::database_error(format!(
+                "Failed to get contacts by address book (paginated): {}",
+                e
+            ))
         })?;
 
         let mut contacts = Vec::new();

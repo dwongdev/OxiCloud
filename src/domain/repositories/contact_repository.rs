@@ -16,9 +16,26 @@ pub trait ContactRepository: Send + Sync + 'static {
         address_book_id: &Uuid,
         uid: &str,
     ) -> ContactRepositoryResult<Option<Contact>>;
+    /// Fetches the contacts matching any of the given vCard UIDs in one
+    /// indexed query (`uid = ANY(...)`). Used by CardDAV multiget so a
+    /// request for a handful of contacts never pays for the whole book.
+    /// UIDs with no matching contact are silently absent from the result.
+    async fn get_contacts_by_uids(
+        &self,
+        address_book_id: &Uuid,
+        uids: &[String],
+    ) -> ContactRepositoryResult<Vec<Contact>>;
     async fn get_contacts_by_address_book(
         &self,
         address_book_id: &Uuid,
+    ) -> ContactRepositoryResult<Vec<Contact>>;
+    /// Same as [`Self::get_contacts_by_address_book`] but bounded by
+    /// `LIMIT`/`OFFSET` for paginated listings.
+    async fn get_contacts_by_address_book_paginated(
+        &self,
+        address_book_id: &Uuid,
+        limit: i64,
+        offset: i64,
     ) -> ContactRepositoryResult<Vec<Contact>>;
     async fn get_contacts_by_email(&self, email: &str) -> ContactRepositoryResult<Vec<Contact>>;
     async fn get_contacts_by_group(&self, group_id: &Uuid)

@@ -119,16 +119,14 @@ pub struct AddMemberRequest {
 }
 
 /// Query parameters for paginated listing.
+///
+/// Both fields are optional: when omitted, regular address books return
+/// the full contact list (the frontend relies on this), while the system
+/// book falls back to its own defaults (limit 100, offset 0).
 #[derive(Deserialize)]
 pub struct ListQuery {
-    #[serde(default = "default_limit")]
-    limit: i64,
-    #[serde(default)]
-    offset: i64,
-}
-
-fn default_limit() -> i64 {
-    100
+    limit: Option<i64>,
+    offset: Option<i64>,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -455,8 +453,8 @@ pub async fn delete_address_book(
     path = "/api/address-books/{book_id}/contacts",
     params(
         ("book_id" = String, Path, description = "Address book UUID or \"system\""),
-        ("limit"   = Option<i64>, Query, description = "Max results (default 100)"),
-        ("offset"  = Option<i64>, Query, description = "Pagination offset (default 0)"),
+        ("limit"   = Option<i64>, Query, description = "Max results (omit for the full book; system book defaults to 100)"),
+        ("offset"  = Option<i64>, Query, description = "Pagination offset (omit for none; system book defaults to 0)"),
     ),
     responses(
         (status = 200, description = "List of contacts"),
@@ -488,7 +486,10 @@ pub async fn list_contacts(
             return e.into_response();
         }
         let caller_id = auth_user.id.to_string();
-        match auth_service.list_users(params.limit, params.offset).await {
+        match auth_service
+            .list_users(params.limit.unwrap_or(100), params.offset.unwrap_or(0))
+            .await
+        {
             Ok(users) => {
                 let contacts: Vec<ContactDto> = users
                     .into_iter()
@@ -505,7 +506,7 @@ pub async fn list_contacts(
     } else {
         match state
             .contact_service
-            .list_contacts(&book_id, auth_user.id)
+            .list_contacts(&book_id, params.limit, params.offset, auth_user.id)
             .await
         {
             Ok(contacts) => (StatusCode::OK, Json(contacts)).into_response(),

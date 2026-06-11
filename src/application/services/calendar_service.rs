@@ -300,6 +300,32 @@ impl CalendarUseCase for CalendarService {
             .await
     }
 
+    async fn get_events_by_ical_uids(
+        &self,
+        calendar_id: &str,
+        ical_uids: &[String],
+        user_id: Uuid,
+    ) -> Result<Vec<CalendarEventDto>, DomainError> {
+        let has_access = self
+            .calendar_storage
+            .check_calendar_access(calendar_id, user_id)
+            .await?;
+        let calendar = self.calendar_storage.get_calendar(calendar_id).await?;
+        if !has_access && !calendar.is_public {
+            return Err(DomainError::new(
+                ErrorKind::AccessDenied,
+                "Calendar",
+                "You don't have permission to view events in this calendar",
+            ));
+        }
+        if ical_uids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.calendar_storage
+            .find_events_by_ical_uids(calendar_id, ical_uids)
+            .await
+    }
+
     async fn list_events(
         &self,
         calendar_id: &str,

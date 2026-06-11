@@ -82,9 +82,25 @@ pub trait ContactUseCase: Send + Sync + 'static {
         uid: &str,
         user_id: Uuid,
     ) -> Result<Option<ContactDto>, DomainError>;
+    /// Resolve a batch of contacts by their vCard UIDs with a single
+    /// indexed query (`uid = ANY(...)`) — the CardDAV multiget REPORT
+    /// must use this instead of listing the whole address book and
+    /// filtering client-side. UIDs without a matching contact are
+    /// silently absent from the result.
+    async fn get_contacts_by_uids(
+        &self,
+        address_book_id: &str,
+        uids: &[String],
+        user_id: Uuid,
+    ) -> Result<Vec<ContactDto>, DomainError>;
+    /// List contacts in an address book. `limit`/`offset` bound the
+    /// result for paginated callers (REST API); `None` returns the full
+    /// book, which the CardDAV listing/sync paths rely on.
     async fn list_contacts(
         &self,
         address_book_id: &str,
+        limit: Option<i64>,
+        offset: Option<i64>,
         user_id: Uuid,
     ) -> Result<Vec<ContactDto>, DomainError>;
     async fn search_contacts(

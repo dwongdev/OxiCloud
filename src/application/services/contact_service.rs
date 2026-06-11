@@ -796,9 +796,34 @@ impl ContactUseCase for ContactService {
         Ok(contact.map(ContactDto::from))
     }
 
+    async fn get_contacts_by_uids(
+        &self,
+        address_book_id: &str,
+        uids: &[String],
+        user_id: Uuid,
+    ) -> Result<Vec<ContactDto>, DomainError> {
+        let id = Uuid::parse_str(address_book_id)
+            .map_err(|_| DomainError::validation_error("Invalid address book ID format"))?;
+
+        // Check if user has access to the address book
+        self.check_address_book_access(&id, &user_id).await?;
+
+        if uids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let contacts = self
+            .contact_repository
+            .get_contacts_by_uids(&id, uids)
+            .await?;
+        Ok(contacts.into_iter().map(ContactDto::from).collect())
+    }
+
     async fn list_contacts(
         &self,
         address_book_id: &str,
+        limit: Option<i64>,
+        offset: Option<i64>,
         user_id: Uuid,
     ) -> Result<Vec<ContactDto>, DomainError> {
         let id = Uuid::parse_str(address_book_id)
@@ -808,10 +833,17 @@ impl ContactUseCase for ContactService {
         self.check_address_book_access(&id, &user_id).await?;
 
         // Get contacts
-        let contacts = self
-            .contact_repository
-            .get_contacts_by_address_book(&id)
-            .await?;
+        let contacts = if limit.is_some() || offset.is_some() {
+            let limit = limit.unwrap_or(100);
+            let offset = offset.unwrap_or(0);
+            self.contact_repository
+                .get_contacts_by_address_book_paginated(&id, limit, offset)
+                .await?
+        } else {
+            self.contact_repository
+                .get_contacts_by_address_book(&id)
+                .await?
+        };
         let dtos = contacts.into_iter().map(ContactDto::from).collect();
 
         Ok(dtos)
@@ -1324,7 +1356,9 @@ impl StorageUseCase for ContactService {
                 let user_id = Uuid::parse_str(user_id)
                     .map_err(|_| DomainError::validation_error("Invalid user_id format"))?;
 
-                let result = self.list_contacts(address_book_id, user_id).await?;
+                let result = self
+                    .list_contacts(address_book_id, None, None, user_id)
+                    .await?;
                 Ok(serde_json::to_value(result).unwrap())
             }
             "search_contacts" => {

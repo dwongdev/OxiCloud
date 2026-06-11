@@ -28,6 +28,7 @@ use std::sync::Arc;
 use crate::application::adapters::carddav_adapter::{
     CardDavAdapter, CardDavReportType, contact_to_vcard,
 };
+use crate::application::adapters::uid_from_multiget_href;
 use crate::application::adapters::webdav_adapter::{PropFindRequest, PropFindType};
 use crate::application::dtos::address_book_dto::{CreateAddressBookDto, UpdateAddressBookDto};
 use crate::application::dtos::contact_dto::CreateContactVCardDto;
@@ -269,7 +270,7 @@ async fn handle_propfind(
 
             let contacts = if depth != "0" {
                 contact_svc
-                    .list_contacts(address_book_id, user.id)
+                    .list_contacts(address_book_id, None, None, user.id)
                     .await
                     .unwrap_or_default()
             } else {
@@ -359,22 +360,25 @@ async fn handle_report(
 
     let contacts = match &report {
         CardDavReportType::AddressbookQuery { .. } => contact_svc
-            .list_contacts(address_book_id, user.id)
+            .list_contacts(address_book_id, None, None, user.id)
             .await
             .map_err(|e| AppError::internal_error(format!("Failed to list contacts: {}", e)))?,
         CardDavReportType::AddressbookMultiget { hrefs, .. } => {
-            let all_contacts = contact_svc
-                .list_contacts(address_book_id, user.id)
-                .await
-                .map_err(|e| AppError::internal_error(format!("Failed to list contacts: {}", e)))?;
+            // Indexed batch lookup (`uid = ANY(...)`) — a multiget for a
+            // handful of contacts must not pay for listing the whole
+            // address book and filtering client-side.
+            let uids: Vec<String> = hrefs
+                .iter()
+                .filter_map(|href| uid_from_multiget_href(href, ".vcf"))
+                .collect();
 
-            all_contacts
-                .into_iter()
-                .filter(|c| hrefs.iter().any(|href| href.contains(&c.uid)))
-                .collect()
+            contact_svc
+                .get_contacts_by_uids(address_book_id, &uids, user.id)
+                .await
+                .map_err(|e| AppError::internal_error(format!("Failed to fetch contacts: {}", e)))?
         }
         CardDavReportType::SyncCollection { .. } => contact_svc
-            .list_contacts(address_book_id, user.id)
+            .list_contacts(address_book_id, None, None, user.id)
             .await
             .map_err(|e| AppError::internal_error(format!("Failed to list contacts: {}", e)))?,
     };
@@ -559,7 +563,7 @@ async fn handle_get(
     if parts.len() < 2 {
         // GET on address book collection — return all contacts as vcf
         let contacts = contact_svc
-            .list_contacts(address_book_id, user.id)
+            .list_contacts(address_book_id, None, None, user.id)
             .await
             .map_err(|e| AppError::internal_error(format!("Failed to list contacts: {}", e)))?;
 

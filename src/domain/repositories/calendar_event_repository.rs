@@ -53,6 +53,16 @@ pub trait CalendarEventRepository: Send + Sync + 'static {
         ical_uid: &str,
     ) -> CalendarEventRepositoryResult<Option<CalendarEvent>>;
 
+    /// Finds the events matching any of the given iCalendar UIDs in one
+    /// indexed query (`ical_uid = ANY(...)`). Used by CalDAV multiget so a
+    /// request for a handful of events never pays for the whole calendar.
+    /// UIDs with no matching event are silently absent from the result.
+    async fn find_events_by_ical_uids(
+        &self,
+        calendar_id: &Uuid,
+        ical_uids: &[String],
+    ) -> CalendarEventRepositoryResult<Vec<CalendarEvent>>;
+
     /// Counts events in a calendar
     async fn count_events_in_calendar(
         &self,
