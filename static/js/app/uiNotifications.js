@@ -3,8 +3,8 @@
  * Isolates notification rendering policy from ui.js.
  */
 
-import { notifications } from '../core/notifications.js';
 import { announce } from '../core/liveRegion.js';
+import { notifications } from '../core/notifications.js';
 
 const uiNotifications = {
     /**

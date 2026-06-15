@@ -850,10 +850,7 @@ function initPasswordToggles() {
         const sync = () => {
             const shown = input.type === 'text';
             btn.setAttribute('aria-pressed', String(shown));
-            btn.setAttribute(
-                'aria-label',
-                shown ? i18n.t('auth.hidePassword', 'Hide password') : i18n.t('auth.showPassword', 'Show password')
-            );
+            btn.setAttribute('aria-label', shown ? i18n.t('auth.hidePassword', 'Hide password') : i18n.t('auth.showPassword', 'Show password'));
         };
         sync();
         btn.addEventListener('click', () => {
@@ -930,9 +927,7 @@ function initPasswordMatch(passId, confirmId, indicatorId) {
         }
         const ok = pass.value === confirmEl.value;
         out.className = `auth-match show ${ok ? 'auth-match--ok' : 'auth-match--bad'}`;
-        out.textContent = ok
-            ? i18n.t('auth.passwordsMatch', 'Passwords match')
-            : i18n.t('auth.passwords_mismatch', "Passwords don't match");
+        out.textContent = ok ? i18n.t('auth.passwordsMatch', 'Passwords match') : i18n.t('auth.passwords_mismatch', "Passwords don't match");
     };
     pass.addEventListener('input', update);
     confirmEl.addEventListener('input', update);
@@ -1107,9 +1102,7 @@ if (isLoginPage && loginForm) {
         const username = inputVal('login-username');
         const password = inputVal('login-password');
 
-        const loginSubmit = /** @type {HTMLButtonElement | null} */ (
-            document.getElementById('login-submit')
-        );
+        const loginSubmit = /** @type {HTMLButtonElement | null} */ (document.getElementById('login-submit'));
         loginSubmit?.classList.add('is-loading');
         loginSubmit?.setAttribute('aria-busy', 'true');
         if (loginSubmit) loginSubmit.disabled = true;

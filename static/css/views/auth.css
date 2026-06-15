@@ -389,7 +389,9 @@
     border-color: transparent;
     color: var(--color-on-accent);
     /* Subtle halo lifts the active step off the connector track. */
-    box-shadow: 0 0 0 4px var(--color-accent-ring), 0 4px 12px var(--color-accent-shadow);
+    box-shadow:
+        0 0 0 4px var(--color-accent-ring),
+        0 4px 12px var(--color-accent-shadow);
 }
 
 .step-title {

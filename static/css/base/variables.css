@@ -34,11 +34,11 @@
     /* ── Layout shell ──────────────────────────────────────────── */
     /* Fluid sidebar: tracks viewport but clamped to a sane band. */
     --sidebar-width: clamp(220px, 18vw, 280px);
-    --sidebar-width-min: 200px;          /* resizable rail floor (Fase 1) */
-    --sidebar-width-max: 320px;          /* resizable rail ceiling (Fase 1) */
-    --sidebar-width-collapsed: 72px;     /* icon-rail mode (Fase 1) */
-    --gutter: var(--space-6);            /* shared topbar/content horizontal gutter (drops to 16px on phones) */
-    --grid-card-min: 200px;             /* min width of a grid card (tightens on phones) */
+    --sidebar-width-min: 200px; /* resizable rail floor (Fase 1) */
+    --sidebar-width-max: 320px; /* resizable rail ceiling (Fase 1) */
+    --sidebar-width-collapsed: 72px; /* icon-rail mode (Fase 1) */
+    --gutter: var(--space-6); /* shared topbar/content horizontal gutter (drops to 16px on phones) */
+    --grid-card-min: 200px; /* min width of a grid card (tightens on phones) */
 
     /* ── Spacing — 4px grid ────────────────────────────────────── */
     /* Direct steps are multiples of 4; half-steps (0-5/1-5/2-5/3-5)
@@ -88,18 +88,18 @@
 
     /* Modular size scale in rem (root = 16px) so it honors user zoom.
      * --text-base (14px) is the app body default. */
-    --text-2xs: 0.6875rem;  /* 11px */
-    --text-xs: 0.75rem;     /* 12px */
-    --text-sm: 0.8125rem;   /* 13px */
-    --text-base: 0.875rem;  /* 14px */
-    --text-md: 1rem;        /* 16px */
-    --text-lg: 1.125rem;    /* 18px */
-    --text-xl: 1.25rem;     /* 20px */
-    --text-2xl: 1.5rem;     /* 24px */
-    --text-3xl: 1.75rem;    /* 28px */
-    --text-4xl: 2rem;       /* 32px */
-    --text-5xl: 2.5rem;     /* 40px */
-    --text-6xl: 3rem;       /* 48px */
+    --text-2xs: 0.6875rem; /* 11px */
+    --text-xs: 0.75rem; /* 12px */
+    --text-sm: 0.8125rem; /* 13px */
+    --text-base: 0.875rem; /* 14px */
+    --text-md: 1rem; /* 16px */
+    --text-lg: 1.125rem; /* 18px */
+    --text-xl: 1.25rem; /* 20px */
+    --text-2xl: 1.5rem; /* 24px */
+    --text-3xl: 1.75rem; /* 28px */
+    --text-4xl: 2rem; /* 32px */
+    --text-5xl: 2.5rem; /* 40px */
+    --text-6xl: 3rem; /* 48px */
 
     /* Line-heights (leading) — unitless ratios. */
     --leading-none: 1;
@@ -189,8 +189,8 @@
     /* ── Density — comfortable (default) vs compact ────────────── */
     /* Gated by html[data-density="compact"] below. Consumed by list rows
      * and controls in Fase 1. */
-    --density-row-py: var(--space-3);    /* 12px */
-    --density-row-px: var(--space-3-5);  /* 14px */
+    --density-row-py: var(--space-3); /* 12px */
+    --density-row-px: var(--space-3-5); /* 14px */
     --density-gap: var(--space-3);
     --density-control-h: 40px;
 
@@ -218,14 +218,14 @@
      * an alias so no consumer breaks (migration to the canonical names → Fase 1).
      * Each tier clears WCAG AA 4.5:1 on #fff AND the page bg, light and dark. The
      * muted/faint/placeholder tiers used to FAIL (2.3–4.0:1) and are now darkened. */
-    --color-text: light-dark(#2d3748, #e2e8f0);            /* primary body */
-    --color-text-heading: light-dark(#1e293b, #f1f5f9);    /* headings */
-    --color-text-secondary: light-dark(#475569, #cbd5e1);  /* strong secondary */
+    --color-text: light-dark(#2d3748, #e2e8f0); /* primary body */
+    --color-text-heading: light-dark(#1e293b, #f1f5f9); /* headings */
+    --color-text-secondary: light-dark(#475569, #cbd5e1); /* strong secondary */
     /* muted/subtle/faint converge: AA 4.5:1 on the grayish page/muted bgs AND
      * on the lighter dark hover bg leaves only a narrow passing window. */
-    --color-text-muted: light-dark(#5e6a78, #9fadbe);      /* muted */
-    --color-text-subtle: light-dark(#5e6a78, #9fadbe);     /* subtle */
-    --color-text-faint: light-dark(#5e6a78, #9fadbe);      /* faintest still-AA */
+    --color-text-muted: light-dark(#5e6a78, #9fadbe); /* muted */
+    --color-text-subtle: light-dark(#5e6a78, #9fadbe); /* subtle */
+    --color-text-faint: light-dark(#5e6a78, #9fadbe); /* faintest still-AA */
     /* legacy aliases → one of the tiers above */
     --color-text-dark: var(--color-text-secondary);
     --color-text-dim: var(--color-text-secondary);
@@ -274,8 +274,7 @@
         radial-gradient(55% 55% at 95% 98%, var(--color-accent-glow), transparent 58%),
         radial-gradient(48% 48% at 88% 12%, var(--color-accent-glow-soft), transparent 55%),
         radial-gradient(50% 45% at 6% 92%, var(--color-accent-glow-soft), transparent 55%),
-        radial-gradient(78% 64% at 50% 33%, var(--color-bg-surface), transparent 70%),
-        var(--color-bg-page);
+        radial-gradient(78% 64% at 50% 33%, var(--color-bg-surface), transparent 70%), var(--color-bg-page);
     /* Desaturated fractal-noise grain — kills gradient banding and adds a
        tactile, "expensive" film. No colour inside the data-URI (token-safe);
        applied via a low-opacity overlay pseudo-element. */
@@ -676,8 +675,8 @@ html[data-color-scheme="dark"] {
 /* Compact density — tighter rows/controls. Toggled by writing
  * data-density="compact" on <html>; consumed by list/control CSS in Fase 1. */
 html[data-density="compact"] {
-    --density-row-py: var(--space-2);    /* 8px */
-    --density-row-px: var(--space-2-5);  /* 10px */
+    --density-row-py: var(--space-2); /* 8px */
+    --density-row-px: var(--space-2-5); /* 10px */
     --density-gap: var(--space-2);
     --density-control-h: 32px;
 }

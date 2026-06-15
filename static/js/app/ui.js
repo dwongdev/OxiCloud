@@ -16,7 +16,7 @@ import { wopiEditor } from '../features/files/wopiEditor.js';
 import { recent } from '../features/library/recent.js';
 import { buildBatchDownloadUrl } from '../utils/download.js';
 import { positionMenu } from '../utils/menuPosition.js';
-import { loadFiles, filesView } from './filesView.js';
+import { filesView, loadFiles } from './filesView.js';
 import { updateHistory } from './main.js';
 import { activateFilesUI, switchToFilesSection, syncViewContainers } from './navigation.js';
 import { app } from './state.js';
@@ -1057,12 +1057,7 @@ const ui = {
             const active = btn.dataset.sortField === field;
             btn.classList.toggle('is-active', active);
             const colName = btn.querySelector('span')?.textContent || '';
-            btn.setAttribute(
-                'aria-label',
-                active
-                    ? `${colName}: ${reversed ? i18n.t('sort.desc', 'descending') : i18n.t('sort.asc', 'ascending')}`
-                    : colName
-            );
+            btn.setAttribute('aria-label', active ? `${colName}: ${reversed ? i18n.t('sort.desc', 'descending') : i18n.t('sort.asc', 'ascending')}` : colName);
             const arrow = btn.querySelector('.list-header-sort__arrow');
             if (arrow) {
                 arrow.classList.toggle('hidden', !active);

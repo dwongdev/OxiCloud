@@ -455,9 +455,7 @@ async function loadFiles(options = { insertHistory: true }) {
             ? '<div class="skeleton-row"><div class="skeleton skeleton-icon"></div><div class="skeleton skeleton-line skeleton-line--medium"></div><div class="skeleton skeleton-line skeleton-line--short"></div></div>'
             : '<div class="skeleton-card"><div class="skeleton skeleton-thumb"></div><div class="skeleton skeleton-line skeleton-line--medium"></div><div class="skeleton skeleton-line skeleton-line--short"></div></div>';
         const wrapper = isList ? 'files-skeleton' : 'files-grid-view files-skeleton';
-        ui.showError(
-            `<div class="${wrapper}" role="status" aria-busy="true" aria-label="${i18n.t('files.loading')}">${cell.repeat(8)}</div>`
-        );
+        ui.showError(`<div class="${wrapper}" role="status" aria-busy="true" aria-label="${i18n.t('files.loading')}">${cell.repeat(8)}</div>`);
     }, 100);
 
     // A temporary guard: _loadPage sets _loading itself, but we need to

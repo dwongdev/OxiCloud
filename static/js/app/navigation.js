@@ -111,9 +111,7 @@ function initSidebarToggle() {
     // Trap Tab focus inside the open drawer (mobile).
     sidebar.addEventListener('keydown', (e) => {
         if (e.key !== 'Tab' || !sidebar.classList.contains('open')) return;
-        const f = /** @type {NodeListOf<HTMLElement>} */ (
-            sidebar.querySelectorAll('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])')
-        );
+        const f = /** @type {NodeListOf<HTMLElement>} */ (sidebar.querySelectorAll('a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])'));
         if (!f.length) return;
         const first = f[0];
         const last = f[f.length - 1];

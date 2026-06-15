@@ -27,9 +27,7 @@ function formatFileSize(bytes) {
     const k = 1024;
     const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
-    const num = new Intl.NumberFormat(i18n.getCurrentLocale(), { maximumFractionDigits: 2 }).format(
-        bytes / k ** i
-    );
+    const num = new Intl.NumberFormat(i18n.getCurrentLocale(), { maximumFractionDigits: 2 }).format(bytes / k ** i);
 
     return `${num} ${sizes[i]}`;
 }
@@ -89,10 +87,7 @@ function formatDateShort(value) {
  */
 function formatRelativeTime(value) {
     if (!value) return '';
-    const date =
-        value instanceof Date
-            ? value
-            : new Date(typeof value === 'number' && value < 1e12 ? value * 1000 : value);
+    const date = value instanceof Date ? value : new Date(typeof value === 'number' && value < 1e12 ? value * 1000 : value);
     if (Number.isNaN(date.getTime())) return String(value);
     const diffSec = Math.round((date.getTime() - Date.now()) / 1000);
     const abs = Math.abs(diffSec);

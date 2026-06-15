@@ -47,8 +47,7 @@ const JUST_ADDED_KEY = '__oxicloud_just_added__';
  */
 function gridMetaDate(value) {
     if (!value) return '';
-    const date =
-        value instanceof Date ? value : new Date(typeof value === 'number' && value < 1e12 ? value * 1000 : value);
+    const date = value instanceof Date ? value : new Date(typeof value === 'number' && value < 1e12 ? value * 1000 : value);
     if (Number.isNaN(date.getTime())) return '';
     const ageDays = (Date.now() - date.getTime()) / 86_400_000;
     return ageDays > 30 ? formatDateShort(value) : formatRelativeTime(value);
