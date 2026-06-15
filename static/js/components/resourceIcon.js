@@ -45,7 +45,7 @@ function buildResourceIcon(item, resourceType) {
 
         const img = document.createElement('img');
         img.className = 'file-thumb';
-        img.src = `/api/files/${file.id}/thumbnail/icon`;
+        img.src = `/api/files/${file.id}/thumbnail/preview`;
         img.loading = 'lazy';
         img.alt = '';
         img.addEventListener('error', () => {
