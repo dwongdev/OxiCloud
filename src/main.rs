@@ -4,7 +4,6 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -268,10 +267,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    // Ensure locales directory exists for i18n
-    let locales_path = PathBuf::from("./static/locales");
-    if !locales_path.exists() {
-        std::fs::create_dir_all(&locales_path).expect("Failed to create locales directory");
+    // Locales directory for i18n. Derived from the configured static path
+    // (OXICLOUD_STATIC_PATH, defaults to ./static) so deployments that ship
+    // assets from a non-default location — or the build.rs-bundled
+    // `./static-dist` in release — find their locale files correctly.
+    //
+    // Read-only at runtime: locales ship as static assets (build.rs bundles
+    // them into static-dist, the Dockerfile copies them into /app/static).
+    // Fail-fast if the path is missing rather than silently creating an
+    // empty directory and limping along with a "translation missing" error
+    // on every request later.
+    let locales_path = config.static_path.join("locales");
+    if !locales_path.is_dir() {
+        panic!(
+            "FATAL: locales directory not found at {}. \
+             Check OXICLOUD_STATIC_PATH (currently {}) and ensure the \
+             static asset bundle includes a `locales/` subdirectory.",
+            locales_path.display(),
+            config.static_path.display()
+        );
     }
 
     // Build all services via the factory
