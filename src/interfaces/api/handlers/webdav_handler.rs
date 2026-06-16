@@ -1365,6 +1365,17 @@ async fn handle_move(
     // SECURITY: reject path-traversal in destination
     reject_path_traversal(&destination_path)?;
 
+    // Normalize destination through the SAME path-prefixing that
+    // `resolve_webdav_path` applied to `source_path` during dispatch.
+    // Without this, comparing source_parent_path (already prefixed with
+    // the user's home folder name) against dest_parent_path (raw from
+    // the URL, no prefix) always reports "different parent" — even for a
+    // pure rename at the same level — and breaks the move/rename branch
+    // selection below.
+    let destination_path = resolve_webdav_path(&state, user.id, &destination_path)
+        .await
+        .unwrap_or(destination_path);
+
     // Destination lock guard: MOVE also creates/replaces a resource at
     // the destination. If that path is locked, the same If: header must
     // satisfy it.
@@ -1462,17 +1473,33 @@ async fn handle_move(
         }
         ResolvedResource::File(file) => {
             if source_parent_path != dest_parent_path {
-                if !dest_parent_path.is_empty()
-                    && let Ok(parent) = folder_service.get_folder_by_path(dest_parent_path).await
-                {
+                // Resolve the destination's parent PATH into a folder ID
+                // before handing it to move_file_with_perms (which takes
+                // an Option<folder_id String>, not a path). Previously
+                // the path was passed straight through and the move
+                // would silently fail because no row matches a folder
+                // whose id literally equals the path text.
+                let target_parent_id = if dest_parent_path.is_empty() {
+                    None
+                } else {
+                    let parent = folder_service
+                        .get_folder_by_path(dest_parent_path)
+                        .await
+                        .map_err(|_| {
+                            AppError::not_found(format!(
+                                "Destination parent not found: {}",
+                                dest_parent_path
+                            ))
+                        })?;
                     assert_owner(
                         parent.owner_id.as_deref(),
                         &user.id.to_string(),
                         dest_parent_path,
                     )?;
-                }
+                    Some(parent.id)
+                };
                 file_management_service
-                    .move_file_with_perms(&file.id, user.id, Some(dest_parent_path.to_string()))
+                    .move_file_with_perms(&file.id, user.id, target_parent_id)
                     .await
                     .map_err(AppError::from)?;
             }
@@ -1546,6 +1573,13 @@ async fn handle_copy(
 
     // SECURITY: reject path-traversal in destination
     reject_path_traversal(&destination_path)?;
+
+    // Normalize through the same path-prefixing the dispatcher applied
+    // to source_path. See the long comment in handle_move for why this
+    // matters — same root-cause class of asymmetric-path bugs.
+    let destination_path = resolve_webdav_path(&state, user.id, &destination_path)
+        .await
+        .unwrap_or(destination_path);
 
     // Active-lock guard on the destination (RFC 4918 §9.10.4).
     if let Some(resp) = enforce_native_lock(
@@ -1654,24 +1688,20 @@ async fn handle_copy(
             }
         }
         ResolvedResource::File(file) => {
-            // M8b fix: copy_file_with_perms takes (file_id, caller, target_folder)
-            // but no rename — so a copy to a different name in the SAME folder
-            // (typical for root-level "duplicate" pattern) collided with the
-            // source filename and 500'd. Mirror MOVE: copy first, then rename
-            // if the dest filename differs from the source's name.
+            // M8b fix: copy_file_with_perms now accepts an optional new
+            // filename — without it, a copy to the same folder with a
+            // different name collided with the source on the
+            // (folder, name, user) unique index. Pass dest_name when it
+            // differs from the source so the INSERT lands with the
+            // intended name in a single round-trip; pass None for the
+            // "same name in a different folder" case to keep the existing
+            // semantics.
             let file_management_service = &state.applications.file_management_service;
-            let copied = file_management_service
-                .copy_file_with_perms(&file.id, user.id, target_parent_id)
+            let copy_name = (file.name != dest_name).then(|| dest_name.to_string());
+            file_management_service
+                .copy_file_with_perms(&file.id, user.id, target_parent_id, copy_name)
                 .await
                 .map_err(|e| AppError::internal_error(format!("Failed to copy file: {}", e)))?;
-            if file.name != dest_name {
-                file_management_service
-                    .rename_file_with_perms(&copied.id, user.id, dest_name)
-                    .await
-                    .map_err(|e| {
-                        AppError::internal_error(format!("Failed to rename copied file: {}", e))
-                    })?;
-            }
         }
     }
 

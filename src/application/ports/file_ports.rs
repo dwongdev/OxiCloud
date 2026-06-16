@@ -255,11 +255,17 @@ pub trait FileManagementUseCase: Send + Sync + 'static {
     ) -> Result<FileDto, DomainError>;
 
     /// Copies a file, enforcing that `caller_id` is the owner.
+    ///
+    /// `new_name`, when `Some(_)`, becomes the copy's filename — without it
+    /// the copy keeps the source's name, which makes "same folder, different
+    /// name" copies (classic WebDAV `COPY /a.txt → /b.txt`) collide on the
+    /// `(folder, name, user)` unique index.
     async fn copy_file_with_perms(
         &self,
         file_id: &str,
         caller_id: Uuid,
         target_folder_id: Option<String>,
+        new_name: Option<String>,
     ) -> Result<FileDto, DomainError>;
 
     /// Renames a file, enforcing that `caller_id` is the owner.

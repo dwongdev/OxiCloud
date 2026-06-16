@@ -228,6 +228,7 @@ impl FileWritePort for MockFileWritePort {
         &self,
         _file_id: &str,
         _target_folder_id: Option<String>,
+        _new_name: Option<&str>,
     ) -> Result<File, DomainError> {
         unimplemented!()
     }

@@ -397,10 +397,12 @@ impl FileWritePort for FileBlobWriteRepository {
         &self,
         file_id: &str,
         target_folder_id: Option<String>,
+        new_name: Option<&str>,
     ) -> Result<File, DomainError> {
         // Atomic CTE: read source file → insert new row with same blob_hash → increment ref_count.
         // Single round-trip; blob content is NOT copied (dedup makes this zero-copy).
         let target_fid = target_folder_id.clone();
+        let rename_to = new_name.map(|s| s.to_string());
 
         let row = retry_on_deadlock("files.copy", || {
             sqlx::query_as::<
@@ -424,7 +426,7 @@ impl FileWritePort for FileBlobWriteRepository {
                 ),
                 new_file AS (
                     INSERT INTO storage.files (name, folder_id, user_id, blob_hash, size, mime_type, category_order)
-                    SELECT name,
+                    SELECT COALESCE($3::text, name),
                            COALESCE($2::uuid, folder_id),
                            user_id,
                            blob_hash,
@@ -442,6 +444,7 @@ impl FileWritePort for FileBlobWriteRepository {
             )
             .bind(file_id)
             .bind(&target_fid)
+            .bind(&rename_to)
             .fetch_optional(self.pool.as_ref())
         })
         .await
