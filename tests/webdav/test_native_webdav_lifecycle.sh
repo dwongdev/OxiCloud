@@ -180,39 +180,18 @@ pass "M4: Range bytes=0-9 → 206 + 10 bytes"
 # code path where it should actually work: root-level MOVE of a
 # file PUT at root. If even this 404s, the bug is broader and
 # native MOVE is unusable, not just nested.
-echo "  M5: MOVE /webdav/m3-sample.txt → /webdav/m5-moved.txt"
+echo "  M5: MOVE /webdav/m3-sample.txt → /webdav/m5-moved.txt → 201/204"
 STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X MOVE \
     -H "Destination: $DAV_BASE/m5-moved.txt" \
     "$DAV_BASE/m3-sample.txt")
-case "$STATUS" in
-    201|204)
-        pass "M5: root-level MOVE → $STATUS"
-        ;;
-    404)
-        # KNOWN BUG: native MOVE returns 404 on a file that was
-        # PUT at the same path, even at root level. The strict
-        # `resolve_path_for_user` SQL query doesn't match what
-        # the PUT's `save_file_from_temp_with_dedup` stored —
-        # most likely because the WebDAV dispatcher's path
-        # prepending (`resolve_webdav_path` → "My Folder - X/foo")
-        # doesn't match the user's actual home folder path
-        # field in the DB. Same root cause makes nested MOVE
-        # (see M3 comment) unusable too.
-        #
-        # Where the fix lives:
-        # `interfaces/api/handlers/webdav_handler.rs::handle_move`
-        # currently calls `resolver.resolve_path_for_user`. It
-        # should either:
-        #   (a) fall back to `file_retrieval_service.get_file_by_path`
-        #       (the same lookup GET uses successfully), or
-        #   (b) normalise the source path through the same
-        #       transformer the PUT writes through.
-        pass "M5: root-level MOVE → 404 (KNOWN BUG: resolve_path_for_user mismatch — pinned)"
-        ;;
-    *)
-        fail "M5: unexpected status $STATUS"
-        ;;
-esac
+[[ "$STATUS" == "201" || "$STATUS" == "204" ]] \
+    || fail "M5: root-level MOVE expected 201/204, got $STATUS"
+# Source is gone, destination present.
+[[ "$(dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$DAV_BASE/m3-sample.txt")" == "404" ]] \
+    || fail "M5: source still resolvable after MOVE"
+[[ "$(dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$DAV_BASE/m5-moved.txt")" == "207" ]] \
+    || fail "M5: destination not found after MOVE"
+pass "M5: root-level MOVE → $STATUS, source gone, destination present"
 
 # ─────────────────────────────────────────────────────────────
 # M6 — MKCOL sub/ → 201
@@ -228,16 +207,11 @@ pass "M6: native MKCOL → 201"
 # ─────────────────────────────────────────────────────────────
 echo "  M7: DELETE /webdav/m6-sub/ → 204"
 STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X DELETE "$DAV_BASE/m6-sub/")
-case "$STATUS" in
-    204) pass "M7: native DELETE → 204" ;;
-    404)
-        # If DELETE also hits the resolve_path_for_user 404 trap
-        # (it uses the same resolver), pin as same root-cause
-        # KNOWN BUG.
-        pass "M7: native DELETE → 404 (KNOWN BUG: same resolve_path_for_user mismatch as M5 — pinned)"
-        ;;
-    *) fail "M7: unexpected status $STATUS" ;;
-esac
+[[ "$STATUS" == "204" ]] \
+    || fail "M7: native DELETE expected 204, got $STATUS"
+[[ "$(dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$DAV_BASE/m6-sub/")" == "404" ]] \
+    || fail "M7: folder still resolvable after DELETE"
+pass "M7: native DELETE → 204, folder gone"
 
 # ─────────────────────────────────────────────────────────────
 # M8 — COPY a.txt → b.txt (pin whatever current behaviour is)
@@ -245,57 +219,25 @@ esac
 # M8 source depends on whether M5 MOVE actually worked. If M5 was
 # pinned as KNOWN BUG (404), the source for M8 is still
 # m3-sample.txt at root, not m5-moved.txt.
-echo "  M8: COPY native source → /webdav/m8-copy.txt"
-M8_SOURCE_URL="$DAV_BASE/m3-sample.txt"
-# If M5 actually moved the file, the source name changed.
-if dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$DAV_BASE/m5-moved.txt" | grep -q "207"; then
-    M8_SOURCE_URL="$DAV_BASE/m5-moved.txt"
+echo "  M8: COPY /webdav/m5-moved.txt → /webdav/m8-copy.txt"
+# M5 now succeeds, so the source is at m5-moved.txt. (Kept fallback
+# to m3-sample.txt to surface a clear error if M5 regressed.)
+M8_SOURCE_URL="$DAV_BASE/m5-moved.txt"
+if ! dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$DAV_BASE/m5-moved.txt" | grep -q "207"; then
+    M8_SOURCE_URL="$DAV_BASE/m3-sample.txt"
 fi
 STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X COPY \
     -H "Destination: $DAV_BASE/m8-copy.txt" \
     "$M8_SOURCE_URL")
-case "$STATUS" in
-    201|204)
-        # Confirm source still exists (COPY != MOVE).
-        SRC_STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$M8_SOURCE_URL")
-        DST_STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$DAV_BASE/m8-copy.txt")
-        [[ "$SRC_STATUS" == "207" ]] \
-            || fail "M8: COPY removed source ($SRC_STATUS instead of 207) — that's MOVE behaviour, not COPY"
-        [[ "$DST_STATUS" == "207" ]] \
-            || fail "M8: destination not present after COPY ($DST_STATUS)"
-        pass "M8: native COPY → $STATUS, source preserved, destination present"
-        ;;
-    405)
-        pass "M8: native COPY → 405 METHOD_NOT_ALLOWED — handler not implemented, pinned"
-        ;;
-    404)
-        pass "M8: native COPY → 404 (KNOWN BUG: same resolve_path_for_user mismatch as M5/M7 — pinned)"
-        ;;
-    500)
-        # KNOWN BUG: the COPY file branch at
-        # `interfaces/api/handlers/webdav_handler.rs::handle_copy`
-        # line ~1639 passes `(file.id, user.id, target_folder_id)`
-        # to `copy_file_with_perms` — no destination NAME. The
-        # copy therefore lands in the target folder under the
-        # SOURCE's name, ignoring the rename the client requested.
-        # When source and destination resolve to the same folder
-        # (common for root-level COPY), this collides with the
-        # source itself → AlreadyExists → leaks as 500.
-        #
-        # Where the fix lives: same handler — either
-        #   (a) extend `copy_file_with_perms` to accept an
-        #       optional new name (the folder-tree branch on
-        #       line ~1591 already passes a name into
-        #       `copy_folder_tree_with_perms`), or
-        #   (b) follow the copy with a `rename_file_with_perms`
-        #       call if `dest_filename != source.name` (mirrors
-        #       what MOVE does at line ~1347).
-        pass "M8: native COPY → 500 (KNOWN BUG: dest filename discarded, collides with source — pinned)"
-        ;;
-    *)
-        fail "M8: unexpected COPY status $STATUS"
-        ;;
-esac
+[[ "$STATUS" == "201" || "$STATUS" == "204" ]] \
+    || fail "M8: native COPY expected 201/204, got $STATUS"
+SRC_STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$M8_SOURCE_URL")
+DST_STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$DAV_BASE/m8-copy.txt")
+[[ "$SRC_STATUS" == "207" ]] \
+    || fail "M8: COPY removed source ($SRC_STATUS instead of 207) — that's MOVE behaviour, not COPY"
+[[ "$DST_STATUS" == "207" ]] \
+    || fail "M8: destination not present after COPY ($DST_STATUS)"
+pass "M8: native COPY → $STATUS, source preserved, destination renamed correctly"
 
 # ═════════════════════════════════════════════════════════════
 # Group N — LOCK / UNLOCK
@@ -332,44 +274,101 @@ LOCK_TOKEN=$(grep -i '^lock-token:' <<< "$HEADERS" | awk '{print $2}' | tr -d '\
 pass "N1: LOCK → 200 + Lock-Token=$LOCK_TOKEN"
 
 # ─────────────────────────────────────────────────────────────
-# N2 — PUT without the lock token → 423 Locked
-# ─────────────────────────────────────────────────────────────
-# ─────────────────────────────────────────────────────────────
-# N2 — PUT to a locked file without the token
+# N2 — PUT to a locked file without the token → 423 Locked
 #
 # RFC 4918 §9.10.4 + §6: a writeable resource under an
 # exclusive lock MUST reject conflicting writes with 423
-# Locked. OxiCloud's native handler currently does NOT consult
-# the lock store before writing — LOCK just produces a token,
-# and any PUT/DELETE/MOVE/PROPPATCH succeeds regardless. The
-# class-2 DAV advertisement in M1 is therefore aspirational:
-# the protocol surface exists, the enforcement doesn't.
-#
-# Where the fix lives:
-# `interfaces/api/handlers/webdav_handler.rs::handle_put` (and
-# the mutator paths in handle_delete / handle_move / handle_copy /
-# handle_proppatch) — each needs to check the WebDAV lock service
-# for an active lock on the target path and reject with 423 if
-# the request doesn't carry a matching `If: (<token>)` header.
-# The lock store itself already records tokens — confirmed by N1
-# capturing one — so the gap is purely on the read-side check.
+# Locked unless the request submits the lock token in `If:`.
+# N2b verifies the inverse: same PUT with the correct
+# `If: (<token>)` header succeeds, proving the gate isn't
+# blocking legitimate updates from the lock owner.
 # ─────────────────────────────────────────────────────────────
-echo "  N2: PUT /webdav/n-locked.txt without If:(<token>) — pinned: lock not enforced (RFC would 423)"
+echo "  N2: PUT /webdav/n-locked.txt without If:(<token>) → 423"
 STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X PUT \
     -H "Content-Type: text/plain" \
     --data-binary 'tampered contents' \
     "$DAV_BASE/n-locked.txt")
-case "$STATUS" in
-    204)
-        pass "N2: PUT succeeded despite active lock → 204 (KNOWN BUG: lock not enforced — pinned)"
-        ;;
-    423)
-        fail "N2: server now returns 423 Locked. Lock enforcement was added — update this pin to assert == 423."
-        ;;
-    *)
-        fail "N2: unexpected status $STATUS"
-        ;;
-esac
+[[ "$STATUS" == "423" ]] \
+    || fail "N2: expected 423 Locked for PUT to locked path without token, got $STATUS"
+pass "N2: PUT to locked path without token → 423"
+
+echo "  N2b: PUT /webdav/n-locked.txt WITH If:(<token>) → 204"
+STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X PUT \
+    -H "Content-Type: text/plain" \
+    -H "If: (<$LOCK_TOKEN>)" \
+    --data-binary 'authorised update' \
+    "$DAV_BASE/n-locked.txt")
+[[ "$STATUS" == "204" ]] \
+    || fail "N2b: expected 204 No Content for PUT with correct lock token, got $STATUS"
+pass "N2b: PUT with matching If:(<token>) → 204"
+
+# ─────────────────────────────────────────────────────────────
+# N2c–N2f — Lock enforcement on the other mutator methods
+#
+# RFC 4918 §9.10.4: a lock binds every mutating method, not just
+# PUT. The native handler's `enforce_native_lock` helper was
+# designed to be called by handle_delete / handle_move /
+# handle_copy / handle_proppatch as well — these tests prove the
+# wire is in. Each case uses the n-locked.txt resource locked
+# above and a `WITHOUT If:` request, expecting 423. Positive
+# (with-token) coverage is implicit: the M-series above already
+# exercises each method on unlocked resources and asserts the
+# success codes, so a regression that hard-rejected every call
+# would fail there.
+#
+# Order matters: each must run while the lock is still held,
+# i.e. before N3 below releases it.
+# ─────────────────────────────────────────────────────────────
+echo "  N2c: DELETE /webdav/n-locked.txt without If:(<token>) → 423"
+STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X DELETE \
+    "$DAV_BASE/n-locked.txt")
+[[ "$STATUS" == "423" ]] \
+    || fail "N2c: expected 423 Locked for DELETE on locked path without token, got $STATUS"
+# The file must still be present after a rejected DELETE.
+[[ "$(dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$DAV_BASE/n-locked.txt")" == "207" ]] \
+    || fail "N2c: file removed after rejected DELETE (423 was advisory only?)"
+pass "N2c: DELETE on locked path without token → 423, resource preserved"
+
+echo "  N2d: MOVE /webdav/n-locked.txt without If:(<token>) → 423 (source-side lock)"
+STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X MOVE \
+    -H "Destination: $DAV_BASE/n-locked-moved.txt" \
+    "$DAV_BASE/n-locked.txt")
+[[ "$STATUS" == "423" ]] \
+    || fail "N2d: expected 423 Locked for MOVE on locked source without token, got $STATUS"
+[[ "$(dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$DAV_BASE/n-locked.txt")" == "207" ]] \
+    || fail "N2d: source disappeared after rejected MOVE"
+[[ "$(dav_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$DAV_BASE/n-locked-moved.txt")" == "404" ]] \
+    || fail "N2d: destination created after rejected MOVE"
+pass "N2d: MOVE with locked source and no token → 423, no state mutated"
+
+echo "  N2e: COPY into /webdav/n-locked.txt (locked destination) without If:(<token>) → 423"
+# Set up a fresh unlocked source for the COPY.
+dav_curl -o /dev/null -X PUT -H "Content-Type: text/plain" \
+    --data-binary 'n2e copy source' \
+    "$DAV_BASE/n2e-copy-src.txt" > /dev/null
+STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X COPY \
+    -H "Destination: $DAV_BASE/n-locked.txt" \
+    "$DAV_BASE/n2e-copy-src.txt")
+[[ "$STATUS" == "423" ]] \
+    || fail "N2e: expected 423 Locked for COPY into locked destination without token, got $STATUS"
+# The locked destination's content must not have been replaced.
+BODY=$(dav_curl -s "$DAV_BASE/n-locked.txt")
+[[ "$BODY" == "authorised update" ]] \
+    || fail "N2e: locked destination's content was overwritten (got '$BODY')"
+pass "N2e: COPY into locked destination without token → 423, target untouched"
+
+echo "  N2f: PROPPATCH /webdav/n-locked.txt without If:(<token>) → 423"
+PROPPATCH_BODY='<?xml version="1.0" encoding="utf-8"?>
+<d:propertyupdate xmlns:d="DAV:">
+  <d:set><d:prop><d:displayname>tampered</d:displayname></d:prop></d:set>
+</d:propertyupdate>'
+STATUS=$(dav_curl -o /dev/null -w "%{http_code}" -X PROPPATCH \
+    -H "Content-Type: application/xml" \
+    --data "$PROPPATCH_BODY" \
+    "$DAV_BASE/n-locked.txt")
+[[ "$STATUS" == "423" ]] \
+    || fail "N2f: expected 423 Locked for PROPPATCH on locked path without token, got $STATUS"
+pass "N2f: PROPPATCH on locked path without token → 423"
 
 # ─────────────────────────────────────────────────────────────
 # N3 — UNLOCK with token → 204; subsequent PUT succeeds

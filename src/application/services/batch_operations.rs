@@ -145,7 +145,12 @@ impl BatchOperationService {
 
             async move {
                 let copy_result = mgmt
-                    .copy_file_with_perms(&file_id, user_id, target_folder.map(|s| s.to_string()))
+                    .copy_file_with_perms(
+                        &file_id,
+                        user_id,
+                        target_folder.map(|s| s.to_string()),
+                        None,
+                    )
                     .await;
                 (file_id, copy_result)
             }

@@ -581,23 +581,55 @@ impl FolderRepository for FolderDbRepository {
     // ── Trash operations ──
 
     async fn move_to_trash(&self, folder_id: &str) -> Result<(), DomainError> {
-        // Only mark the folder itself as trashed.
-        // Child files and sub-folders are implicitly hidden because their
-        // ancestor is trashed — list queries already filter NOT is_trashed,
-        // and folder navigation won't reach a trashed folder's children.
+        // Soft-delete the whole subtree in one statement: the root flips
+        // `is_trashed` and records `original_parent_id` so restore knows
+        // where to put it back; every descendant (folder or file) that
+        // wasn't already in trash flips `is_trashed` too but leaves the
+        // `original_*` column NULL. That NULL is the marker the restore
+        // path uses to tell "cascade-trashed with the root" from
+        // "independently trashed earlier" — the latter must stay in
+        // trash even when the root is restored.
+        //
+        // Without this cascade, descendants used to remain `is_trashed = false`
+        // and stay directly addressable by their full path (PROPFIND on
+        // `/g9-tree/file.txt` still resolved 207 even though the parent
+        // collection was gone) — a class of data-integrity drift that
+        // confused desktop-sync tree walks.
         let result = retry_on_deadlock("folders.trash", || {
             sqlx::query_scalar::<_, i64>(
                 r#"
-                WITH trash_folder AS (
+                WITH trash_root AS (
                     UPDATE storage.folders
                        SET is_trashed = TRUE,
                            trashed_at = NOW(),
                            original_parent_id = parent_id,
                            updated_at = NOW()
                      WHERE id = $1::uuid AND NOT is_trashed
+                    RETURNING id, lpath
+                ),
+                trash_descendant_folders AS (
+                    UPDATE storage.folders f
+                       SET is_trashed = TRUE,
+                           trashed_at = NOW(),
+                           updated_at = NOW()
+                      FROM trash_root tr
+                     WHERE f.lpath <@ tr.lpath
+                       AND f.id != tr.id
+                       AND NOT f.is_trashed
+                    RETURNING 1
+                ),
+                trash_descendant_files AS (
+                    UPDATE storage.files fi
+                       SET is_trashed = TRUE,
+                           trashed_at = NOW(),
+                           updated_at = NOW()
+                      FROM trash_root tr
+                      JOIN storage.folders f ON f.lpath <@ tr.lpath
+                     WHERE fi.folder_id = f.id
+                       AND NOT fi.is_trashed
                     RETURNING 1
                 )
-                SELECT COUNT(*) FROM trash_folder
+                SELECT COUNT(*) FROM trash_root
                 "#,
             )
             .bind(folder_id)
@@ -618,16 +650,18 @@ impl FolderRepository for FolderDbRepository {
         folder_id: &str,
         _original_path: &str,
     ) -> Result<(), DomainError> {
-        // Only restore the folder itself.
-        // Child files were never marked as trashed — they become visible
-        // again automatically once their parent folder is un-trashed.
-        // The BEFORE UPDATE trigger recomputes path/lpath when
-        // original_parent_id is restored; the cascade trigger
-        // batch-updates all descendants via the GiST lpath index.
+        // Inverse of the cascade in `move_to_trash`: restore the root
+        // (BEFORE UPDATE trigger recomputes path/lpath via the parent_id
+        // change), then un-trash every descendant whose `original_*`
+        // column is NULL — those are the rows we cascade-trashed
+        // ourselves. Descendants that were independently trashed
+        // *before* this folder went to trash have `original_*` set, so
+        // they correctly stay in trash and continue to show up as
+        // top-level trash entries via `storage.trash_items`.
         let result = retry_on_deadlock("folders.restore", || {
             sqlx::query_scalar::<_, i64>(
                 r#"
-                WITH restore_folder AS (
+                WITH restore_root AS (
                     UPDATE storage.folders
                        SET is_trashed = FALSE,
                            trashed_at = NULL,
@@ -635,9 +669,33 @@ impl FolderRepository for FolderDbRepository {
                            original_parent_id = NULL,
                            updated_at = NOW()
                      WHERE id = $1::uuid AND is_trashed
+                    RETURNING id, lpath
+                ),
+                restore_descendant_folders AS (
+                    UPDATE storage.folders f
+                       SET is_trashed = FALSE,
+                           trashed_at = NULL,
+                           updated_at = NOW()
+                      FROM restore_root rr
+                     WHERE f.lpath <@ rr.lpath
+                       AND f.id != rr.id
+                       AND f.is_trashed
+                       AND f.original_parent_id IS NULL
+                    RETURNING 1
+                ),
+                restore_descendant_files AS (
+                    UPDATE storage.files fi
+                       SET is_trashed = FALSE,
+                           trashed_at = NULL,
+                           updated_at = NOW()
+                      FROM restore_root rr
+                      JOIN storage.folders f ON f.lpath <@ rr.lpath
+                     WHERE fi.folder_id = f.id
+                       AND fi.is_trashed
+                       AND fi.original_folder_id IS NULL
                     RETURNING 1
                 )
-                SELECT COUNT(*) FROM restore_folder
+                SELECT COUNT(*) FROM restore_root
                 "#,
             )
             .bind(folder_id)

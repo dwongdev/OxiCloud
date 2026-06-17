@@ -108,64 +108,65 @@ STATUS=$(nc_curl -o /dev/null -w "%{http_code}" -X MOVE \
 pass "G3: URL-encoded destination decoded correctly"
 
 # ─────────────────────────────────────────────────────────────
-# G4 / G5 — Overwrite header behaviour (pinned: not honoured)
+# G4 / G5 / G5b — Overwrite header (RFC 4918 §9.9.4)
+#
+# G4  : Overwrite: F + destination exists → 412 (refuse)
+# G5  : Overwrite: T + destination exists → 204 (replace)
+# G5b : Overwrite header absent → default T per spec → 204
+# G5c : Overwrite: F + destination ABSENT → 201 (normal create)
 # ─────────────────────────────────────────────────────────────
-echo "  G4: MOVE with Overwrite: F to an existing path (pinned: SERVER BUG — leaks 500)"
+echo "  G4: MOVE with Overwrite: F to an existing path → 412"
 put_nc_file "g4-src.txt"  "G4 source"
 put_nc_file "g4-dest.txt" "G4 destination (should remain)"
 STATUS=$(nc_curl -o /dev/null -w "%{http_code}" -X MOVE \
     -H "Destination: $NC_FILES_BASE/g4-dest.txt" \
     -H "Overwrite: F" \
     "$NC_FILES_BASE/g4-src.txt")
-case "$STATUS" in
-    500)
-        # KNOWN BUG: the NC MOVE handler doesn't intercept
-        # `Overwrite: F` and doesn't map the domain-layer
-        # `AlreadyExists` to 412. It tries to rename, the
-        # storage layer 409s "name already taken", and the
-        # handler bubbles that up as 500. NC desktop will
-        # interpret 500 as "server transient error" and
-        # retry, which masks the real conflict.
-        #
-        # The right fix is in `interfaces/nextcloud/webdav_handler.rs::handle_move`:
-        # check `Overwrite: F` BEFORE attempting the rename, return
-        # 412 on collision; OR when Overwrite is omitted/T, delete
-        # the destination first (replace semantics, → 204).
-        pass "G4: Overwrite: F → 500 (KNOWN BUG: should be 412 per RFC 4918 §9.9.4 — pinned)"
-        ;;
-    412)
-        fail "G4: server now correctly returns 412 for Overwrite: F. Bug is fixed — update this pin to assert == 412."
-        ;;
-    201|204)
-        fail "G4: server now silently overwrites despite Overwrite: F (status $STATUS) — this would be a *different* bug; RFC requires 412."
-        ;;
-    *)
-        fail "G4: unexpected status $STATUS"
-        ;;
-esac
+[[ "$STATUS" == "412" ]] \
+    || fail "G4: expected 412 Precondition Failed for Overwrite: F + collision, got $STATUS"
+# Source and destination must both still exist with original contents.
+[[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/g4-src.txt")" == "207" ]] \
+    || fail "G4: source disappeared after 412 (move should have been refused, not partially applied)"
+[[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/g4-dest.txt")" == "207" ]] \
+    || fail "G4: destination disappeared after 412"
+pass "G4: Overwrite: F + collision → 412, source and destination intact"
 
-echo "  G5: MOVE with Overwrite: T to an existing path (pinned: SERVER BUG — leaks 500)"
+echo "  G5: MOVE with Overwrite: T to an existing path → 204"
 put_nc_file "g5-src.txt"  "G5 source"
 put_nc_file "g5-dest.txt" "G5 destination (to be replaced)"
 STATUS=$(nc_curl -o /dev/null -w "%{http_code}" -X MOVE \
     -H "Destination: $NC_FILES_BASE/g5-dest.txt" \
     -H "Overwrite: T" \
     "$NC_FILES_BASE/g5-src.txt")
-case "$STATUS" in
-    500)
-        # Same root cause as G4: the handler doesn't consider the
-        # `Overwrite` header at all. With `Overwrite: T` it SHOULD
-        # delete the destination first and proceed (→ 204), but
-        # today it bubbles up the storage-layer "Already Exists".
-        pass "G5: Overwrite: T → 500 (KNOWN BUG: should be 204 per RFC 4918 §9.9.4 — pinned)"
-        ;;
-    204)
-        fail "G5: server now correctly returns 204 for Overwrite: T. Bug is fixed — update this pin to assert == 204."
-        ;;
-    *)
-        fail "G5: unexpected status $STATUS"
-        ;;
-esac
+[[ "$STATUS" == "204" ]] \
+    || fail "G5: expected 204 No Content for Overwrite: T + collision, got $STATUS"
+# Source gone, destination now has the source's content.
+[[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/g5-src.txt")" == "404" ]] \
+    || fail "G5: source still present after successful overwrite move"
+DEST_BODY=$(nc_curl -s "$NC_FILES_BASE/g5-dest.txt")
+[[ "$DEST_BODY" == "G5 source" ]] \
+    || fail "G5: destination content not replaced; got '$DEST_BODY'"
+pass "G5: Overwrite: T + collision → 204, destination replaced"
+
+echo "  G5b: MOVE with no Overwrite header to an existing path → 204 (default T)"
+put_nc_file "g5b-src.txt"  "G5b source"
+put_nc_file "g5b-dest.txt" "G5b destination (default-overwrite target)"
+STATUS=$(nc_curl -o /dev/null -w "%{http_code}" -X MOVE \
+    -H "Destination: $NC_FILES_BASE/g5b-dest.txt" \
+    "$NC_FILES_BASE/g5b-src.txt")
+[[ "$STATUS" == "204" ]] \
+    || fail "G5b: expected 204 No Content for missing Overwrite header (default T), got $STATUS"
+pass "G5b: absent Overwrite defaults to T → 204"
+
+echo "  G5c: MOVE with Overwrite: F to a NEW path → 201 (no collision to refuse)"
+put_nc_file "g5c-src.txt"  "G5c source"
+STATUS=$(nc_curl -o /dev/null -w "%{http_code}" -X MOVE \
+    -H "Destination: $NC_FILES_BASE/g5c-fresh-dest.txt" \
+    -H "Overwrite: F" \
+    "$NC_FILES_BASE/g5c-src.txt")
+[[ "$STATUS" == "201" ]] \
+    || fail "G5c: expected 201 Created for Overwrite: F + no collision, got $STATUS"
+pass "G5c: Overwrite: F + new destination → 201"
 
 # ─────────────────────────────────────────────────────────────
 # G6 — MOVE a folder (subtree)
@@ -255,7 +256,7 @@ pass "G8: DELETE → 204 + GET 404"
 # descendant assertions below will trip and you can flip them
 # to strict 404.
 # ─────────────────────────────────────────────────────────────
-echo "  G9: DELETE folder (pinned: descendants currently orphan — KNOWN BUG)"
+echo "  G9: DELETE folder cascades soft-delete to descendants"
 nc_curl -o /dev/null -X MKCOL "$NC_FILES_BASE/g9-tree/"       > /dev/null
 nc_curl -o /dev/null -X MKCOL "$NC_FILES_BASE/g9-tree/inner/" > /dev/null
 put_nc_file "g9-tree/file.txt"        "G9 file"
@@ -264,22 +265,49 @@ STATUS=$(nc_curl -o /dev/null -w "%{http_code}" -X DELETE "$NC_FILES_BASE/g9-tre
 [[ "$STATUS" == "204" ]] \
     || fail "G9: folder DELETE expected 204, got $STATUS"
 
-# Folder itself: correctly 404.
+# Folder itself: 404.
 [[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/")" == "404" ]] \
-    || fail "G9: folder still present after DELETE — that part should always be 404"
+    || fail "G9: folder still resolvable after DELETE"
 
-# Descendants: pin the current (buggy) "still alive" status.
-# Either current 207 (bug) or future 404 (fix) is acceptable;
-# anything else means something has drifted unexpectedly.
-CHILD_STATUS=$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/file.txt")
-DEEP_STATUS=$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/inner/deep.txt")
-if [[ "$CHILD_STATUS" == "207" && "$DEEP_STATUS" == "207" ]]; then
-    pass "G9: descendants still reachable (file=207, deep=207) — KNOWN BUG pinned: move_to_trash isn't recursive at the row level"
-elif [[ "$CHILD_STATUS" == "404" && "$DEEP_STATUS" == "404" ]]; then
-    fail "G9: descendants now correctly 404 (file=$CHILD_STATUS, deep=$DEEP_STATUS) — bug is fixed, flip this case to strict 404 assertions."
-else
-    fail "G9: mixed/unexpected descendant statuses (file=$CHILD_STATUS, deep=$DEEP_STATUS) — pin needs review"
-fi
+# Descendants must now also be 404 (cascade soft-delete reaches the
+# whole subtree). Previous behaviour left them reachable at their
+# full path while the parent was gone — a data-integrity drift that
+# confused desktop-sync tree walks.
+[[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/file.txt")" == "404" ]] \
+    || fail "G9: direct-child file still resolvable after parent DELETE — cascade not working"
+[[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/inner/")" == "404" ]] \
+    || fail "G9: descendant folder still resolvable after parent DELETE — cascade not working"
+[[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/inner/deep.txt")" == "404" ]] \
+    || fail "G9: descendant file still resolvable after parent DELETE — cascade not working"
+pass "G9: DELETE folder → 204, descendants all 404 (cascade reaches the whole subtree)"
+
+# G9b — restore the trashed root and verify cascade-restore brings
+# every descendant back with the same paths. Cascade-trashed
+# descendants (original_parent_id IS NULL) get un-trashed; rows that
+# were independently trashed before the folder went to trash stay
+# trashed.
+echo "  G9b: restore the trashed g9-tree → cascade-restore reaches descendants"
+BODY=$(nc_curl -X PROPFIND -H "Depth: 1" "$NC_TRASH_BASE/")
+G9_TRASHED_HREF=$(extract_response_href_containing "$BODY" "g9-tree")
+G9_TRASHED_ID=$(basename "$G9_TRASHED_HREF")
+[[ -n "$G9_TRASHED_ID" ]] || fail "G9b: trashed g9-tree not found via PROPFIND"
+STATUS=$(nc_curl -o /dev/null -w "%{http_code}" -X MOVE \
+    -H "Destination: $NC_FILES_BASE/g9-tree-restored/" \
+    "$NC_TRASH_BASE/$G9_TRASHED_ID")
+[[ "$STATUS" == "201" || "$STATUS" == "204" ]] \
+    || fail "G9b: restore expected 201/204, got $STATUS"
+# The folder and ALL its descendants are reachable again at their
+# original paths (restore goes to original location, not the
+# Destination header).
+[[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/")" == "207" ]] \
+    || fail "G9b: root folder not back after restore"
+[[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/file.txt")" == "207" ]] \
+    || fail "G9b: direct-child file not restored alongside parent"
+[[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/inner/")" == "207" ]] \
+    || fail "G9b: descendant folder not restored alongside parent"
+[[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/g9-tree/inner/deep.txt")" == "207" ]] \
+    || fail "G9b: descendant file not restored alongside parent"
+pass "G9b: restored g9-tree carries the whole subtree back"
 
 # ═════════════════════════════════════════════════════════════
 # Group K — Trashbin DAV (depends on G8's deletion above)
@@ -408,28 +436,17 @@ TRASHED_ID=$(basename "$TRASHED_HREF")
 STATUS=$(nc_curl -o /dev/null -w "%{http_code}" -X MOVE \
     -H "Destination: $NC_FILES_BASE/k5-conflict.txt" \
     "$NC_TRASH_BASE/$TRASHED_ID")
-case "$STATUS" in
-    201|204)
-        pass "K5: restore-onto-existing → $STATUS (current behaviour pinned: collision NOT prevented at this layer)"
-        ;;
-    412)
-        pass "K5: restore-onto-existing → 412 (current behaviour pinned: precondition-style refusal)"
-        ;;
-    409)
-        pass "K5: restore-onto-existing → 409 (current behaviour pinned: name conflict)"
-        ;;
-    500)
-        # Same shape as the G4/G5 bug — restore is a MOVE under
-        # the hood, and the handler doesn't catch the storage-
-        # layer "Already Exists" before it becomes an internal
-        # error. Pinned because that's the actual current
-        # behaviour, not because it's correct.
-        pass "K5: restore-onto-existing → 500 (KNOWN BUG: same root cause as G4/G5 — pinned)"
-        ;;
-    *)
-        fail "K5: unexpected status $STATUS — pin needs reviewing"
-        ;;
-esac
+[[ "$STATUS" == "412" ]] \
+    || fail "K5: expected 412 Precondition Failed for restore-onto-existing, got $STATUS"
+# The trashed item must still be in the trash (refused restore mustn't
+# half-delete the trash row).
+[[ -n "$(extract_response_href_containing "$(nc_curl -X PROPFIND -H "Depth: 1" "$NC_TRASH_BASE/")" "k5-doomed")" ]] \
+    || fail "K5: trash entry vanished after a refused restore"
+# The conflicting live file must still be there with its original content.
+LIVE_BODY=$(nc_curl -s "$NC_FILES_BASE/k5-conflict.txt")
+[[ "$LIVE_BODY" == "k5 original (stays)" ]] \
+    || fail "K5: conflicting live file mutated; got '$LIVE_BODY'"
+pass "K5: restore-onto-existing → 412, trash row and live file intact"
 
 # ── Cleanup ──────────────────────────────────────────────────────────────────
 echo "  cleanup: empty trash + remove residual fixtures"

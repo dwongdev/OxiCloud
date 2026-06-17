@@ -173,6 +173,7 @@ impl FileWritePort for StubFileWritePort {
         &self,
         _file_id: &str,
         _target_folder_id: Option<String>,
+        _new_name: Option<&str>,
     ) -> Result<File, DomainError> {
         Ok(File::default())
     }
@@ -635,6 +636,7 @@ impl FileManagementUseCase for StubFileManagementUseCase {
         _file_id: &str,
         _caller_id: Uuid,
         _folder_id: Option<String>,
+        _new_name: Option<String>,
     ) -> Result<FileDto, DomainError> {
         Ok(FileDto::default())
     }

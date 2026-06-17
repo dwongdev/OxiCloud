@@ -658,6 +658,21 @@ async fn handle_proppatch(
 ) -> Result<Response<Body>, AppError> {
     let _user = extract_user(&req)?;
 
+    // Active-lock guard (RFC 4918 §9.10.4): PROPPATCH writes properties,
+    // so a lock on the target must release them via `If:`. Captured
+    // before the body is consumed below so a rejected request doesn't
+    // even parse the XML.
+    let if_header_owned = req
+        .headers()
+        .get("If")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    if let Some(resp) =
+        enforce_native_lock(&state.webdav_lock_store, if_header_owned.as_deref(), &path)
+    {
+        return Ok(resp);
+    }
+
     // Resolve the target resource type BEFORE consuming the body so
     // we can pick the correct href shape in the multi-status
     // response. RFC 4918 §5.2 + strict WebDAV-client parser rules
@@ -895,6 +910,111 @@ async fn handle_head(
         .unwrap())
 }
 
+/// Resolve `path` to a user-owned resource using the optimized
+/// PathResolver first, falling back to the legacy `get_folder_by_path` /
+/// `get_file_by_path` lookups (the same ones GET uses) when the
+/// optimized resolver returns NotFound.
+///
+/// **Why the fallback exists**: the optimized resolver and the read-side
+/// `get_*_by_path` repositories don't always agree on what a "path"
+/// looks like. The drive-refactor migration rewrote the `path` column
+/// to strip the `My Folder - <user>/` prefix that the WebDAV dispatcher
+/// (`resolve_webdav_path`) still prepends — leaving an inconsistency
+/// where files PUT through the WebDAV surface stay reachable by GET
+/// (legacy lookup) but invisible to the optimized resolver (strict
+/// path-match). MOVE / DELETE / COPY previously 404'd on every
+/// root-level file because they only used the optimized resolver.
+///
+/// Ownership is enforced in both branches: the optimized resolver
+/// includes `user_id = $4` in its SQL; the fallback runs `assert_owner`
+/// explicitly so a foreign-owned hit can't leak through.
+async fn resolve_or_legacy(
+    state: &Arc<AppState>,
+    path: &str,
+    user_id: Uuid,
+) -> Option<ResolvedResource> {
+    if let Some(resolver) = &state.path_resolver
+        && let Ok(r) = resolver.resolve_path_for_user(path, user_id).await
+    {
+        return Some(r);
+    }
+
+    let user_id_str = user_id.to_string();
+    let folder_service = &state.applications.folder_service;
+    if let Ok(folder) = folder_service.get_folder_by_path(path).await
+        && folder.owner_id.as_deref() == Some(&user_id_str)
+    {
+        return Some(ResolvedResource::Folder(folder));
+    }
+    let file_retrieval = &state.applications.file_retrieval_service;
+    if let Ok(file) = file_retrieval.get_file_by_path(path).await
+        && file.owner_id.as_deref() == Some(&user_id_str)
+    {
+        return Some(ResolvedResource::File(file));
+    }
+    None
+}
+
+/// Extract every `<...>` token from a WebDAV `If:` header value.
+///
+/// RFC 4918 §10.4 defines a richer grammar (tagged-list / no-tag-list of
+/// `(Condition)` items), but for our purposes the only thing that matters
+/// is what lock tokens the caller is claiming to hold. Forgivingly scoop
+/// every angle-bracketed value and let the caller compare against the
+/// active lock token(s).
+fn extract_if_header_tokens(if_header: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut inside = false;
+    for c in if_header.chars() {
+        match (inside, c) {
+            (false, '<') => {
+                inside = true;
+                current.clear();
+            }
+            (true, '>') => {
+                inside = false;
+                if !current.is_empty() {
+                    out.push(std::mem::take(&mut current));
+                }
+            }
+            (true, c) => current.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+/// RFC 4918 §9.10.4 — if `path` is locked, every mutating request MUST
+/// carry the lock's token in its `If:` header. Returns `Some(Response)`
+/// with a 423 Locked response when the request must be rejected; `None`
+/// when the path is unlocked or the caller's `If:` header carries the
+/// matching token (the cheap-and-cheerful submission check).
+///
+/// Shared by `handle_put` now and will be reused by `handle_delete`,
+/// `handle_move`, `handle_copy`, and `handle_proppatch` when each of
+/// those gets the same enforcement.
+fn enforce_native_lock(
+    lock_store: &crate::infrastructure::services::webdav_lock_service::WebDavLockStore,
+    if_header: Option<&str>,
+    path: &str,
+) -> Option<Response<Body>> {
+    let entry = lock_store.get_by_path(path)?;
+    if let Some(h) = if_header
+        && extract_if_header_tokens(h)
+            .iter()
+            .any(|t| t == &entry.info.token)
+    {
+        return None;
+    }
+    Some(
+        Response::builder()
+            .status(StatusCode::LOCKED)
+            .body(Body::empty())
+            .unwrap(),
+    )
+}
+
 /**
  * Handles PUT requests to create or update files.
  *
@@ -924,6 +1044,21 @@ async fn handle_put(
     // Check if path is empty (root folder)
     if path.is_empty() || path == "/" {
         return Err(AppError::bad_request("Cannot PUT to root folder"));
+    }
+
+    // ── Active-lock guard (RFC 4918 §9.10.4) ──────────────────────────
+    // Reject a write that targets a locked resource unless the request
+    // carries the lock token in `If:`. Captured before we consume the
+    // body into the CDC ingester — a 423 mustn't waste any bandwidth.
+    let if_header_owned = req
+        .headers()
+        .get("If")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    if let Some(resp) =
+        enforce_native_lock(&state.webdav_lock_store, if_header_owned.as_deref(), &path)
+    {
+        return Ok(resp);
     }
 
     // ── Ownership guard ────────────────────────────────────────
@@ -1117,6 +1252,18 @@ async fn handle_delete(
 ) -> Result<Response<Body>, AppError> {
     let user = extract_user(&req)?;
 
+    // Active-lock guard (RFC 4918 §9.10.4).
+    let if_header_owned = req
+        .headers()
+        .get("If")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    if let Some(resp) =
+        enforce_native_lock(&state.webdav_lock_store, if_header_owned.as_deref(), &path)
+    {
+        return Ok(resp);
+    }
+
     // Get services from state
     let file_retrieval_service = &state.applications.file_retrieval_service;
     let file_management_service = &state.applications.file_management_service;
@@ -1127,49 +1274,25 @@ async fn handle_delete(
         return Err(AppError::forbidden("Cannot delete root folder"));
     }
 
-    // Single-query path resolution (user-scoped)
-    if let Some(resolver) = &state.path_resolver {
-        match resolver.resolve_path_for_user(&path, user.id).await {
-            Ok(ResolvedResource::Folder(folder)) => {
-                folder_service
-                    .delete_folder_with_perms(&folder.id, user.id)
-                    .await
-                    .map_err(|e| {
-                        AppError::internal_error(format!("Failed to delete folder: {}", e))
-                    })?;
-            }
-            Ok(ResolvedResource::File(file)) => {
-                file_management_service
-                    .delete_file_with_perms(&file.id, user.id)
-                    .await
-                    .map_err(|e| {
-                        AppError::internal_error(format!("Failed to delete file: {}", e))
-                    })?;
-            }
-            Err(_) => return Err(AppError::not_found(format!("Resource not found: {}", path))),
-        }
-    } else {
-        // Fallback: legacy double-query path (with ownership check)
-        let folder_result = folder_service.get_folder_by_path(&path).await;
-
-        if let Ok(folder) = folder_result {
-            assert_owner(folder.owner_id.as_deref(), &user.id.to_string(), &path)?;
+    // Resolve via optimized resolver, falling back to the legacy
+    // double-query lookup (the one GET uses). Necessary because the
+    // optimized resolver and the read repositories disagree on path
+    // shape for some files; see `resolve_or_legacy` docs.
+    let _ = file_retrieval_service; // present for legacy fallback if needed elsewhere
+    match resolve_or_legacy(&state, &path, user.id).await {
+        Some(ResolvedResource::Folder(folder)) => {
             folder_service
                 .delete_folder_with_perms(&folder.id, user.id)
                 .await
                 .map_err(|e| AppError::internal_error(format!("Failed to delete folder: {}", e)))?;
-        } else {
-            let file = file_retrieval_service
-                .get_file_by_path(&path)
-                .await
-                .map_err(|_e| AppError::not_found(format!("Resource not found: {}", path)))?;
-            assert_owner(file.owner_id.as_deref(), &user.id.to_string(), &path)?;
-
+        }
+        Some(ResolvedResource::File(file)) => {
             file_management_service
                 .delete_file_with_perms(&file.id, user.id)
                 .await
                 .map_err(|e| AppError::internal_error(format!("Failed to delete file: {}", e)))?;
         }
+        None => return Err(AppError::not_found(format!("Resource not found: {}", path))),
     }
 
     Ok(Response::builder()
@@ -1196,6 +1319,23 @@ async fn handle_move(
 ) -> Result<Response<Body>, AppError> {
     let user = extract_user(&req)?;
     let source_path = path;
+
+    // Captured up front so a rejected MOVE doesn't run any DB work.
+    let if_header_owned = req
+        .headers()
+        .get("If")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // Active-lock guard on the SOURCE (RFC 4918 §9.10.4): the move
+    // removes the source resource, which counts as modifying it.
+    if let Some(resp) = enforce_native_lock(
+        &state.webdav_lock_store,
+        if_header_owned.as_deref(),
+        &source_path,
+    ) {
+        return Ok(resp);
+    }
 
     // Get destination from Destination header
     let destination = req
@@ -1224,6 +1364,28 @@ async fn handle_move(
 
     // SECURITY: reject path-traversal in destination
     reject_path_traversal(&destination_path)?;
+
+    // Normalize destination through the SAME path-prefixing that
+    // `resolve_webdav_path` applied to `source_path` during dispatch.
+    // Without this, comparing source_parent_path (already prefixed with
+    // the user's home folder name) against dest_parent_path (raw from
+    // the URL, no prefix) always reports "different parent" — even for a
+    // pure rename at the same level — and breaks the move/rename branch
+    // selection below.
+    let destination_path = resolve_webdav_path(&state, user.id, &destination_path)
+        .await
+        .unwrap_or(destination_path);
+
+    // Destination lock guard: MOVE also creates/replaces a resource at
+    // the destination. If that path is locked, the same If: header must
+    // satisfy it.
+    if let Some(resp) = enforce_native_lock(
+        &state.webdav_lock_store,
+        if_header_owned.as_deref(),
+        &destination_path,
+    ) {
+        return Ok(resp);
+    }
 
     // Get services from state
     let file_retrieval_service = &state.applications.file_retrieval_service;
@@ -1254,197 +1416,96 @@ async fn handle_move(
         }
     }
 
-    // Resolve source: single-query when PathResolver is available (user-scoped)
-    if let Some(resolver) = &state.path_resolver {
-        match resolver.resolve_path_for_user(&source_path, user.id).await {
-            Ok(ResolvedResource::Folder(folder)) => {
-                let dest_folder_name = destination_path
-                    .split('/')
-                    .next_back()
-                    .unwrap_or(&destination_path);
-                let dest_parent_path = if let Some(idx) = destination_path.rfind('/') {
-                    &destination_path[..idx]
-                } else {
-                    ""
-                };
+    // Resolve source via optimized resolver with legacy fallback (see
+    // `resolve_or_legacy` for the rationale). Single match collapses the
+    // two near-identical branches that the resolver-only + legacy-only
+    // versions used to keep.
+    let _ = file_retrieval_service; // referenced via resolve_or_legacy
+    let resolved = resolve_or_legacy(&state, &source_path, user.id)
+        .await
+        .ok_or_else(|| AppError::not_found(format!("Resource not found: {}", source_path)))?;
 
-                let move_dto = crate::application::dtos::folder_dto::MoveFolderDto {
-                    parent_id: if dest_parent_path.is_empty() {
-                        None
-                    } else {
-                        match folder_service.get_folder_by_path(dest_parent_path).await {
-                            Ok(parent) => {
-                                // SECURITY: verify destination parent belongs to caller (V-08)
-                                assert_owner(
-                                    parent.owner_id.as_deref(),
-                                    &user.id.to_string(),
-                                    dest_parent_path,
-                                )?;
-                                Some(parent.id)
-                            }
-                            Err(_) => None,
-                        }
-                    },
-                };
+    let dest_name = destination_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&destination_path);
+    let dest_parent_path = destination_path
+        .rfind('/')
+        .map(|i| &destination_path[..i])
+        .unwrap_or("");
+    let source_parent_path = source_path
+        .rfind('/')
+        .map(|i| &source_path[..i])
+        .unwrap_or("");
 
-                folder_service
-                    .move_folder_with_perms(&folder.id, move_dto, user.id)
-                    .await
-                    .map_err(AppError::from)?;
-
-                if folder.name != dest_folder_name {
-                    let rename_dto = crate::application::dtos::folder_dto::RenameFolderDto {
-                        name: dest_folder_name.to_string(),
-                    };
-                    folder_service
-                        .rename_folder_with_perms(&folder.id, rename_dto, user.id)
-                        .await
-                        .map_err(AppError::from)?;
-                }
-            }
-            Ok(ResolvedResource::File(file)) => {
-                let dest_filename = destination_path
-                    .split('/')
-                    .next_back()
-                    .unwrap_or(&destination_path);
-                let dest_parent_path = if let Some(idx) = destination_path.rfind('/') {
-                    &destination_path[..idx]
-                } else {
-                    ""
-                };
-                let source_parent_path = if let Some(idx) = source_path.rfind('/') {
-                    &source_path[..idx]
-                } else {
-                    ""
-                };
-
-                if source_parent_path != dest_parent_path {
-                    // SECURITY: verify destination parent belongs to caller (V-08)
-                    if !dest_parent_path.is_empty()
-                        && let Ok(parent) =
-                            folder_service.get_folder_by_path(dest_parent_path).await
-                    {
-                        assert_owner(
-                            parent.owner_id.as_deref(),
-                            &user.id.to_string(),
-                            dest_parent_path,
-                        )?;
-                    }
-                    file_management_service
-                        .move_file_with_perms(&file.id, user.id, Some(dest_parent_path.to_string()))
-                        .await
-                        .map_err(AppError::from)?;
-                }
-                if file.name != dest_filename {
-                    file_management_service
-                        .rename_file_with_perms(&file.id, user.id, dest_filename)
-                        .await
-                        .map_err(AppError::from)?;
-                }
-            }
-            Err(_) => {
-                return Err(AppError::not_found(format!(
-                    "Resource not found: {}",
-                    source_path
-                )));
-            }
-        }
-    } else {
-        // Fallback: legacy double-query path (with ownership check)
-        let folder_result = folder_service.get_folder_by_path(&source_path).await;
-
-        if let Ok(folder) = folder_result {
-            assert_owner(
-                folder.owner_id.as_deref(),
-                &user.id.to_string(),
-                &source_path,
-            )?;
-            let dest_folder_name = destination_path
-                .split('/')
-                .next_back()
-                .unwrap_or(&destination_path);
-            let dest_parent_path = if let Some(idx) = destination_path.rfind('/') {
-                &destination_path[..idx]
-            } else {
-                ""
-            };
-
+    match resolved {
+        ResolvedResource::Folder(folder) => {
             let move_dto = crate::application::dtos::folder_dto::MoveFolderDto {
                 parent_id: if dest_parent_path.is_empty() {
                     None
-                } else {
-                    match folder_service.get_folder_by_path(dest_parent_path).await {
-                        Ok(parent) => {
-                            // SECURITY: verify destination parent belongs to caller (V-08)
-                            assert_owner(
-                                parent.owner_id.as_deref(),
-                                &user.id.to_string(),
-                                dest_parent_path,
-                            )?;
-                            Some(parent.id)
-                        }
-                        Err(_) => None,
-                    }
-                },
-            };
-
-            folder_service
-                .move_folder_with_perms(&folder.id, move_dto, user.id)
-                .await
-                .map_err(|e| AppError::internal_error(format!("Failed to move folder: {}", e)))?;
-
-            if folder.name != dest_folder_name {
-                let rename_dto = crate::application::dtos::folder_dto::RenameFolderDto {
-                    name: dest_folder_name.to_string(),
-                };
-                folder_service
-                    .rename_folder_with_perms(&folder.id, rename_dto, user.id)
-                    .await
-                    .map_err(AppError::from)?;
-            }
-        } else {
-            let file = file_retrieval_service
-                .get_file_by_path(&source_path)
-                .await
-                .map_err(|_e| {
-                    AppError::not_found(format!("Resource not found: {}", source_path))
-                })?;
-            assert_owner(file.owner_id.as_deref(), &user.id.to_string(), &source_path)?;
-
-            let dest_filename = destination_path
-                .split('/')
-                .next_back()
-                .unwrap_or(&destination_path);
-            let dest_parent_path = if let Some(idx) = destination_path.rfind('/') {
-                &destination_path[..idx]
-            } else {
-                ""
-            };
-            let source_parent_path = if let Some(idx) = source_path.rfind('/') {
-                &source_path[..idx]
-            } else {
-                ""
-            };
-
-            if source_parent_path != dest_parent_path {
-                // SECURITY: verify destination parent belongs to caller (V-08)
-                if !dest_parent_path.is_empty()
-                    && let Ok(parent) = folder_service.get_folder_by_path(dest_parent_path).await
+                } else if let Ok(parent) = folder_service.get_folder_by_path(dest_parent_path).await
                 {
                     assert_owner(
                         parent.owner_id.as_deref(),
                         &user.id.to_string(),
                         dest_parent_path,
                     )?;
-                }
-                file_management_service
-                    .move_file_with_perms(&file.id, user.id, Some(dest_parent_path.to_string()))
+                    Some(parent.id)
+                } else {
+                    None
+                },
+            };
+
+            folder_service
+                .move_folder_with_perms(&folder.id, move_dto, user.id)
+                .await
+                .map_err(AppError::from)?;
+
+            if folder.name != dest_name {
+                let rename_dto = crate::application::dtos::folder_dto::RenameFolderDto {
+                    name: dest_name.to_string(),
+                };
+                folder_service
+                    .rename_folder_with_perms(&folder.id, rename_dto, user.id)
                     .await
                     .map_err(AppError::from)?;
             }
-            if file.name != dest_filename {
+        }
+        ResolvedResource::File(file) => {
+            if source_parent_path != dest_parent_path {
+                // Resolve the destination's parent PATH into a folder ID
+                // before handing it to move_file_with_perms (which takes
+                // an Option<folder_id String>, not a path). Previously
+                // the path was passed straight through and the move
+                // would silently fail because no row matches a folder
+                // whose id literally equals the path text.
+                let target_parent_id = if dest_parent_path.is_empty() {
+                    None
+                } else {
+                    let parent = folder_service
+                        .get_folder_by_path(dest_parent_path)
+                        .await
+                        .map_err(|_| {
+                            AppError::not_found(format!(
+                                "Destination parent not found: {}",
+                                dest_parent_path
+                            ))
+                        })?;
+                    assert_owner(
+                        parent.owner_id.as_deref(),
+                        &user.id.to_string(),
+                        dest_parent_path,
+                    )?;
+                    Some(parent.id)
+                };
                 file_management_service
-                    .rename_file_with_perms(&file.id, user.id, dest_filename)
+                    .move_file_with_perms(&file.id, user.id, target_parent_id)
+                    .await
+                    .map_err(AppError::from)?;
+            }
+            if file.name != dest_name {
+                file_management_service
+                    .rename_file_with_perms(&file.id, user.id, dest_name)
                     .await
                     .map_err(AppError::from)?;
             }
@@ -1476,6 +1537,15 @@ async fn handle_copy(
     let user = extract_user(&req)?;
     let source_path = path;
 
+    // Captured up front (cheap; used below for the destination lock guard).
+    // COPY doesn't mutate the source, so no source lock check — only the
+    // destination needs to clear (RFC 4918 §9.10.4).
+    let if_header_owned = req
+        .headers()
+        .get("If")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     // Get destination from Destination header
     let destination = req
         .headers()
@@ -1503,6 +1573,22 @@ async fn handle_copy(
 
     // SECURITY: reject path-traversal in destination
     reject_path_traversal(&destination_path)?;
+
+    // Normalize through the same path-prefixing the dispatcher applied
+    // to source_path. See the long comment in handle_move for why this
+    // matters — same root-cause class of asymmetric-path bugs.
+    let destination_path = resolve_webdav_path(&state, user.id, &destination_path)
+        .await
+        .unwrap_or(destination_path);
+
+    // Active-lock guard on the destination (RFC 4918 §9.10.4).
+    if let Some(resp) = enforce_native_lock(
+        &state.webdav_lock_store,
+        if_header_owned.as_deref(),
+        &destination_path,
+    ) {
+        return Ok(resp);
+    }
 
     // Get depth from Depth header
     let depth = req
@@ -1539,144 +1625,39 @@ async fn handle_copy(
         }
     }
 
-    // Resolve source: single-query when PathResolver is available (user-scoped)
-    if let Some(resolver) = &state.path_resolver {
-        match resolver.resolve_path_for_user(&source_path, user.id).await {
-            Ok(ResolvedResource::Folder(folder)) => {
-                let recursive = depth != "0";
+    // Resolve source via optimized resolver with legacy fallback; collapses
+    // the two near-identical branches the resolver-only + legacy-only
+    // versions used to keep.
+    let _ = file_retrieval_service; // referenced via resolve_or_legacy
+    let resolved = resolve_or_legacy(&state, &source_path, user.id)
+        .await
+        .ok_or_else(|| AppError::not_found(format!("Resource not found: {}", source_path)))?;
 
-                let dest_folder_name = destination_path
-                    .split('/')
-                    .next_back()
-                    .unwrap_or(&destination_path);
-                let dest_parent_path = if let Some(idx) = destination_path.rfind('/') {
-                    &destination_path[..idx]
-                } else {
-                    ""
-                };
+    let dest_name = destination_path
+        .rsplit('/')
+        .next()
+        .unwrap_or(&destination_path);
+    let dest_parent_path = destination_path
+        .rfind('/')
+        .map(|i| &destination_path[..i])
+        .unwrap_or("");
 
-                let target_parent_id = if dest_parent_path.is_empty() {
-                    None
-                } else {
-                    match folder_service.get_folder_by_path(dest_parent_path).await {
-                        Ok(parent) => {
-                            // SECURITY: verify destination parent belongs to caller (V-08)
-                            assert_owner(
-                                parent.owner_id.as_deref(),
-                                &user.id.to_string(),
-                                dest_parent_path,
-                            )?;
-                            Some(parent.id)
-                        }
-                        Err(_) => None,
-                    }
-                };
-
-                if recursive {
-                    let file_management_service = &state.applications.file_management_service;
-                    file_management_service
-                        .copy_folder_tree_with_perms(
-                            &folder.id,
-                            user.id,
-                            target_parent_id,
-                            Some(dest_folder_name.to_string()),
-                        )
-                        .await
-                        .map_err(|e| {
-                            AppError::internal_error(format!("Failed to copy folder tree: {}", e))
-                        })?;
-                } else {
-                    let create_dto = crate::application::dtos::folder_dto::CreateFolderDto {
-                        name: dest_folder_name.to_string(),
-                        parent_id: target_parent_id,
-                    };
-                    folder_service
-                        .create_folder_with_perms(create_dto, user.id)
-                        .await
-                        .map_err(|e| {
-                            AppError::internal_error(format!(
-                                "Failed to create destination folder: {}",
-                                e
-                            ))
-                        })?;
-                }
-            }
-            Ok(ResolvedResource::File(file)) => {
-                let dest_parent_path = if let Some(idx) = destination_path.rfind('/') {
-                    &destination_path[..idx]
-                } else {
-                    ""
-                };
-
-                let target_folder_id = if dest_parent_path.is_empty() {
-                    None
-                } else {
-                    match folder_service.get_folder_by_path(dest_parent_path).await {
-                        Ok(parent) => {
-                            // SECURITY: verify destination parent belongs to caller (V-08)
-                            assert_owner(
-                                parent.owner_id.as_deref(),
-                                &user.id.to_string(),
-                                dest_parent_path,
-                            )?;
-                            Some(parent.id)
-                        }
-                        Err(_) => None,
-                    }
-                };
-
-                let file_management_service = &state.applications.file_management_service;
-                file_management_service
-                    .copy_file_with_perms(&file.id, user.id, target_folder_id)
-                    .await
-                    .map_err(|e| AppError::internal_error(format!("Failed to copy file: {}", e)))?;
-            }
-            Err(_) => {
-                return Err(AppError::not_found(format!(
-                    "Resource not found: {}",
-                    source_path
-                )));
-            }
-        }
+    let target_parent_id = if dest_parent_path.is_empty() {
+        None
+    } else if let Ok(parent) = folder_service.get_folder_by_path(dest_parent_path).await {
+        assert_owner(
+            parent.owner_id.as_deref(),
+            &user.id.to_string(),
+            dest_parent_path,
+        )?;
+        Some(parent.id)
     } else {
-        // Fallback: legacy double-query path (with ownership check)
-        let folder_result = folder_service.get_folder_by_path(&source_path).await;
+        None
+    };
 
-        if let Ok(folder) = folder_result {
-            assert_owner(
-                folder.owner_id.as_deref(),
-                &user.id.to_string(),
-                &source_path,
-            )?;
+    match resolved {
+        ResolvedResource::Folder(folder) => {
             let recursive = depth != "0";
-
-            let dest_folder_name = destination_path
-                .split('/')
-                .next_back()
-                .unwrap_or(&destination_path);
-            let dest_parent_path = if let Some(idx) = destination_path.rfind('/') {
-                &destination_path[..idx]
-            } else {
-                ""
-            };
-
-            let target_parent_id = if dest_parent_path.is_empty() {
-                None
-            } else {
-                match folder_service.get_folder_by_path(dest_parent_path).await {
-                    Ok(parent) => {
-                        // SECURITY: verify destination parent belongs to caller (V-08)
-                        assert_owner(
-                            parent.owner_id.as_deref(),
-                            &user.id.to_string(),
-                            dest_parent_path,
-                        )?;
-                        Some(parent.id)
-                    }
-                    Err(_) => None,
-                }
-            };
-
             if recursive {
                 let file_management_service = &state.applications.file_management_service;
                 file_management_service
@@ -1684,7 +1665,7 @@ async fn handle_copy(
                         &folder.id,
                         user.id,
                         target_parent_id,
-                        Some(dest_folder_name.to_string()),
+                        Some(dest_name.to_string()),
                     )
                     .await
                     .map_err(|e| {
@@ -1692,7 +1673,7 @@ async fn handle_copy(
                     })?;
             } else {
                 let create_dto = crate::application::dtos::folder_dto::CreateFolderDto {
-                    name: dest_folder_name.to_string(),
+                    name: dest_name.to_string(),
                     parent_id: target_parent_id,
                 };
                 folder_service
@@ -1705,41 +1686,20 @@ async fn handle_copy(
                         ))
                     })?;
             }
-        } else {
-            let file = file_retrieval_service
-                .get_file_by_path(&source_path)
-                .await
-                .map_err(|_e| {
-                    AppError::not_found(format!("Resource not found: {}", source_path))
-                })?;
-            assert_owner(file.owner_id.as_deref(), &user.id.to_string(), &source_path)?;
-
-            let dest_parent_path = if let Some(idx) = destination_path.rfind('/') {
-                &destination_path[..idx]
-            } else {
-                ""
-            };
-
-            let target_folder_id = if dest_parent_path.is_empty() {
-                None
-            } else {
-                match folder_service.get_folder_by_path(dest_parent_path).await {
-                    Ok(parent) => {
-                        // SECURITY: verify destination parent belongs to caller (V-08)
-                        assert_owner(
-                            parent.owner_id.as_deref(),
-                            &user.id.to_string(),
-                            dest_parent_path,
-                        )?;
-                        Some(parent.id)
-                    }
-                    Err(_) => None,
-                }
-            };
-
+        }
+        ResolvedResource::File(file) => {
+            // M8b fix: copy_file_with_perms now accepts an optional new
+            // filename — without it, a copy to the same folder with a
+            // different name collided with the source on the
+            // (folder, name, user) unique index. Pass dest_name when it
+            // differs from the source so the INSERT lands with the
+            // intended name in a single round-trip; pass None for the
+            // "same name in a different folder" case to keep the existing
+            // semantics.
             let file_management_service = &state.applications.file_management_service;
+            let copy_name = (file.name != dest_name).then(|| dest_name.to_string());
             file_management_service
-                .copy_file_with_perms(&file.id, user.id, target_folder_id)
+                .copy_file_with_perms(&file.id, user.id, target_parent_id, copy_name)
                 .await
                 .map_err(|e| AppError::internal_error(format!("Failed to copy file: {}", e)))?;
         }

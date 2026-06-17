@@ -145,27 +145,83 @@ ACTUAL=$(nc_curl "$NC_FILES_BASE/f1-small.txt")
 pass "F4: GET after overwrite serves the new bytes (no stale-cache)"
 
 # ─────────────────────────────────────────────────────────────
-# F5 / F6 — Conditional PUT (pinned: currently no-op)
+# F5 / F6 — Conditional PUT (RFC 7232 §3.1/§3.2, RFC 4918 §10)
+#
+# F5 covers `If-None-Match: *`: server MUST refuse the PUT with
+# 412 when the target representation already exists (used by
+# clients to do "create only if absent"). The mirror case — same
+# header on a NEW path — must succeed; covered by F5b.
+#
+# F6 covers `If-Match: "<etag>"`: server MUST refuse the PUT with
+# 412 when the supplied ETag doesn't strong-match the current
+# representation (used by clients to do "update only if
+# unchanged"). The mirror case — correct ETag → success — is
+# covered by F6b.
 # ─────────────────────────────────────────────────────────────
-echo "  F5: PUT with If-None-Match: * on existing path (pinned current: 204, RFC-4918 would be 412)"
+echo "  F5: PUT with If-None-Match: * on existing path → 412"
 HEADERS=$(nc_curl -D - -o /dev/null -X PUT \
     -H "If-None-Match: *" -H "Content-Type: text/plain" \
     --data-binary 'F5-payload' \
     "$NC_FILES_BASE/f1-small.txt")
 STATUS=$(awk 'NR==1{print $2}' <<< "$HEADERS" | tr -d '\r')
-[[ "$STATUS" == "204" || "$STATUS" == "201" ]] \
-    || fail "F5: unexpected status $STATUS (expected 204 — current ignore-conditional behaviour)"
-pass "F5: PUT honours no conditional headers today — pinned"
+[[ "$STATUS" == "412" ]] \
+    || fail "F5: expected 412 Precondition Failed for If-None-Match: * on existing path, got $STATUS"
+pass "F5: If-None-Match: * on existing path → 412"
 
-echo "  F6: PUT with If-Match: \"wrong-etag\" (pinned current: succeeds, RFC-4918 would be 412)"
+echo "  F5b: PUT with If-None-Match: * on NEW path → 201/204"
+HEADERS=$(nc_curl -D - -o /dev/null -X PUT \
+    -H "If-None-Match: *" -H "Content-Type: text/plain" \
+    --data-binary 'F5b-payload' \
+    "$NC_FILES_BASE/f5b-new.txt")
+STATUS=$(awk 'NR==1{print $2}' <<< "$HEADERS" | tr -d '\r')
+[[ "$STATUS" == "201" || "$STATUS" == "204" ]] \
+    || fail "F5b: expected 201/204 for If-None-Match: * on new path, got $STATUS"
+pass "F5b: If-None-Match: * on new path → $STATUS"
+
+echo "  F6: PUT with If-Match: \"wrong-etag\" → 412"
 HEADERS=$(nc_curl -D - -o /dev/null -X PUT \
     -H 'If-Match: "deadbeef-never-matches"' -H "Content-Type: text/plain" \
     --data-binary 'F6-payload' \
     "$NC_FILES_BASE/f1-small.txt")
 STATUS=$(awk 'NR==1{print $2}' <<< "$HEADERS" | tr -d '\r')
-[[ "$STATUS" == "204" || "$STATUS" == "201" ]] \
-    || fail "F6: unexpected status $STATUS (expected 204 — current ignore-conditional behaviour)"
-pass "F6: PUT honours no If-Match today — pinned"
+[[ "$STATUS" == "412" ]] \
+    || fail "F6: expected 412 Precondition Failed for non-matching If-Match, got $STATUS"
+pass "F6: If-Match with non-matching ETag → 412"
+
+echo "  F6b: PUT with correct If-Match → 204"
+# Fetch the current ETag of f1-small.txt via PROPFIND-ish HEAD,
+# then re-PUT with that exact value as If-Match. Must succeed.
+CURRENT_ETAG=$(nc_curl -D - -o /dev/null -X HEAD "$NC_FILES_BASE/f1-small.txt" \
+    | awk 'BEGIN{IGNORECASE=1} /^etag:/ {print $2}' | tr -d '\r')
+[[ -n "$CURRENT_ETAG" ]] || fail "F6b: could not read current ETag via HEAD"
+HEADERS=$(nc_curl -D - -o /dev/null -X PUT \
+    -H "If-Match: $CURRENT_ETAG" -H "Content-Type: text/plain" \
+    --data-binary 'F6b-payload' \
+    "$NC_FILES_BASE/f1-small.txt")
+STATUS=$(awk 'NR==1{print $2}' <<< "$HEADERS" | tr -d '\r')
+[[ "$STATUS" == "204" ]] \
+    || fail "F6b: expected 204 for If-Match with correct ETag, got $STATUS"
+pass "F6b: If-Match with current ETag → 204"
+
+echo "  F6c: PUT with If-Match: * on existing path → 204 (catch-all)"
+HEADERS=$(nc_curl -D - -o /dev/null -X PUT \
+    -H 'If-Match: *' -H "Content-Type: text/plain" \
+    --data-binary 'F6c-payload' \
+    "$NC_FILES_BASE/f1-small.txt")
+STATUS=$(awk 'NR==1{print $2}' <<< "$HEADERS" | tr -d '\r')
+[[ "$STATUS" == "204" ]] \
+    || fail "F6c: expected 204 for If-Match: * on existing path, got $STATUS"
+pass "F6c: If-Match: * on existing path → 204"
+
+echo "  F6d: PUT with If-Match on NEW path → 412 (resource absent → cannot match)"
+HEADERS=$(nc_curl -D - -o /dev/null -X PUT \
+    -H 'If-Match: "anything"' -H "Content-Type: text/plain" \
+    --data-binary 'F6d-payload' \
+    "$NC_FILES_BASE/f6d-new.txt")
+STATUS=$(awk 'NR==1{print $2}' <<< "$HEADERS" | tr -d '\r')
+[[ "$STATUS" == "412" ]] \
+    || fail "F6d: expected 412 for If-Match on absent path, got $STATUS"
+pass "F6d: If-Match on absent path → 412"
 
 # ─────────────────────────────────────────────────────────────
 # F7 — PUT a "large" file → succeeds, GET returns exact bytes
@@ -263,38 +319,43 @@ grep -q '<d:collection/>' <<< "$BODY" \
 pass "F10: MKCOL creates folder, PROPFIND sees it as a collection"
 
 # ─────────────────────────────────────────────────────────────
-# F11 — MKCOL with missing intermediate parent
+# F11 / F11b / F11c — MKCOL parent semantics (RFC 4918 §9.3.1)
 #
-# Pinned current behaviour: OxiCloud's MKCOL auto-creates
-# missing intermediate parents (effectively `mkdir -p`
-# semantics). Sending MKCOL on `/a/b/c/` where neither `a` nor
-# `b` exists succeeds with 201 — both intermediates are
-# silently created.
+# F11  : missing intermediate parent → 409 Conflict
+# F11b : parent exists, target new   → 201 Created (positive case)
+# F11c : target already exists       → 405 Method Not Allowed
 #
-# Strict RFC 4918 §9.3.1 requires 409 Conflict here ("when the
-# parent collection does not exist"). NC desktop tolerates
-# either behaviour (it always MKCOLs ancestors one at a time
-# during sync), so the auto-create behaviour is harmless in
-# practice — but if you ever want strict mode, the fix lives
-# in `interfaces/nextcloud/webdav_handler.rs::handle_mkcol`:
-# look up the parent path before creating; 409 if missing.
+# Sabre/DAV and the actual NC server both 409 on a missing
+# intermediate; our previous `mkdir -p` behaviour deviated. NC
+# desktop walks ancestors one MKCOL at a time during sync so
+# nothing real breaks from dropping the auto-create.
 # ─────────────────────────────────────────────────────────────
-echo "  F11: MKCOL with missing parent (pinned: auto-creates parents, RFC-4918 would 409)"
+echo "  F11: MKCOL with missing intermediate parent → 409"
 STATUS=$(nc_curl -o /dev/null -w "%{http_code}" -X MKCOL \
     "$NC_FILES_BASE/f11-nonexistent-parent/inner/")
-case "$STATUS" in
-    201)
-        pass "F11: MKCOL auto-created intermediate parents (201) — pinned current behaviour"
-        ;;
-    409)
-        fail "F11: server now returns 409 (RFC-4918 strict). Bug? Improvement? — review and update pin to strict assertion."
-        ;;
-    *)
-        fail "F11: unexpected status $STATUS"
-        ;;
-esac
-# Cleanup the auto-created parent so subsequent tests don't see it.
-nc_curl -o /dev/null -X DELETE "$NC_FILES_BASE/f11-nonexistent-parent/" > /dev/null 2>&1 || true
+[[ "$STATUS" == "409" ]] \
+    || fail "F11: expected 409 Conflict for MKCOL with missing parent, got $STATUS"
+# The non-existent parent must NOT have been auto-created either.
+[[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/f11-nonexistent-parent/")" == "404" ]] \
+    || fail "F11: intermediate parent was silently created — auto-create still happening"
+pass "F11: MKCOL with missing parent → 409, parent not silently created"
+
+echo "  F11b: MKCOL with existing parent + new target → 201"
+nc_curl -o /dev/null -X MKCOL "$NC_FILES_BASE/f11b-parent/" > /dev/null
+STATUS=$(nc_curl -o /dev/null -w "%{http_code}" -X MKCOL \
+    "$NC_FILES_BASE/f11b-parent/child/")
+[[ "$STATUS" == "201" ]] \
+    || fail "F11b: expected 201 Created for MKCOL with existing parent, got $STATUS"
+[[ "$(nc_status_propfind_depth0 "$NC_FILES_BASE/f11b-parent/child/")" == "207" ]] \
+    || fail "F11b: target collection not visible via PROPFIND after MKCOL"
+pass "F11b: MKCOL with existing parent → 201, target reachable"
+
+echo "  F11c: MKCOL with target that already exists → 405"
+STATUS=$(nc_curl -o /dev/null -w "%{http_code}" -X MKCOL \
+    "$NC_FILES_BASE/f11b-parent/child/")
+[[ "$STATUS" == "405" ]] \
+    || fail "F11c: expected 405 Method Not Allowed for MKCOL on existing collection, got $STATUS"
+pass "F11c: MKCOL on existing target → 405"
 
 # ─────────────────────────────────────────────────────────────
 # F12 — MKCOL on existing folder → 405

@@ -314,10 +314,16 @@ pub trait FileWritePort: Send + Sync + 'static {
     ///
     /// With blob-dedup, this only creates a new metadata row and increments
     /// the blob reference count — zero disk I/O for the content.
+    ///
+    /// `new_name` is honored when `Some(_)` — without it, copying a file to
+    /// the same folder always collides on the source's filename. WebDAV
+    /// COPY uses this for the "same folder, different name" case (the
+    /// classic `COPY /a.txt → /b.txt` pattern).
     async fn copy_file(
         &self,
         file_id: &str,
         target_folder_id: Option<String>,
+        new_name: Option<&str>,
     ) -> Result<File, DomainError>;
 
     /// Copies an entire folder subtree atomically using ltree.

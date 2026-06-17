@@ -127,15 +127,16 @@ impl FileManagementService {
         &self,
         file_id: &str,
         target_folder_id: Option<String>,
+        new_name: Option<&str>,
     ) -> Result<FileDto, DomainError> {
         info!(
-            "Copying file with ID: {} to folder: {:?}",
-            file_id, target_folder_id
+            "Copying file with ID: {} to folder: {:?} as {:?}",
+            file_id, target_folder_id, new_name
         );
 
         let copied_file = self
             .file_repository
-            .copy_file(file_id, target_folder_id)
+            .copy_file(file_id, target_folder_id, new_name)
             .await
             .map_err(|e| {
                 error!("Error copying file (ID: {}): {}", file_id, e);
@@ -260,13 +261,15 @@ impl FileManagementUseCase for FileManagementService {
         file_id: &str,
         caller_id: Uuid,
         target_folder_id: Option<String>,
+        new_name: Option<String>,
     ) -> Result<FileDto, DomainError> {
         // Copy = Read on the source file + Create on the target folder.
         self.require_file_perm(file_id, Permission::Read, caller_id)
             .await?;
         self.require_target_folder_perm(target_folder_id.as_deref(), Permission::Create, caller_id)
             .await?;
-        self.copy_file(file_id, target_folder_id).await
+        self.copy_file(file_id, target_folder_id, new_name.as_deref())
+            .await
     }
 
     async fn rename_file_with_perms(

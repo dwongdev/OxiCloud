@@ -136,15 +136,45 @@ body contains "{{shared_file_id}}"
 
 
 # ─────────────────────────────────────────────────────────────
-# 8 — Direct file share: mint a share on the FILE itself
-#     (item_type=file) and access it via /api/s/{token}.
-#
-#     KNOWN BUG: GET /api/s/{folder-token}/file/{file_id} (the
-#     "fetch a file from inside a shared folder" route at
-#     share_handler.rs:653) currently returns 500. We sidestep
-#     it here by sharing the file directly. When the folder-file
-#     path is fixed, add a new scenario asserting it returns
-#     200 + body, and back-link this comment.
+# 8 — Fetch a file from inside the FOLDER share via
+#     /api/s/{folder-token}/file/{file_id}. This is the path NC
+#     desktop and web clients use to download a single file out
+#     of a shared folder without zipping the whole tree. The
+#     handler must (a) accept the file_id only when the file
+#     lives in the share's subtree, and (b) refuse with 404 for
+#     any file outside the subtree (anti-enumeration: the same
+#     status as "file doesn't exist", so the caller can't probe
+#     for foreign file ids).
+# ─────────────────────────────────────────────────────────────
+GET {{base_url}}/api/s/{{share_token}}/file/{{shared_file_id}}
+
+HTTP 200
+[Asserts]
+header "Content-Disposition" contains "hello.txt"
+
+
+# A file the caller owns but that isn't inside the shared
+# folder MUST 404 — same shape as "no such file", so the
+# response can't be used to enumerate file ids.
+POST {{base_url}}/api/files/upload
+Authorization: Bearer {{admin_token}}
+[MultipartFormData]
+folder_id: {{admin_home_id}}
+file: file,fixtures/hello.txt; text/plain
+
+HTTP 201
+[Captures]
+outsider_file_id: jsonpath "$.id"
+
+
+GET {{base_url}}/api/s/{{share_token}}/file/{{outsider_file_id}}
+
+HTTP 404
+
+
+# ─────────────────────────────────────────────────────────────
+# 8b — Direct file share: mint a share on the FILE itself
+#      (item_type=file) and access it via /api/s/{token}.
 # ─────────────────────────────────────────────────────────────
 POST {{base_url}}/api/shares
 Authorization: Bearer {{admin_token}}
@@ -253,6 +283,14 @@ Authorization: Bearer {{admin_token}}
 HTTP 204
 
 DELETE {{base_url}}/api/shares/{{file_share_id}}
+Authorization: Bearer {{admin_token}}
+HTTP 204
+
+# The "outsider" hello.txt sits in admin's home folder, not under the
+# shared subtree — delete it explicitly so the next test in the
+# runner (permissions.hurl) can upload its own hello.txt to the same
+# folder without hitting the live-name unique index (409).
+DELETE {{base_url}}/api/files/{{outsider_file_id}}
 Authorization: Bearer {{admin_token}}
 HTTP 204
 

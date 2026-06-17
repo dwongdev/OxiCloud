@@ -84,6 +84,14 @@ dav_curl() {
     curl -s -H "Authorization: Bearer $TOKEN" "$@"
 }
 
+# Return the HTTP status code of a `PROPFIND Depth: 0` against the
+# given NC URL. Used by existence assertions ("did this collection
+# silently get auto-created?") where the only thing the caller cares
+# about is the status (404 → absent, 207 → present).
+nc_status_propfind_depth0() {
+    nc_curl -o /dev/null -w "%{http_code}" -X PROPFIND -H "Depth: 0" "$1"
+}
+
 # Count `<d:response>` (or `<D:response>`) children in a multistatus
 # body. Case-insensitive on the namespace prefix because OxiCloud's
 # two DAV surfaces use different cases: the NC handler emits

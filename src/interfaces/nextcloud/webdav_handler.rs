@@ -381,10 +381,18 @@ async fn handle_head(
     // ETag comes from `FileDto::etag` — see the same comment block on
     // the GET handler. HEAD and GET must agree byte-for-byte; pulling
     // both from the same DTO field guarantees that.
+    //
+    // We deliberately do NOT set `Content-Length: file.size` here even
+    // though RFC 7231 §4.3.2 says HEAD SHOULD return the same headers
+    // GET would. Our body is `Body::empty()`, so declaring a non-zero
+    // Content-Length tells the client "20 bytes are coming" — and on a
+    // keep-alive connection the client waits forever for them. Hyper
+    // derives `Content-Length: 0` from the empty body, which is honest
+    // about what's actually on the wire. Clients that need the file
+    // size use PROPFIND (which is what NC and Sabre clients do).
     Ok(Response::builder()
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, file.mime_type.as_ref())
-        .header(header::CONTENT_LENGTH, file.size)
         .header(header::ETAG, format!("\"{}\"", file.etag))
         .header(header::LAST_MODIFIED, modified_at.to_rfc2822())
         .body(Body::empty())
@@ -543,6 +551,62 @@ fn parse_proppatch_favorite(body: &str) -> Option<u8> {
 
 // ──────────────────── PUT ────────────────────
 
+/// Strip the optional `W/` weak prefix and surrounding double-quotes
+/// from one ETag value in an `If-Match` / `If-None-Match` list. Returns
+/// `(is_weak, inner)`.
+fn parse_etag_value(raw: &str) -> (bool, &str) {
+    let trimmed = raw.trim();
+    if let Some(rest) = trimmed.strip_prefix("W/") {
+        (true, rest.trim().trim_matches('"'))
+    } else {
+        (false, trimmed.trim_matches('"'))
+    }
+}
+
+/// RFC 7232 §3.2 — `If-None-Match` fails for PUT when:
+///   - the header value is `*` and a current representation exists, OR
+///   - any listed ETag matches the current representation (weak comparison
+///     — weak validators in the request are equivalent to strong for the
+///     match itself, only If-Match is required to be strong).
+fn if_none_match_precondition_fails(header: &str, current_etag: Option<&str>) -> bool {
+    let v = header.trim();
+    if v == "*" {
+        return current_etag.is_some();
+    }
+    let Some(current) = current_etag else {
+        return false;
+    };
+    v.split(',').any(|tag| {
+        let (_, parsed) = parse_etag_value(tag);
+        !parsed.is_empty() && parsed == current
+    })
+}
+
+/// RFC 7232 §3.1 — `If-Match` fails for PUT when:
+///   - the resource doesn't currently exist (no strong validator to match), OR
+///   - the header isn't `*` and no listed ETag strong-matches the current one
+///     (weak validators in the request never satisfy a strong-match).
+fn if_match_precondition_fails(header: &str, current_etag: Option<&str>) -> bool {
+    let v = header.trim();
+    let Some(current) = current_etag else {
+        return true;
+    };
+    if v == "*" {
+        return false;
+    }
+    !v.split(',').any(|tag| {
+        let (is_weak, parsed) = parse_etag_value(tag);
+        !is_weak && !parsed.is_empty() && parsed == current
+    })
+}
+
+fn precondition_failed_response() -> Response<Body> {
+    Response::builder()
+        .status(StatusCode::PRECONDITION_FAILED)
+        .body(Body::empty())
+        .unwrap()
+}
+
 async fn handle_put(
     state: Arc<AppState>,
     req: Request<Body>,
@@ -565,6 +629,31 @@ async fn handle_put(
         .get("x-oc-mtime")
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<i64>().ok());
+
+    // ── Conditional preconditions (RFC 7232 §3.1 / §3.2) ─────────────
+    // Evaluated BEFORE body ingestion so a rejected PUT doesn't waste
+    // bandwidth or disk I/O on a body the server is going to throw away.
+    // The lookup is reused for the create-vs-update distinction below,
+    // so this is also free of an extra DB hit.
+    let existing = file_service.get_file_by_path(&internal_path).await.ok();
+    let current_etag = existing.as_ref().map(|f| f.etag.as_str());
+
+    if let Some(value) = req
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        && if_none_match_precondition_fails(value, current_etag)
+    {
+        return Ok(precondition_failed_response());
+    }
+    if let Some(value) = req
+        .headers()
+        .get(header::IF_MATCH)
+        .and_then(|v| v.to_str().ok())
+        && if_match_precondition_fails(value, current_etag)
+    {
+        return Ok(precondition_failed_response());
+    }
 
     // ── Direct PUT cap ───────────────────────────────────────────────
     // We use `direct_put_max_bytes` (default 1 GiB), not `max_upload_size`
@@ -594,8 +683,9 @@ async fn handle_put(
     .await?;
     let content_type = ingested.content_type.clone();
 
-    // Distinguish create (201) vs update (204) for the response status.
-    let existed = file_service.get_file_by_path(&internal_path).await.is_ok();
+    // Distinguish create (201) vs update (204) for the response status,
+    // using the lookup already done above for the precondition check.
+    let existed = existing.is_some();
 
     // Single streaming path — handles both update and create internally,
     // swapping the file row onto the already-ingested blob.
@@ -630,7 +720,18 @@ async fn handle_mkcol(
     let folder_service = &state.applications.folder_service;
     let internal_path = nc_to_internal_path(&user.username, subpath)?;
 
-    // If the folder already exists, return 405 per RFC 4918 §9.3.1
+    // RFC 4918 §9.3.1:
+    //   - target already exists                                → 405 Method Not Allowed
+    //   - parent collection of the target does NOT exist       → 409 Conflict
+    //   - parent exists and target does not                    → 201 Created
+    //
+    // Previous behaviour effectively performed `mkdir -p` and returned
+    // 201 even when intermediate ancestors were missing. Sabre/DAV and
+    // the actual NC server both return 409 here, so the legacy
+    // auto-create deviated from the reference implementation. NC desktop
+    // walks ancestors one MKCOL at a time anyway, so dropping the
+    // auto-create doesn't break real clients.
+
     if folder_service
         .get_folder_by_path(&internal_path)
         .await
@@ -642,56 +743,39 @@ async fn handle_mkcol(
             .unwrap());
     }
 
-    // Collect path segments that need to be created (walk from root to leaf)
     let segments: Vec<&str> = subpath.split('/').filter(|s| !s.is_empty()).collect();
+    if segments.is_empty() {
+        return Err(AppError::bad_request(
+            "MKCOL on the user root is not allowed",
+        ));
+    }
+    let (target_name, parent_segments) = segments.split_last().expect("checked non-empty above");
 
     let user_root = nc_to_internal_path(&user.username, "")?;
-    let mut current_path = user_root.clone();
-    let mut parent_id = folder_service
-        .get_folder_by_path(&user_root)
-        .await
-        .map_err(|_| AppError::not_found("User root folder not found"))?
-        .id
-        .clone();
+    let parent_path = if parent_segments.is_empty() {
+        user_root.clone()
+    } else {
+        format!("{}/{}", user_root, parent_segments.join("/"))
+    };
 
-    for segment in &segments {
-        current_path = format!("{}/{}", current_path, segment);
-        match folder_service.get_folder_by_path(&current_path).await {
-            Ok(existing) => {
-                parent_id = existing.id.clone();
-            }
-            Err(_) => {
-                let dto = CreateFolderDto {
-                    name: segment.to_string(),
-                    parent_id: Some(parent_id.clone()),
-                };
-                match folder_service.create_folder_with_perms(dto, user.id).await {
-                    Ok(created) => {
-                        parent_id = created.id.clone();
-                    }
-                    Err(e)
-                        if e.message.contains("already exists")
-                            || e.message.contains("Already Exists") =>
-                    {
-                        // Race condition — folder created concurrently
-                        let folder = folder_service
-                            .get_folder_by_path(&current_path)
-                            .await
-                            .map_err(|_| {
-                                AppError::internal_error("Folder exists but cannot be found")
-                            })?;
-                        parent_id = folder.id.clone();
-                    }
-                    Err(e) => {
-                        return Err(AppError::internal_error(format!(
-                            "Failed to create folder: {}",
-                            e
-                        )));
-                    }
-                }
-            }
+    let parent_folder = match folder_service.get_folder_by_path(&parent_path).await {
+        Ok(folder) => folder,
+        Err(_) => {
+            return Ok(Response::builder()
+                .status(StatusCode::CONFLICT)
+                .body(Body::empty())
+                .unwrap());
         }
-    }
+    };
+
+    let dto = CreateFolderDto {
+        name: target_name.to_string(),
+        parent_id: Some(parent_folder.id.clone()),
+    };
+    folder_service
+        .create_folder_with_perms(dto, user.id)
+        .await
+        .map_err(|e| AppError::internal_error(format!("Failed to create folder: {}", e)))?;
 
     Ok(Response::builder()
         .status(StatusCode::CREATED)
@@ -781,6 +865,19 @@ async fn handle_move(
         .ok_or_else(|| AppError::bad_request("Missing Destination header"))?
         .to_string();
 
+    // RFC 4918 §9.9.3: the `Overwrite` header has the default value `T`.
+    // `F` MUST cause the request to fail with 412 when the destination
+    // already exists; `T` (or absent) MUST replace the destination as if
+    // it didn't exist (the response then drops from 201 Created to 204
+    // No Content per §9.9.4 because the URI's resource was replaced
+    // rather than newly created).
+    let overwrite_forbidden = req
+        .headers()
+        .get("overwrite")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.trim().eq_ignore_ascii_case("F"))
+        .unwrap_or(false);
+
     // Parse destination path: extract subpath after /remote.php/dav/files/{user}/
     let dest_subpath = extract_nc_subpath_from_dest(&destination, &user.username)
         .ok_or_else(|| AppError::bad_request("Invalid Destination URL"))?;
@@ -789,6 +886,58 @@ async fn handle_move(
     let folder_service = &state.applications.folder_service;
     let file_service = &state.applications.file_retrieval_service;
     let file_mgmt = &state.applications.file_management_service;
+
+    // ── Destination-collision precondition (RFC 4918 §9.9.4) ──────────
+    // Resolved once up-front so the file/folder branches below don't
+    // each have to repeat the check. `dest_existed_before` becomes the
+    // 204-vs-201 selector at response time.
+    let dest_internal_precheck = nc_to_internal_path(&user.username, &dest_subpath)?;
+    let dest_existing_file = file_service
+        .get_file_by_path(&dest_internal_precheck)
+        .await
+        .ok();
+    let dest_existing_folder = folder_service
+        .get_folder_by_path(&dest_internal_precheck)
+        .await
+        .ok();
+    let dest_existed_before = dest_existing_file.is_some() || dest_existing_folder.is_some();
+
+    if dest_existed_before {
+        if overwrite_forbidden {
+            return Ok(Response::builder()
+                .status(StatusCode::PRECONDITION_FAILED)
+                .body(Body::empty())
+                .unwrap());
+        }
+        // Overwrite: T (or absent) → delete the existing destination first,
+        // then proceed with the move. Trashing is fine: per RFC the source
+        // resource appears at the destination URI; what happens to the
+        // overwritten one is up to the server.
+        if let Some(existing_file) = &dest_existing_file {
+            file_mgmt
+                .delete_and_cleanup_with_perms(&existing_file.id, user.id)
+                .await
+                .map_err(|e| {
+                    AppError::internal_error(format!("Failed to overwrite destination file: {}", e))
+                })?;
+        } else if let Some(existing_folder) = &dest_existing_folder {
+            folder_service
+                .delete_folder_with_perms(&existing_folder.id, user.id)
+                .await
+                .map_err(|e| {
+                    AppError::internal_error(format!(
+                        "Failed to overwrite destination folder: {}",
+                        e
+                    ))
+                })?;
+        }
+    }
+
+    let final_status = if dest_existed_before {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::CREATED
+    };
 
     // Try as file first.
     if let Ok(file) = file_service.get_file_by_path(&src_internal).await {
@@ -833,7 +982,7 @@ async fn handle_move(
 
         // Return ETag and OC-ETag so Nextcloud clients can track the moved file.
         let dest_internal = nc_to_internal_path(&user.username, &dest_subpath)?;
-        let mut builder = Response::builder().status(StatusCode::CREATED);
+        let mut builder = Response::builder().status(final_status);
         if let Ok(moved) = file_service.get_file_by_path(&dest_internal).await {
             // Route through `FileDto::etag` so the MOVE response
             // matches what a subsequent PROPFIND on the destination
@@ -909,7 +1058,7 @@ async fn handle_move(
         }
 
         return Ok(Response::builder()
-            .status(StatusCode::CREATED)
+            .status(final_status)
             .body(Body::empty())
             .unwrap());
     }
@@ -922,7 +1071,7 @@ async fn handle_move(
 /// Only accepts relative paths or absolute URLs whose path starts with the
 /// expected DAV prefix.  For full URLs the host is ignored — the path alone is
 /// used — so an attacker cannot redirect the server to a different host.
-fn extract_nc_subpath_from_dest(dest: &str, username: &str) -> Option<String> {
+pub fn extract_nc_subpath_from_dest(dest: &str, username: &str) -> Option<String> {
     let prefix = format!("/remote.php/dav/files/{}/", username);
     // For full URLs, extract the path portion (everything after the authority).
     let path = if dest.starts_with("http://") || dest.starts_with("https://") {
