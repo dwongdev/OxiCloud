@@ -602,19 +602,28 @@ impl Role {
     pub fn expand(self) -> &'static [Permission] {
         match self {
             Role::Viewer    => &[Permission::Read],
-            Role::Commenter => &[Permission::Read, Permission::Comment],
-            Role::Editor    => &[Permission::Read, Permission::Comment,
-                                 Permission::Create, Permission::Update],
-            Role::Manager   => &[Permission::Read, Permission::Comment,
-                                 Permission::Create, Permission::Update,
-                                 Permission::Share],
-            Role::Admin     => &[Permission::Read, Permission::Comment,
-                                 Permission::Create, Permission::Update,
-                                 Permission::Share, Permission::Delete],
+            Role::Commenter   => &[Permission::Read, Permission::Comment],
+            Role::Contributor => &[Permission::Read, Permission::Create],
+            Role::Editor      => &[Permission::Read, Permission::Comment,
+                                   Permission::Create, Permission::Update],
+            Role::Owner       => &[Permission::Read, Permission::Comment,
+                                   Permission::Create, Permission::Update,
+                                   Permission::Share, Permission::Delete,
+                                   Permission::Manage],
         }
     }
 }
 ```
+
+> **Note (D-Prep, 2026-06-17):** the `Manager` role was retired before shipping
+> (its bundle was a strict subset of `Owner`); the historical `Admin` role was
+> renamed to `Owner` to disambiguate from `UserRole::Admin` (the user-account
+> privilege) and match Drive plan terminology. `Contributor` is the new
+> drop-zone role. The actual on-the-wire enum lives in
+> `src/application/dtos/grant_dto.rs`; that file is the canonical source of
+> truth for bundle expansion. The pivot to role-keyed storage (`role_grants`
+> table) also happened in D-Prep — see
+> `docs/architecture/rebac-authorization.md` for the dual-write timeline.
 
 ### `POST /api/grants` accepts either shape
 

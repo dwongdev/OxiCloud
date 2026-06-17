@@ -44,6 +44,14 @@ recognise it instantly.
 
 ## Prerequisite — PR D-Prep: `access_grants → role_grants`
 
+**Status (2026-06-17): scope complete, ready to PR.** The schema migration
+runs cleanly against real sandbox data (38 role_grants rows produced,
+matching the audit's 29 viewer / 5 editor / 4 owner distribution, zero
+bundle mismatches). End-to-end Hurl test (`tests/api/role_grants.hurl`)
+covers create / atomic role update / revoke with both the canonical
+`"owner"` and the legacy `"admin"` compat wire format. Engine reads
+pivot to `role_grants` for authz decisions; `access_grants` stays
+populated via dual-write as the safety net for one release cycle.
 **Ratified 2026-06-16.** A separate PR lands BEFORE D0 that refactors
 `storage.access_grants` into `storage.role_grants` with role-bundle
 semantics:

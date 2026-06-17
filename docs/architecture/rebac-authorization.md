@@ -107,8 +107,18 @@ storage.access_grants
   expires_at   TIMESTAMPTZ NULL
 ```
 
-One row per `(subject, permission, resource)` triple. An "admin role on folder
+One row per `(subject, permission, resource)` triple. An "owner role on folder
 X for user Y" is 6 rows; a "viewer role" is 1 row.
+
+> **Note (D-Prep, 2026-06-17):** the role assignment has since pivoted into
+> a separate `storage.role_grants` table that stores **one row per role
+> assignment** rather than one per permission. `access_grants` stays
+> populated via dual-write during the transition; the engine reads the
+> role-keyed table for authz decisions. The cleanup PR drops
+> `access_grants` after the dual-write window. The historical role name
+> `Admin` was renamed to `Owner` at the same time, to disambiguate from
+> `UserRole::Admin` (user-account privilege) and match Drive plan
+> terminology.
 
 Cleanup is trigger-driven (`trg_cleanup_grants_folder`, …): when a resource or
 subject is deleted, all referencing grants disappear in the same transaction.
