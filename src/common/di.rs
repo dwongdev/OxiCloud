@@ -650,6 +650,20 @@ impl AppServiceFactory {
                 )
                 .start();
 
+                // Periodic idle-eviction of cached compiled modules: frees the
+                // memory of plugins not invoked within the configured TTL; the
+                // next event recompiles transparently. Cheap, so it ticks often.
+                {
+                    let evictor = manager.clone();
+                    tokio::spawn(async move {
+                        let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+                        loop {
+                            tick.tick().await;
+                            evictor.evict_idle_compiled();
+                        }
+                    });
+                }
+
                 return (Some(dispatch), Some(management));
             }
         }

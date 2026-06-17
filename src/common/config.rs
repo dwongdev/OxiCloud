@@ -980,6 +980,23 @@ pub struct PluginConfig {
     /// sweep deletes oldest-first past this. Overridable per plugin. Default:
     /// 256 MiB. Env: `OXICLOUD_PLUGIN_LOG_TOTAL_MAX_BYTES`.
     pub log_total_max_bytes: u64,
+    /// Max plugin invocations running concurrently across all plugins. Dispatch
+    /// sheds load (drops the event, audit-logged) past this rather than
+    /// unbounded `spawn_blocking`, so plugins can't starve the shared blocking
+    /// pool. Default: 16. Env: `OXICLOUD_PLUGIN_MAX_CONCURRENT_INVOCATIONS`.
+    pub max_concurrent_invocations: usize,
+    /// Bounded depth of the log-store command channel. A flood past this drops
+    /// the oldest-arriving log batch (never blocks dispatch). Default: 1024.
+    /// Env: `OXICLOUD_PLUGIN_LOG_QUEUE_CAPACITY`.
+    pub log_queue_capacity: usize,
+    /// Idle window after which a plugin's cached compiled module is dropped to
+    /// reclaim memory; the next event recompiles from wasmtime's on-disk cache.
+    /// Default: 300 (5 min). Env: `OXICLOUD_PLUGIN_CACHE_IDLE_TTL_SECS`.
+    pub cache_idle_ttl_secs: u64,
+    /// Aggregate decompressed-byte ceiling enforced while unpacking an install
+    /// bundle (zip-bomb guard; the install route also caps the compressed body).
+    /// Default: 64 MiB. Env: `OXICLOUD_PLUGIN_MAX_BUNDLE_DECOMPRESSED_BYTES`.
+    pub max_bundle_decompressed_bytes: u64,
 }
 
 impl Default for PluginConfig {
@@ -995,6 +1012,10 @@ impl Default for PluginConfig {
             log_max_segments: 10,
             log_retention_days: 30,
             log_total_max_bytes: 256 * 1024 * 1024,
+            max_concurrent_invocations: 16,
+            log_queue_capacity: 1024,
+            cache_idle_ttl_secs: 300,
+            max_bundle_decompressed_bytes: 64 * 1024 * 1024,
         }
     }
 }
@@ -1434,6 +1455,28 @@ impl AppConfig {
             && let Ok(val) = v
         {
             config.plugins.log_total_max_bytes = val;
+        }
+        if let Ok(v) =
+            env::var("OXICLOUD_PLUGIN_MAX_CONCURRENT_INVOCATIONS").map(|v| v.parse::<usize>())
+            && let Ok(val) = v
+        {
+            config.plugins.max_concurrent_invocations = val;
+        }
+        if let Ok(v) = env::var("OXICLOUD_PLUGIN_LOG_QUEUE_CAPACITY").map(|v| v.parse::<usize>())
+            && let Ok(val) = v
+        {
+            config.plugins.log_queue_capacity = val;
+        }
+        if let Ok(v) = env::var("OXICLOUD_PLUGIN_CACHE_IDLE_TTL_SECS").map(|v| v.parse::<u64>())
+            && let Ok(val) = v
+        {
+            config.plugins.cache_idle_ttl_secs = val;
+        }
+        if let Ok(v) =
+            env::var("OXICLOUD_PLUGIN_MAX_BUNDLE_DECOMPRESSED_BYTES").map(|v| v.parse::<u64>())
+            && let Ok(val) = v
+        {
+            config.plugins.max_bundle_decompressed_bytes = val;
         }
 
         if let Ok(v) = env::var("OXICLOUD_EXPOSE_SYSTEM_USERS").map(|v| v.parse::<bool>())

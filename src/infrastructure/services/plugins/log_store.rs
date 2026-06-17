@@ -41,8 +41,6 @@ use crate::application::ports::plugin_ports::{
 const ACTIVE_FILE: &str = "events.jsonl";
 /// Marker file holding a plugin's retention override.
 const RETENTION_FILE: &str = "retention.json";
-/// Bounded command-channel depth — backpressure under flood, not unbounded RAM.
-const CHANNEL_CAPACITY: usize = 1024;
 /// Live broadcast buffer; a slow tailer past this gets `Lagged` (never blocks).
 const LIVE_CAPACITY: usize = 256;
 
@@ -88,14 +86,17 @@ pub struct PluginLogStore {
 
 impl PluginLogStore {
     /// Spawn the actor thread and return a handle. `default_retention` is applied
-    /// to any plugin lacking an explicit `retention.json`.
+    /// to any plugin lacking an explicit `retention.json`. `queue_capacity`
+    /// bounds the command channel — a flood past it sheds the oldest-arriving
+    /// batch rather than growing RAM or blocking dispatch.
     pub fn new(
         root: PathBuf,
         max_file_bytes: u64,
         max_segments: u32,
         default_retention: RetentionSettings,
+        queue_capacity: usize,
     ) -> Self {
-        let (tx, rx) = mpsc::channel(CHANNEL_CAPACITY);
+        let (tx, rx) = mpsc::channel(queue_capacity.max(1));
         let (live, _) = broadcast::channel(LIVE_CAPACITY);
         let actor = Actor {
             root,
@@ -115,10 +116,10 @@ impl PluginLogStore {
     }
 
     /// Enqueue a batch (plugin-emitted lines + the host outcome) for one
-    /// invocation. Called from the dispatch `spawn_blocking` closure, so
-    /// `blocking_send` is correct: it applies backpressure to that off-runtime
-    /// thread and preserves order. Send failures (actor gone) are swallowed —
-    /// logging must never break dispatch.
+    /// invocation. Called from the dispatch `spawn_blocking` closure. Uses a
+    /// non-blocking `try_send`: under flood it sheds the batch (logged) rather
+    /// than blocking the blocking-pool thread or growing RAM unboundedly. A full
+    /// queue or a gone actor is swallowed — logging must never break dispatch.
     pub fn append(
         &self,
         plugin_id: &str,
@@ -148,7 +149,7 @@ impl PluginLogStore {
             msg,
         });
 
-        if let Err(e) = self.tx.blocking_send(LogCommand::Append {
+        if let Err(e) = self.tx.try_send(LogCommand::Append {
             plugin_id: plugin_id.to_string(),
             entries,
         }) {
@@ -156,7 +157,7 @@ impl PluginLogStore {
                 target: "oxicloud::plugins",
                 plugin_id = %plugin_id,
                 error = %e,
-                "dropping plugin log batch: log actor unavailable"
+                "dropping plugin log batch: queue full or log actor unavailable"
             );
         }
     }

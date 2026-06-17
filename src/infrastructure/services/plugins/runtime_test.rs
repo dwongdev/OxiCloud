@@ -173,6 +173,38 @@ fn enforces_timeout() {
 }
 
 #[test]
+fn idle_eviction_drops_and_recompiles() {
+    let rt = PluginRuntime::new("com.example.hello", fixture("hello.wasm"));
+    // First invoke compiles + caches the module.
+    let r1 = rt.invoke(&cfg(), "on_file_uploaded", "inv1", &file_uploaded_input());
+    assert!(r1.outcome.is_ok(), "first invoke: {:?}", r1.outcome);
+
+    // Idle past a zero TTL -> the cached module is dropped.
+    assert!(
+        rt.evict_if_idle(Duration::ZERO),
+        "a just-idle module should be evicted"
+    );
+    // Nothing left to evict the second time.
+    assert!(
+        !rt.evict_if_idle(Duration::ZERO),
+        "second eviction is a no-op"
+    );
+
+    // The next invoke recompiles transparently and still works.
+    let r2 = rt.invoke(&cfg(), "on_file_uploaded", "inv2", &file_uploaded_input());
+    assert!(
+        r2.outcome.is_ok(),
+        "recompile after eviction: {:?}",
+        r2.outcome
+    );
+    // A long TTL never evicts a freshly-used module.
+    assert!(
+        !rt.evict_if_idle(Duration::from_secs(3600)),
+        "a fresh module must not be evicted"
+    );
+}
+
+#[test]
 fn no_network() {
     let rt = PluginRuntime::new("com.example.net", fixture("net.wasm"));
     let result = rt.invoke(&cfg(), "on_file_uploaded", "inv", &file_uploaded_input());

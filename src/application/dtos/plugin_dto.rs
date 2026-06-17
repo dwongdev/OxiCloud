@@ -104,11 +104,15 @@ pub struct PluginLogQueryDto {
 }
 
 /// Per-plugin retention policy (request + response body).
+///
+/// Both limits are accepted as-is, including `0`, which means "purge all rotated
+/// segments on the next sweep" (the active log file is never touched). This is
+/// intentional — an operator can deliberately keep nothing.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema)]
 pub struct PluginRetentionDto {
-    /// Delete rotated segments older than this many days.
+    /// Delete rotated segments older than this many days. `0` = keep none.
     pub retention_days: u32,
-    /// Aggregate byte ceiling on kept segments for the plugin.
+    /// Aggregate byte ceiling on kept segments for the plugin. `0` = keep none.
     pub max_bytes: u64,
 }
 

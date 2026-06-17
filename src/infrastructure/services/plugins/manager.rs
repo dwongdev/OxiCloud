@@ -17,8 +17,10 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
+use tokio::sync::Semaphore;
 
 use super::log_store::PluginLogStore;
 use super::manifest;
@@ -74,6 +76,9 @@ pub struct ExtismPluginManager {
     plugins: RwLock<Vec<LoadedPlugin>>,
     /// Per-plugin structured log storage (shared with the maintenance task).
     log_store: Arc<PluginLogStore>,
+    /// Caps concurrent plugin invocations across all plugins so dispatch can
+    /// shed load instead of flooding the shared blocking pool.
+    invocation_sem: Arc<Semaphore>,
 }
 
 impl ExtismPluginManager {
@@ -96,7 +101,9 @@ impl ExtismPluginManager {
                 retention_days: config.log_retention_days,
                 max_bytes: config.log_total_max_bytes,
             },
+            config.log_queue_capacity,
         ));
+        let invocation_sem = Arc::new(Semaphore::new(config.max_concurrent_invocations.max(1)));
 
         let mut plugins = Vec::new();
         let mut rejected = 0usize;
@@ -115,6 +122,7 @@ impl ExtismPluginManager {
                     root_dir: dir.to_path_buf(),
                     plugins: RwLock::new(plugins),
                     log_store,
+                    invocation_sem,
                 };
             }
         };
@@ -164,6 +172,7 @@ impl ExtismPluginManager {
             root_dir: dir.to_path_buf(),
             plugins: RwLock::new(plugins),
             log_store,
+            invocation_sem,
         }
     }
 
@@ -182,6 +191,13 @@ impl ExtismPluginManager {
         let toml_str =
             std::fs::read_to_string(&manifest_path).map_err(|_| "manifest_unreadable")?;
         let manifest = manifest::parse_and_validate(&toml_str).map_err(|e| e.reason())?;
+
+        // The entrypoint becomes a path joined onto the plugin dir; reject a
+        // traversal-unsafe value on disk too (mirrors the `install` check), so a
+        // hand-placed manifest can't read a `.wasm` outside its own directory.
+        if !is_safe_component(&manifest.plugin.entrypoint) {
+            return Err("bad_entrypoint");
+        }
 
         let wasm_path = dir.join(&manifest.plugin.entrypoint);
         let wasm_bytes = std::fs::read(&wasm_path).map_err(|_| "wasm_unreadable")?;
@@ -227,6 +243,26 @@ impl ExtismPluginManager {
     /// and by tests).
     pub fn loaded_count(&self) -> usize {
         self.read_plugins().len()
+    }
+
+    /// Drop the cached compiled module of every plugin idle past the configured
+    /// TTL, reclaiming memory. Driven by a periodic timer in DI; the next event
+    /// to a freed plugin recompiles transparently.
+    pub fn evict_idle_compiled(&self) {
+        let ttl = Duration::from_secs(self.config.cache_idle_ttl_secs);
+        let mut evicted = 0usize;
+        for plugin in self.read_plugins().iter() {
+            if plugin.runtime.evict_if_idle(ttl) {
+                evicted += 1;
+            }
+        }
+        if evicted > 0 {
+            tracing::debug!(
+                target: "oxicloud::plugins",
+                evicted,
+                "evicted idle compiled plugin modules"
+            );
+        }
     }
 
     fn read_plugins(&self) -> std::sync::RwLockReadGuard<'_, Vec<LoadedPlugin>> {
@@ -279,6 +315,26 @@ impl PluginDispatchPort for ExtismPluginManager {
                 }
             };
 
+            // Load shedding: cap concurrent invocations so a flood of events (or
+            // slow plugins) can't exhaust the shared blocking pool. Past the cap
+            // the event is dropped — plugins are observe-only, so shedding is
+            // safe; we just record it.
+            let permit = match self.invocation_sem.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => {
+                    tracing::warn!(
+                        target: "audit",
+                        event = "plugin.dispatch_shed",
+                        reason = "at_capacity",
+                        plugin_id = %plugin.id,
+                        invocation_id = %event.invocation_id,
+                        plugin_event = %event.name,
+                        "👮🏻‍♂️ plugin event dropped: invocation limit reached"
+                    );
+                    continue;
+                }
+            };
+
             let runtime = plugin.runtime.clone();
             let config = self.config.clone();
             let plugin_id = plugin.id.clone();
@@ -289,6 +345,8 @@ impl PluginDispatchPort for ExtismPluginManager {
             // Run the synchronous wasm call off the async workers. Fire-and-forget:
             // the upload already succeeded; plugins are post-hoc observers.
             tokio::task::spawn_blocking(move || {
+                // Hold the permit for the lifetime of the invocation.
+                let _permit = permit;
                 let result = runtime.invoke(&config, &export, &invocation_id, &input_json);
                 // Persist every invocation (the plugin's own log lines plus the
                 // host outcome) to the plugin's structured log. Ordered, async,
@@ -415,6 +473,11 @@ impl PluginManagementPort for ExtismPluginManager {
     fn install_bundle(&self, zip: Vec<u8>) -> Result<PluginInfo, PluginMgmtError> {
         use std::io::{Cursor, Read};
 
+        // Aggregate decompressed ceiling, enforced as each entry is unpacked so
+        // a zip bomb can't blow up memory before validation (the route also caps
+        // the compressed body). We only ever extract two named entries.
+        let max_decompressed: u64 = self.config.max_bundle_decompressed_bytes;
+
         let mut archive = zip::ZipArchive::new(Cursor::new(zip))
             .map_err(|_| PluginMgmtError::Rejected("bad_zip"))?;
 
@@ -427,11 +490,18 @@ impl PluginManagementPort for ExtismPluginManager {
             .ok_or(PluginMgmtError::Rejected("no_manifest_in_zip"))?;
 
         let mut manifest_toml = String::new();
-        archive
-            .by_name(&manifest_name)
-            .map_err(|_| PluginMgmtError::Rejected("no_manifest_in_zip"))?
-            .read_to_string(&mut manifest_toml)
-            .map_err(|_| PluginMgmtError::Rejected("bad_zip"))?;
+        {
+            let entry = archive
+                .by_name(&manifest_name)
+                .map_err(|_| PluginMgmtError::Rejected("no_manifest_in_zip"))?;
+            entry
+                .take(max_decompressed + 1)
+                .read_to_string(&mut manifest_toml)
+                .map_err(|_| PluginMgmtError::Rejected("bad_zip"))?;
+        }
+        if manifest_toml.len() as u64 > max_decompressed {
+            return Err(PluginMgmtError::Rejected("too_large"));
+        }
 
         // Parse just to learn the entrypoint name; `install` does the full
         // validation (and rejects a traversal-unsafe entrypoint).
@@ -445,12 +515,21 @@ impl PluginManagementPort for ExtismPluginManager {
         };
         let wasm_name = format!("{prefix}{}", manifest.plugin.entrypoint);
 
+        // Budget the wasm against what the manifest already consumed.
+        let remaining = max_decompressed - manifest_toml.len() as u64;
         let mut wasm = Vec::new();
-        archive
-            .by_name(&wasm_name)
-            .map_err(|_| PluginMgmtError::Rejected("entrypoint_not_in_zip"))?
-            .read_to_end(&mut wasm)
-            .map_err(|_| PluginMgmtError::Rejected("bad_zip"))?;
+        {
+            let entry = archive
+                .by_name(&wasm_name)
+                .map_err(|_| PluginMgmtError::Rejected("entrypoint_not_in_zip"))?;
+            entry
+                .take(remaining + 1)
+                .read_to_end(&mut wasm)
+                .map_err(|_| PluginMgmtError::Rejected("bad_zip"))?;
+        }
+        if wasm.len() as u64 > remaining {
+            return Err(PluginMgmtError::Rejected("too_large"));
+        }
 
         self.install(&manifest_toml, wasm)
     }

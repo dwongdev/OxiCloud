@@ -6,10 +6,11 @@
 //! it is always compiled and the Extism dependency stays in the infrastructure
 //! layer.
 //!
-//! Privacy note: the `user.login` payload includes the user's email — PII handed
-//! to untrusted plugins with no permission gate in M0. This is acceptable only
-//! because plugins are admin-installed today; when the permissions system lands,
-//! sensitive payload fields should be gated behind a granted permission.
+//! Privacy note: the `user.login` payload is deliberately minimal — an opaque
+//! `user_id` plus two non-identifying booleans (`first_login`, `is_external`).
+//! It carries no email or username, so no PII reaches untrusted plugins in M0.
+//! When the permissions system lands, richer fields (email, username) can be
+//! added back behind a granted permission.
 
 use std::sync::Arc;
 
@@ -46,8 +47,6 @@ impl UserLifecycleHook for PluginUserLifecycleHook {
                 invocation_id: Uuid::new_v4().to_string(),
                 payload: serde_json::json!({
                     "user_id": user.id().to_string(),
-                    "username": user.username(),
-                    "email": user.email(),
                     "first_login": user.last_login_at().is_none(),
                     "is_external": user.is_external(),
                 }),
@@ -126,10 +125,15 @@ mod tests {
         let ev = &events[0];
         assert_eq!(ev.name, EVENT_USER_LOGIN);
         assert_eq!(ev.user_id.as_deref(), Some(user.id().to_string().as_str()));
-        assert_eq!(ev.payload["email"], "alice@example.com");
-        assert_eq!(ev.payload["username"], "alice");
+        assert_eq!(ev.payload["user_id"], user.id().to_string());
         assert_eq!(ev.payload["first_login"], true); // last_login_at is None
         assert_eq!(ev.payload["is_external"], false);
+        // Minimal payload: no PII fields.
+        assert!(ev.payload.get("email").is_none(), "must not leak email");
+        assert!(
+            ev.payload.get("username").is_none(),
+            "must not leak username"
+        );
     }
 
     #[tokio::test]

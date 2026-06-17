@@ -1,6 +1,6 @@
 use axum::{
     Router,
-    extract::{Json, Multipart, Path, Query, State},
+    extract::{DefaultBodyLimit, Json, Multipart, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{
         IntoResponse,
@@ -70,7 +70,13 @@ pub fn admin_routes() -> Router<Arc<AppState>> {
         .route("/photos/metadata/reextract", post(reextract_image_metadata))
         // Plugin management
         .route("/plugins", get(list_plugins))
-        .route("/plugins", post(install_plugin))
+        // Install caps the request body at 32 MiB (overriding the global
+        // multi-GB upload limit) — a plugin bundle is small; the unpack also
+        // enforces a 64 MiB decompressed ceiling.
+        .route(
+            "/plugins",
+            post(install_plugin).layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
         .route("/plugins/{id}/enabled", put(set_plugin_enabled))
         .route("/plugins/{id}", delete(delete_plugin))
         // Plugin logs + per-plugin retention
@@ -1502,6 +1508,9 @@ pub async fn list_plugins(
     admin_guard(&state, &headers).await?;
     let mgmt = plugin_mgmt(&state)?;
     let plugins: Vec<PluginInfoDto> = mgmt.list().into_iter().map(PluginInfoDto::from).collect();
+    // `enabled` reports that the plugin *subsystem* is active (reaching here
+    // means it is — `plugin_mgmt` returns 503 otherwise, which the UI reads as
+    // the disabled state). Per-plugin enablement is each entry's own `enabled`.
     Ok((
         StatusCode::OK,
         Json(serde_json::json!({ "enabled": true, "plugins": plugins })),

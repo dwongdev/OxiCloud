@@ -148,6 +148,25 @@ fn install_bundle_missing_entrypoint_is_rejected() {
 }
 
 #[test]
+fn install_bundle_oversized_is_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Tiny decompressed ceiling so the ~130 KiB wasm fixture trips it cheaply.
+    let mut config = cfg();
+    config.max_bundle_decompressed_bytes = 1024;
+    let mgr = ExtismPluginManager::load_from_dir(config, tmp.path());
+
+    let zip = make_zip(&[
+        ("plugin.toml", hello_manifest().as_bytes()),
+        ("hello.wasm", &fixture("hello.wasm")),
+    ]);
+    let err = mgr
+        .install_bundle(zip)
+        .expect_err("a bundle over the decompressed ceiling must be rejected");
+    assert_eq!(err.reason(), "too_large");
+    assert_eq!(mgr.loaded_count(), 0);
+}
+
+#[test]
 fn install_bundle_with_garbage_is_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let mgr = ExtismPluginManager::load_from_dir(cfg(), tmp.path());

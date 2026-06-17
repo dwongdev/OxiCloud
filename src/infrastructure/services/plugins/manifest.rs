@@ -40,7 +40,8 @@ pub struct PluginSection {
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventsSection {
-    /// Events this plugin wants. M0 accepts only `"file.uploaded"`.
+    /// Events this plugin wants. Each must be one of `KNOWN_EVENTS`
+    /// (`"file.uploaded"`, `"user.login"`); an unknown name rejects the plugin.
     pub subscribe: Vec<String>,
 }
 

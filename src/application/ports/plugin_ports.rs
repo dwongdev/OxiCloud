@@ -195,7 +195,7 @@ pub enum PluginMgmtError {
     /// The bundle failed manifest or runtime validation. Carries the stable
     /// reason key from `ManifestError::reason()` / `InvokeOutcome::reason()`,
     /// plus a few install-only keys (`bad_id`, `bad_entrypoint`, `bad_zip`,
-    /// `no_manifest_in_zip`, `entrypoint_not_in_zip`).
+    /// `no_manifest_in_zip`, `entrypoint_not_in_zip`, `too_large`).
     Rejected(&'static str),
     /// A filesystem error while writing or removing the plugin.
     Io(String),
