@@ -148,18 +148,19 @@ impl FolderRepository for FolderDbRepository {
         name: String,
         parent_id: Option<String>,
     ) -> Result<Folder, DomainError> {
-        // Derive user_id from parent folder.  Root-level folders require the
-        // caller to have set up the home folder beforehand (done during user
-        // registration).
-        let user_id: Uuid = if let Some(ref pid) = parent_id {
-            sqlx::query_scalar::<_, Uuid>("SELECT user_id FROM storage.folders WHERE id = $1::uuid")
-                .bind(pid)
-                .fetch_optional(self.pool())
-                .await
-                .map_err(|e| {
-                    DomainError::internal_error("FolderDb", format!("parent lookup: {e}"))
-                })?
-                .ok_or_else(|| DomainError::not_found("Folder", pid))?
+        // Derive (user_id, drive_id) from parent folder in one round-trip.
+        // Root-level folders require the caller to have set up the home
+        // drive beforehand (done during user registration via the
+        // lifecycle hook).
+        let (user_id, drive_id): (Uuid, Uuid) = if let Some(ref pid) = parent_id {
+            sqlx::query_as::<_, (Uuid, Uuid)>(
+                "SELECT user_id, drive_id FROM storage.folders WHERE id = $1::uuid",
+            )
+            .bind(pid)
+            .fetch_optional(self.pool())
+            .await
+            .map_err(|e| DomainError::internal_error("FolderDb", format!("parent lookup: {e}")))?
+            .ok_or_else(|| DomainError::not_found("Folder", pid))?
         } else {
             return Err(DomainError::internal_error(
                 "FolderDb",
@@ -167,10 +168,17 @@ impl FolderRepository for FolderDbRepository {
             ));
         };
 
+        // D0 dual-write: drive_id alongside user_id (drops in D7), plus
+        // provenance columns created_by/updated_by. The repo derives
+        // created_by from user_id because the parent's owner is the
+        // creator on personal drives (the only kind that exists in D0).
+        // D2 plumbs the real caller_id when shared drives let other
+        // members write into a drive they don't own.
         let row = sqlx::query_as::<_, (String, String, i64, i64, i64)>(
             r#"
-            INSERT INTO storage.folders (name, parent_id, user_id)
-            VALUES ($1, $2::uuid, $3)
+            INSERT INTO storage.folders
+                (name, parent_id, user_id, drive_id, created_by, updated_by)
+            VALUES ($1, $2::uuid, $3, $4, $3, $3)
             RETURNING id::text,
                       path,
                       EXTRACT(EPOCH FROM created_at)::bigint,
@@ -181,6 +189,7 @@ impl FolderRepository for FolderDbRepository {
         .bind(&name)
         .bind(&parent_id)
         .bind(user_id)
+        .bind(drive_id)
         .fetch_one(self.pool())
         .await
         .map_err(|e| {
@@ -489,7 +498,7 @@ impl FolderRepository for FolderDbRepository {
             sqlx::query_as::<_, FolderRow>(
                 r#"
                 UPDATE storage.folders
-                   SET name = $1, updated_at = NOW()
+                   SET name = $1, updated_at = NOW(), updated_by = user_id
                  WHERE id = $2::uuid AND NOT is_trashed
                 RETURNING id::text, name, path, parent_id::text, user_id,
                           EXTRACT(EPOCH FROM created_at)::bigint,
@@ -528,7 +537,7 @@ impl FolderRepository for FolderDbRepository {
             sqlx::query_as::<_, FolderRow>(
                 r#"
                 UPDATE storage.folders
-                   SET parent_id = $1::uuid, updated_at = NOW()
+                   SET parent_id = $1::uuid, updated_at = NOW(), updated_by = user_id
                  WHERE id = $2::uuid AND NOT is_trashed
                 RETURNING id::text, name, path, parent_id::text, user_id,
                           EXTRACT(EPOCH FROM created_at)::bigint,
@@ -634,7 +643,8 @@ impl FolderRepository for FolderDbRepository {
                        SET is_trashed = TRUE,
                            trashed_at = NOW(),
                            original_parent_id = parent_id,
-                           updated_at = NOW()
+                           updated_at = NOW(),
+                           updated_by = user_id
                      WHERE id = $1::uuid AND NOT is_trashed
                     RETURNING id, lpath
                 ),
@@ -642,7 +652,8 @@ impl FolderRepository for FolderDbRepository {
                     UPDATE storage.folders f
                        SET is_trashed = TRUE,
                            trashed_at = NOW(),
-                           updated_at = NOW()
+                           updated_at = NOW(),
+                           updated_by = f.user_id
                       FROM trash_root tr
                      WHERE f.lpath <@ tr.lpath
                        AND f.id != tr.id
@@ -653,7 +664,8 @@ impl FolderRepository for FolderDbRepository {
                     UPDATE storage.files fi
                        SET is_trashed = TRUE,
                            trashed_at = NOW(),
-                           updated_at = NOW()
+                           updated_at = NOW(),
+                           updated_by = fi.user_id
                       FROM trash_root tr
                       JOIN storage.folders f ON f.lpath <@ tr.lpath
                      WHERE fi.folder_id = f.id
@@ -698,7 +710,8 @@ impl FolderRepository for FolderDbRepository {
                            trashed_at = NULL,
                            parent_id = COALESCE(original_parent_id, parent_id),
                            original_parent_id = NULL,
-                           updated_at = NOW()
+                           updated_at = NOW(),
+                           updated_by = user_id
                      WHERE id = $1::uuid AND is_trashed
                     RETURNING id, lpath
                 ),
@@ -706,7 +719,8 @@ impl FolderRepository for FolderDbRepository {
                     UPDATE storage.folders f
                        SET is_trashed = FALSE,
                            trashed_at = NULL,
-                           updated_at = NOW()
+                           updated_at = NOW(),
+                           updated_by = f.user_id
                       FROM restore_root rr
                      WHERE f.lpath <@ rr.lpath
                        AND f.id != rr.id
@@ -718,7 +732,8 @@ impl FolderRepository for FolderDbRepository {
                     UPDATE storage.files fi
                        SET is_trashed = FALSE,
                            trashed_at = NULL,
-                           updated_at = NOW()
+                           updated_at = NOW(),
+                           updated_by = fi.user_id
                       FROM restore_root rr
                       JOIN storage.folders f ON f.lpath <@ rr.lpath
                      WHERE fi.folder_id = f.id
@@ -775,11 +790,24 @@ impl FolderRepository for FolderDbRepository {
         Ok(())
     }
 
-    async fn create_home_folder(&self, user_id: Uuid, name: String) -> Result<Folder, DomainError> {
+    async fn create_home_folder(
+        &self,
+        user_id: Uuid,
+        drive_id: Uuid,
+        name: String,
+    ) -> Result<Folder, DomainError> {
+        // D0-9 keeps the wrapper-folder convention through the dual-write
+        // window: the lifecycle hook creates the personal drive AND a
+        // root folder under it. Wrapper retirement (the `My Folder -
+        // <username>/` prefix and the wrapper row itself) lands in M2b
+        // alongside the path rewrite. drive_id is required (M3 NOT NULL);
+        // created_by/updated_by are stamped from user_id for D0
+        // provenance.
         let row = sqlx::query_as::<_, (String, String, i64, i64, i64)>(
             r#"
-            INSERT INTO storage.folders (name, parent_id, user_id)
-            VALUES ($1, NULL, $2)
+            INSERT INTO storage.folders
+                (name, parent_id, user_id, drive_id, created_by, updated_by)
+            VALUES ($1, NULL, $2, $3, $2, $2)
             ON CONFLICT DO NOTHING
             RETURNING id::text,
                       path,
@@ -790,6 +818,7 @@ impl FolderRepository for FolderDbRepository {
         )
         .bind(&name)
         .bind(user_id)
+        .bind(drive_id)
         .fetch_optional(self.pool())
         .await
         .map_err(|e| DomainError::internal_error("FolderDb", format!("home folder: {e}")))?;

@@ -58,6 +58,7 @@ impl From<Subject> for SubjectDto {
 pub enum ResourceTypeDto {
     Folder,
     File,
+    Drive,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -72,6 +73,7 @@ impl From<ResourceDto> for Resource {
         match dto.kind {
             ResourceTypeDto::Folder => Resource::Folder(dto.id),
             ResourceTypeDto::File => Resource::File(dto.id),
+            ResourceTypeDto::Drive => Resource::Drive(dto.id),
         }
     }
 }
@@ -81,6 +83,7 @@ impl From<Resource> for ResourceDto {
         let (kind, id) = match r {
             Resource::Folder(id) => (ResourceTypeDto::Folder, id),
             Resource::File(id) => (ResourceTypeDto::File, id),
+            Resource::Drive(id) => (ResourceTypeDto::Drive, id),
         };
         ResourceDto { kind, id }
     }

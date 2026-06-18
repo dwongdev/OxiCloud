@@ -230,11 +230,32 @@ impl PgAclEngine {
         }
     }
 
+    /// Public wrapper around `subject_match_set` for callers that need
+    /// the expanded `(subject_types, subject_ids)` pair without invoking
+    /// the engine's full `check`/`require` pipeline. Used by
+    /// `GET /api/drives` (and future drive-aware listing surfaces) to
+    /// ask the `DriveRepository` for every drive the caller can read,
+    /// reusing the engine's cached group-expansion logic.
+    pub async fn expand_subject_for_listing(
+        &self,
+        subject: Subject,
+    ) -> Result<(Vec<&'static str>, Vec<Uuid>), DomainError> {
+        let counters = QueryCounters::default();
+        self.subject_match_set(subject, &counters).await
+    }
+
     /// Returns the owner UUID for any resource type.
     async fn owner_of(&self, resource: Resource) -> Result<Uuid, DomainError> {
         match resource {
             Resource::Folder(id) => self.folder_repo.get_folder_user_id(&id.to_string()).await,
             Resource::File(id) => self.file_repo.get_file_user_id(&id.to_string()).await,
+            // Drive owner resolution wires up in D0-6 once `DriveRepository`
+            // lands (D0-5). Drive entity carries `default_for_user` for
+            // `kind='personal'`; shared drives resolve through role_grants
+            // (Owner role). Returning NotFound here means a permission
+            // check that reached owner_of on a Drive falls through to the
+            // grant-lookup path — safe default during D0-1.
+            Resource::Drive(_) => Err(DomainError::not_found("Drive", resource.id().to_string())),
         }
     }
 
@@ -360,6 +381,43 @@ impl PgAclEngine {
         Ok(exists.is_some())
     }
 
+    /// Direct grant lookup for a drive — no ltree cascade (drives have
+    /// no ancestors). Mirrors the cascade helpers above but with a
+    /// straight `resource_type='drive' AND resource_id=$4` filter.
+    async fn drive_grant_exists(
+        &self,
+        subject_types: &[&str],
+        subject_ids: &[Uuid],
+        permission: Permission,
+        drive_id: Uuid,
+        counters: &QueryCounters,
+    ) -> Result<bool, DomainError> {
+        counters.sql_queries.fetch_add(1, Ordering::Relaxed);
+        let roles = Self::roles_implying_strings(permission);
+        let exists: Option<i32> = sqlx::query_scalar(
+            r#"
+            SELECT 1
+              FROM storage.role_grants g
+             WHERE g.subject_type  = ANY($1)
+               AND g.subject_id    = ANY($2)
+               AND g.role          = ANY($3::storage.grant_role[])
+               AND g.resource_type = 'drive'
+               AND g.resource_id   = $4
+               AND (g.expires_at IS NULL OR g.expires_at > NOW())
+             LIMIT 1
+            "#,
+        )
+        .bind(subject_types)
+        .bind(subject_ids)
+        .bind(&roles)
+        .bind(drive_id)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| DomainError::internal_error("PgAcl", format!("drive grant: {e}")))?;
+
+        Ok(exists.is_some())
+    }
+
     /// Look up a single role grant by id, returning the actors a revoke /
     /// notify handler needs to make a decision without a second round-trip.
     /// Returns `(subject, resource, granted_by)` or `None` if no such row.
@@ -459,7 +517,12 @@ impl PgAclEngine {
     ) -> Result<bool, DomainError> {
         // Owner short-circuit (only for User subjects — groups/tokens/external
         // are never owners of resources).
-        if let Subject::User(uid) = subject {
+        // Owner short-circuit applies to Folder/File only — they carry a
+        // single-owner `user_id` column in their respective tables. Drives
+        // model ownership through the `Owner` role in `role_grants`, so
+        // there's no analogous fast path: the grant lookup below resolves
+        // a drive owner via the same query that resolves any drive role.
+        if let (Subject::User(uid), Resource::Folder(_) | Resource::File(_)) = (subject, resource) {
             counters.sql_queries.fetch_add(1, Ordering::Relaxed);
             match self.owner_of(resource).await {
                 Ok(owner) if owner == uid => return Ok(true),
@@ -499,6 +562,10 @@ impl PgAclEngine {
                     counters,
                 )
                 .await
+            }
+            Resource::Drive(id) => {
+                self.drive_grant_exists(&subject_types, &subject_ids, permission, id, counters)
+                    .await
             }
         }
     }

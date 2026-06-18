@@ -1020,6 +1020,7 @@ mod tests {
         async fn create_home_folder(
             &self,
             _user_id: Uuid,
+            _drive_id: Uuid,
             _name: String,
         ) -> Result<crate::domain::entities::folder::Folder, DomainError> {
             unimplemented!()

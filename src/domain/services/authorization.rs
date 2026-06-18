@@ -74,6 +74,10 @@ impl fmt::Display for Subject {
 pub enum Resource {
     Folder(Uuid),
     File(Uuid),
+    /// A drive — root scope for a tree of folders/files plus its own
+    /// membership and policy bag. Added in D0; membership lives in
+    /// `storage.role_grants` (no separate `drive_members` table).
+    Drive(Uuid),
     // Reserved for future use:
     // Calendar(Uuid),
     // Reserved for future use:
@@ -87,6 +91,7 @@ impl Resource {
         match self {
             Resource::Folder(_) => "folder",
             Resource::File(_) => "file",
+            Resource::Drive(_) => "drive",
             //Resource::Calendar(_) => "calendar",
             //Resource::AddressBook(_) => "adressbook",
             //Resource::Playlist(_) => "playlist",
@@ -95,12 +100,10 @@ impl Resource {
 
     pub fn id(&self) -> Uuid {
         match self {
-            Resource::Folder(id)
-            | Resource::File(id)
+            Resource::Folder(id) | Resource::File(id) | Resource::Drive(id) => *id,
             //| Resource::Calendar(id)
             //| Resource::AddressBook(id)
             //| Resource::Playlist(id)
-            => *id,
         }
     }
 
@@ -108,6 +111,7 @@ impl Resource {
         match resource_type {
             "folder" => Some(Resource::Folder(id)),
             "file" => Some(Resource::File(id)),
+            "drive" => Some(Resource::Drive(id)),
             //"calendar" => Some(Resource::Calendar(id)),
             //"adressbook" => Some(Resource::AddressBook(id)),
             //"playlist" => Some(Resource::Playlist(id)),
@@ -351,6 +355,7 @@ impl Grant {
 pub enum ResourceKind {
     File,
     Folder,
+    Drive,
     // Future: Calendar, AddressBook, Playlist, …
 }
 
@@ -359,6 +364,7 @@ impl ResourceKind {
         match self {
             ResourceKind::File => "file",
             ResourceKind::Folder => "folder",
+            ResourceKind::Drive => "drive",
         }
     }
 
@@ -366,6 +372,7 @@ impl ResourceKind {
         match s {
             "file" => Some(ResourceKind::File),
             "folder" => Some(ResourceKind::Folder),
+            "drive" => Some(ResourceKind::Drive),
             _ => None,
         }
     }

@@ -6,6 +6,7 @@ pub mod calendar_dto;
 pub mod contact_dto;
 pub mod device_auth_dto;
 pub mod display_helpers;
+pub mod drive_dto;
 pub mod favorites_dto;
 pub mod file_dto;
 pub mod folder_dto;

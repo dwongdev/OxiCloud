@@ -3,6 +3,7 @@ pub mod calendar;
 pub mod calendar_event;
 pub mod contact;
 pub mod device_code;
+pub mod drive;
 pub mod entity_errors;
 pub mod face;
 pub mod file;

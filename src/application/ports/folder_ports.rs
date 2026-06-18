@@ -85,9 +85,12 @@ pub trait FolderUseCase: Send + Sync + 'static {
     async fn delete_folder_with_perms(&self, id: &str, caller_id: Uuid) -> Result<(), DomainError>;
 
     /// Creates a root-level home folder for a user during registration.
+    /// `drive_id` is the user's personal drive; the wrapper folder stays
+    /// during the D0 dual-write window (retires in M2b later).
     async fn create_home_folder(
         &self,
         user_id: Uuid,
+        drive_id: Uuid,
         name: String,
     ) -> Result<FolderDto, DomainError>;
 

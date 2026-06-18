@@ -37,7 +37,15 @@ use crate::common::errors::DomainError;
 /// Bump whenever the Tantivy schema OR the text extractor output changes in a
 /// way that requires re-indexing. A mismatch with the on-disk marker wipes the
 /// index directory and reseeds the dirty queue with every live file.
-pub const INDEX_SCHEMA_VERSION: &str = "1";
+///
+/// Version history:
+///   1 — initial schema (file_id, user_id, name, content, preview)
+///   2 — D0 added `drive_id` field; query filter pivots from user_id
+///       to a `drive_id ∈ accessible_drives` set membership clause. On
+///       deploy, every operator's index is wiped and reseeded against
+///       the post-D0 schema (the worker drains the dirty queue with
+///       drive_id-aware records).
+pub const INDEX_SCHEMA_VERSION: &str = "2";
 
 /// Recorded in `storage.blob_extracted_text.extractor`; rows from another
 /// version are dropped at worker startup (the reseed re-extracts them).
@@ -73,6 +81,11 @@ const PREFIX_MIN_CHARS: usize = 3;
 pub struct IndexDocRecord {
     pub file_id: String,
     pub user_id: String,
+    /// Owning drive — written verbatim into the `drive_id` STRING field
+    /// for set-membership filtering at query time. The user_id field is
+    /// kept during the D0 dual-write window for rollback safety; the
+    /// query filter no longer reads it.
+    pub drive_id: String,
     pub name: String,
     pub content: Option<String>,
     pub preview: Option<String>,
@@ -82,6 +95,7 @@ pub struct IndexDocRecord {
 struct IndexFields {
     file_id: Field,
     user_id: Field,
+    drive_id: Field,
     name: Field,
     content: Field,
     preview: Field,
@@ -105,6 +119,7 @@ impl TantivyContentIndex {
         let fields = IndexFields {
             file_id: builder.add_text_field("file_id", STRING | STORED),
             user_id: builder.add_text_field("user_id", STRING),
+            drive_id: builder.add_text_field("drive_id", STRING),
             name: builder.add_text_field("name", TEXT),
             content: builder.add_text_field("content", TEXT),
             preview: builder.add_text_field("preview", STORED),
@@ -197,6 +212,7 @@ impl TantivyContentIndex {
             let mut document = doc!(
                 self.fields.file_id => record.file_id,
                 self.fields.user_id => record.user_id,
+                self.fields.drive_id => record.drive_id,
                 self.fields.name => record.name,
             );
             if let Some(content) = record.content {
@@ -234,15 +250,26 @@ impl TantivyContentIndex {
 
     /// Build the scored query: every token must match (in name OR content,
     /// exact OR fuzzy OR — for the last token — prefix), and the whole thing
-    /// is `Must`-scoped to the user.
-    fn build_query(fields: IndexFields, user_id: &str, tokens: &[String]) -> Box<dyn Query> {
-        let mut clauses: Vec<(Occur, Box<dyn Query>)> = vec![(
-            Occur::Must,
-            Box::new(TermQuery::new(
-                Term::from_field_text(fields.user_id, user_id),
-                IndexRecordOption::Basic,
-            )),
-        )];
+    /// is `Must`-scoped to the caller's accessible drives.
+    ///
+    /// The drive filter is expressed as a BoolQuery with `Should` arms —
+    /// at least one drive_id must match — wrapped under an outer `Must`.
+    /// Equivalent to a TermSetQuery; this form avoids the API churn of
+    /// rebuilding the same shape across Tantivy versions.
+    fn build_query(fields: IndexFields, drive_ids: &[String], tokens: &[String]) -> Box<dyn Query> {
+        // Drive-membership Must clause: union of Term(drive_id = $each).
+        let drive_alternatives: Vec<(Occur, Box<dyn Query>)> = drive_ids
+            .iter()
+            .map(|d| {
+                let q: Box<dyn Query> = Box::new(TermQuery::new(
+                    Term::from_field_text(fields.drive_id, d),
+                    IndexRecordOption::Basic,
+                ));
+                (Occur::Should, q)
+            })
+            .collect();
+        let mut clauses: Vec<(Occur, Box<dyn Query>)> =
+            vec![(Occur::Must, Box::new(BooleanQuery::new(drive_alternatives)))];
 
         let last = tokens.len().saturating_sub(1);
         for (i, token) in tokens.iter().enumerate() {
@@ -306,7 +333,7 @@ impl TantivyContentIndex {
         searcher: tantivy::Searcher,
         analyzer: TextAnalyzer,
         fields: IndexFields,
-        user_id: &str,
+        drive_ids: &[String],
         raw_query: &str,
         limit: usize,
     ) -> Result<Vec<ContentHitDto>, DomainError> {
@@ -315,7 +342,7 @@ impl TantivyContentIndex {
             return Ok(Vec::new());
         }
 
-        let query = Self::build_query(fields, user_id, &tokens);
+        let query = Self::build_query(fields, drive_ids, &tokens);
         let top_docs = searcher
             .search(&query, &TopDocs::with_limit(limit.max(1)).order_by_score())
             .map_err(|e| DomainError::internal_error("ContentIndex", format!("search: {e}")))?;
@@ -365,18 +392,25 @@ impl TantivyContentIndex {
 impl ContentIndexPort for TantivyContentIndex {
     async fn search_content(
         &self,
-        user_id: Uuid,
+        accessible_drive_ids: &[Uuid],
         query: &str,
         limit: usize,
     ) -> Result<Vec<ContentHitDto>, DomainError> {
+        // No accessible drives → no hits, no Tantivy work. Matches the
+        // anti-enumeration semantics (empty filter set returns empty
+        // results without any side channel).
+        if accessible_drive_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
         let searcher = self.reader.searcher();
         let analyzer = self.analyzer.clone();
         let fields = self.fields;
-        let user_id = user_id.to_string();
+        let drive_ids: Vec<String> = accessible_drive_ids.iter().map(|d| d.to_string()).collect();
         let query = query.to_owned();
 
         tokio::task::spawn_blocking(move || {
-            Self::search_blocking(searcher, analyzer, fields, &user_id, &query, limit)
+            Self::search_blocking(searcher, analyzer, fields, &drive_ids, &query, limit)
         })
         .await
         .map_err(|e| DomainError::internal_error("ContentIndex", format!("join: {e}")))?
@@ -391,6 +425,10 @@ mod tests {
         IndexDocRecord {
             file_id: file_id.to_owned(),
             user_id: user_id.to_owned(),
+            // Tests stamp a placeholder drive_id derived from user_id so the
+            // record satisfies the post-D0 schema. Query-side filtering by
+            // drive_id is exercised in D0-12's integration tests, not here.
+            drive_id: format!("{user_id}-drive"),
             name: name.to_owned(),
             content: content.map(str::to_owned),
             preview: content.map(str::to_owned),
@@ -401,11 +439,16 @@ mod tests {
         // Force a reader reload — OnCommitWithDelay is asynchronous and tests
         // must observe the commit immediately.
         index.reader.reload().unwrap();
+        // Test records derive `drive_id = format!("{user_id}-drive")` —
+        // the same convention used by `record()`. Filtering by that
+        // single drive id exercises the same path the production
+        // search uses.
+        let drive_ids = vec![format!("{user_id}-drive")];
         TantivyContentIndex::search_blocking(
             index.reader.searcher(),
             index.analyzer.clone(),
             index.fields,
-            user_id,
+            &drive_ids,
             query,
             32,
         )

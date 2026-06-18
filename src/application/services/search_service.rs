@@ -50,6 +50,20 @@ pub struct SearchService {
     /// matches; hits are hydrated and re-filtered through SQL before use.
     content_index: Option<Arc<dyn ContentIndexPort>>,
 
+    /// Optional authorization engine — needed to resolve the caller's
+    /// accessible drive set before querying the content index, and to
+    /// re-verify each Tantivy hit against `engine.check(Read, File(id))`
+    /// as a defense-in-depth measure (catches index staleness and
+    /// per-file grants that the drive-only Tantivy filter misses; see
+    /// `docs/plan/drive.md` §11). `None` short-circuits the content
+    /// index (the cheapest safe degradation).
+    authorization: Option<Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>>,
+
+    /// Optional drive repository — used in tandem with the authorization
+    /// engine to resolve the caller's accessible drives for the Tantivy
+    /// filter. `None` short-circuits the content index.
+    drive_repo: Option<Arc<dyn crate::domain::repositories::drive_repository::DriveRepository>>,
+
     /// Lock-free concurrent cache with automatic TTL and LRU eviction (moka).
     /// Values are `Arc<SearchResultsDto>` so cache insert/hit is a single
     /// atomic ref-count increment (~1 ns) instead of cloning thousands of Strings.
@@ -151,6 +165,8 @@ impl SearchService {
         file_repository: Arc<FileBlobReadRepository>,
         folder_repository: Arc<FolderDbRepository>,
         content_index: Option<Arc<dyn ContentIndexPort>>,
+        authorization: Option<Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>>,
+        drive_repo: Option<Arc<dyn crate::domain::repositories::drive_repository::DriveRepository>>,
         cache_ttl: u64,
         max_cache_size: usize,
     ) -> Self {
@@ -163,6 +179,8 @@ impl SearchService {
             file_repository,
             folder_repository,
             content_index,
+            authorization,
+            drive_repo,
             search_cache,
         }
     }
@@ -250,7 +268,16 @@ impl SearchService {
         criteria: &SearchCriteriaDto,
         user_id: Uuid,
     ) -> Vec<ContentHitDto> {
+        use crate::application::ports::authorization_ports::AuthorizationEngine;
+        use crate::domain::services::authorization::{Permission, Resource, Subject};
+
         let Some(index) = &self.content_index else {
+            return Vec::new();
+        };
+        let Some(authz) = &self.authorization else {
+            return Vec::new();
+        };
+        let Some(drive_repo) = &self.drive_repo else {
             return Vec::new();
         };
         if criteria.offset != 0 {
@@ -265,16 +292,78 @@ impl SearchService {
             return Vec::new();
         };
 
-        match index
-            .search_content(user_id, query, CONTENT_HITS_LIMIT)
+        // Resolve the caller's accessible drive set via the engine
+        // (handles group-mediated drive grants) + the repo lookup.
+        let caller = Subject::User(user_id);
+        let (subject_types, subject_ids) = match authz.expand_subject_for_listing(caller).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::warn!("Content-index: subject expansion failed — degrading to empty: {e}");
+                return Vec::new();
+            }
+        };
+        let accessible_drives: Vec<Uuid> = match drive_repo
+            .list_for_subjects(&subject_types, &subject_ids)
+            .await
+        {
+            Ok(drives) => drives.into_iter().map(|d| d.id).collect(),
+            Err(e) => {
+                tracing::warn!("Content-index: drive lookup failed — degrading to empty: {e}");
+                return Vec::new();
+            }
+        };
+
+        // Tantivy filter (Must drive_id ∈ accessible_drives) handles
+        // the cross-drive isolation. Empty drive list short-circuits
+        // inside `search_content`.
+        let hits = match index
+            .search_content(&accessible_drives, query, CONTENT_HITS_LIMIT)
             .await
         {
             Ok(hits) => hits,
             Err(e) => {
                 tracing::warn!("Content-index lookup failed — returning name-only results: {e}");
-                Vec::new()
+                return Vec::new();
+            }
+        };
+
+        // Defense in depth: re-verify each hit through the engine.
+        // Catches two cases the drive_id filter can't:
+        //   * Index staleness — the file just moved drives and the
+        //     worker hasn't caught up.
+        //   * Per-file grants — ReBAC can grant a single file inside a
+        //     drive the caller doesn't otherwise have. The Tantivy
+        //     filter is drive-only; this re-check restores per-file
+        //     resolution.
+        // Failures degrade conservatively (drop the hit, log it) —
+        // never leak.
+        let mut verified = Vec::with_capacity(hits.len());
+        for hit in hits {
+            let file_uuid = match Uuid::parse_str(&hit.file_id) {
+                Ok(u) => u,
+                Err(_) => {
+                    tracing::warn!("Content-index hit had non-UUID file_id: {}", hit.file_id);
+                    continue;
+                }
+            };
+            match authz
+                .check(caller, Permission::Read, Resource::File(file_uuid))
+                .await
+            {
+                Ok(true) => verified.push(hit),
+                Ok(false) => {
+                    tracing::debug!(
+                        target: "oxicloud::search",
+                        file_id = %file_uuid,
+                        "dropping content-index hit: ReBAC denies Read after Tantivy filter",
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("ReBAC re-check failed for {file_uuid}: {e}");
+                }
             }
         }
+        verified
     }
 
     /// Merge content-index hits into the name-search result page:

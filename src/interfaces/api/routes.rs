@@ -440,6 +440,19 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
         router = router.nest("/photos", photos_router);
     }
 
+    // Drives — every drive the caller can read. D0 ships the read-only
+    // listing; D2 adds the membership API + shared-drive endpoints under
+    // `/api/drives/{id}/members`.
+    {
+        use crate::interfaces::api::handlers::drive_handler;
+
+        let drives_router = Router::new()
+            .route("/", get(drive_handler::list_drives))
+            .with_state(app_state.clone());
+
+        router = router.nest("/drives", drives_router);
+    }
+
     // People (faces) routes — mounted only when OXICLOUD_ENABLE_FACES is on.
     if app_state.people_service.is_some() {
         use crate::interfaces::api::handlers::people_handler;

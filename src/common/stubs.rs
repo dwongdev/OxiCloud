@@ -322,6 +322,7 @@ impl FolderRepository for StubFolderStoragePort {
     async fn create_home_folder(
         &self,
         _user_id: Uuid,
+        _drive_id: Uuid,
         _name: String,
     ) -> Result<Folder, DomainError> {
         Ok(Folder::default())
@@ -459,6 +460,7 @@ impl FolderUseCase for StubFolderUseCase {
     async fn create_home_folder(
         &self,
         _user_id: Uuid,
+        _drive_id: Uuid,
         _name: String,
     ) -> Result<FolderDto, DomainError> {
         Ok(FolderDto::default())

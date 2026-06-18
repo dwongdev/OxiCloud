@@ -294,7 +294,15 @@ Authorization: Bearer {{dave_token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" count == 0
+# Post-D0 every user carries an incoming Owner grant on their own
+# personal drive (provisioned by the lifecycle hook). The pre-D0
+# assertion was "no grants at all" (count == 0); the post-D0
+# equivalent is "exactly the self-drive grant remains" (count == 1).
+# Hurl's JSONPath filter returns "no value" — not an empty array —
+# when nothing matches, so a `count == 0` over a negative filter
+# fails to evaluate; the positive-count form sidesteps that quirk.
+jsonpath "$" count == 1
+jsonpath "$[0].resource.type" == "drive"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -305,7 +313,15 @@ Authorization: Bearer {{eve_token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" count == 0
+# Post-D0 every user carries an incoming Owner grant on their own
+# personal drive (provisioned by the lifecycle hook). The pre-D0
+# assertion was "no grants at all" (count == 0); the post-D0
+# equivalent is "exactly the self-drive grant remains" (count == 1).
+# Hurl's JSONPath filter returns "no value" — not an empty array —
+# when nothing matches, so a `count == 0` over a negative filter
+# fails to evaluate; the positive-count form sidesteps that quirk.
+jsonpath "$" count == 1
+jsonpath "$[0].resource.type" == "drive"
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -809,7 +825,15 @@ Authorization: Bearer {{adam_token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" count == 0
+# Post-D0 every user carries an incoming Owner grant on their own
+# personal drive (provisioned by the lifecycle hook). The pre-D0
+# assertion was "no grants at all" (count == 0); the post-D0
+# equivalent is "exactly the self-drive grant remains" (count == 1).
+# Hurl's JSONPath filter returns "no value" — not an empty array —
+# when nothing matches, so a `count == 0` over a negative filter
+# fails to evaluate; the positive-count form sidesteps that quirk.
+jsonpath "$" count == 1
+jsonpath "$[0].resource.type" == "drive"
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1233,4 +1257,12 @@ Authorization: Bearer {{frank_token}}
 
 HTTP 200
 [Asserts]
-jsonpath "$" count == 0
+# Post-D0 every user carries an incoming Owner grant on their own
+# personal drive (provisioned by the lifecycle hook). The pre-D0
+# assertion was "no grants at all" (count == 0); the post-D0
+# equivalent is "exactly the self-drive grant remains" (count == 1).
+# Hurl's JSONPath filter returns "no value" — not an empty array —
+# when nothing matches, so a `count == 0` over a negative filter
+# fails to evaluate; the positive-count form sidesteps that quirk.
+jsonpath "$" count == 1
+jsonpath "$[0].resource.type" == "drive"

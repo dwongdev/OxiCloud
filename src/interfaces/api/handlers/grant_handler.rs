@@ -719,6 +719,13 @@ pub async fn list_shared_with_me(
                     summary.resource_id
                 ),
             },
+            // Drive grants don't appear in the file/folder "Shared with me"
+            // listing — they're surfaced through `GET /api/drives` (D0).
+            // Silently skipping here is the right behaviour: a drive grant
+            // discovered by `list_incoming_resources_paged` is not a stale
+            // grant, just a different resource type with a different
+            // listing surface.
+            ResourceKind::Drive => continue,
         }
     }
 
@@ -953,6 +960,10 @@ pub async fn list_my_shares(
                     summary.resource_id
                 ),
             },
+            // Drive grants are surfaced via `GET /api/drives` (D0), not
+            // through the My Shares outgoing-resources surface. Silently
+            // skip — symmetric with the `list_shared_with_me` arm above.
+            ResourceKind::Drive => continue,
         }
     }
 

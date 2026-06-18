@@ -167,6 +167,7 @@ impl FolderService {
             async fn create_home_folder(
                 &self,
                 _user_id: Uuid,
+                _drive_id: Uuid,
                 _name: String,
             ) -> Result<FolderDto, DomainError> {
                 Ok(FolderDto::empty())
@@ -235,14 +236,18 @@ impl FolderUseCase for FolderService {
     }
 
     /// Creates a root-level home folder for a user during registration.
+    /// `drive_id` is the user's personal drive — the wrapper folder lives
+    /// inside it during the D0 dual-write window (M2b retires the wrapper
+    /// later).
     async fn create_home_folder(
         &self,
         user_id: Uuid,
+        drive_id: Uuid,
         name: String,
     ) -> Result<FolderDto, DomainError> {
         let folder = self
             .folder_storage
-            .create_home_folder(user_id, name)
+            .create_home_folder(user_id, drive_id, name)
             .await
             .map_err(|e| {
                 DomainError::internal_error(
@@ -632,6 +637,7 @@ impl FolderService {
     pub async fn ensure_home_folder(
         &self,
         user_id: Uuid,
+        drive_id: Uuid,
         username: Option<&str>,
     ) -> Result<bool, DomainError> {
         let existing = self
@@ -653,7 +659,7 @@ impl FolderService {
             None => format!("My Folder - {}", user_id),
         };
         self.folder_storage
-            .create_home_folder(user_id, folder_name.clone())
+            .create_home_folder(user_id, drive_id, folder_name.clone())
             .await
             .map_err(|e| {
                 DomainError::internal_error(
@@ -743,36 +749,140 @@ use async_trait::async_trait;
 use crate::application::ports::user_lifecycle::{DeletionMode, LogoutReason, UserLifecycleHook};
 use crate::domain::entities::user::User;
 
-/// Lifecycle hook: provisions and (in PR 4) deprovisions a user's home folder.
-pub struct HomeFolderLifecycleHook {
+/// Lifecycle hook: provisions a user's default Personal drive at first
+/// login (replaces the legacy `My Folder - <username>` wrapper as of D0).
+///
+/// Two writes happen on first provisioning:
+///   1. A row in `storage.drives` with `kind='personal'`,
+///      `default_for_user=<uid>`, and the user's quota carried over from
+///      `auth.users.storage_quota_bytes`.
+///   2. An Owner role grant in `storage.role_grants` so the user can
+///      read/write/manage their own drive (the engine's owner short-
+///      circuit applies to folders/files but not drives — see
+///      `pg_acl_engine::check_inner` D0-6 rewrite).
+///
+/// Both writes are idempotent: `find_default_for_user` short-circuits
+/// when the drive already exists; `set_role` is an UPSERT that no-ops
+/// when the Owner row is already present.
+pub struct PersonalDriveLifecycleHook {
+    drive_repo: Arc<dyn crate::domain::repositories::drive_repository::DriveRepository>,
     folder_service: Arc<FolderService>,
+    // The `AuthorizationEngine` trait isn't `dyn`-compatible (native
+    // async-fn-in-trait methods are not object-safe), so we hold the
+    // concrete engine. This matches the convention already used by
+    // `AppState.authorization`.
+    authorization: Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>,
 }
 
-impl HomeFolderLifecycleHook {
-    pub fn new(folder_service: Arc<FolderService>) -> Self {
-        Self { folder_service }
+impl PersonalDriveLifecycleHook {
+    pub fn new(
+        drive_repo: Arc<dyn crate::domain::repositories::drive_repository::DriveRepository>,
+        folder_service: Arc<FolderService>,
+        authorization: Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>,
+    ) -> Self {
+        Self {
+            drive_repo,
+            folder_service,
+            authorization,
+        }
     }
 
     /// Idempotent provisioning shared by `on_user_created` and
     /// `on_user_login`. External users are skipped per tip #2 in the
-    /// trait docstring.
+    /// trait docstring — they have no resources of their own, only
+    /// grants on other users' resources.
     async fn provision_if_needed(&self, user: &User) -> Result<(), DomainError> {
+        use crate::domain::repositories::drive_repository::{
+            CreatePersonalDriveInput, DriveRepositoryError,
+        };
+        use crate::domain::services::authorization::{Resource, Role, Subject};
+
         if user.is_external() {
             return Ok(());
         }
-        // `ensure_home_folder` handles the "does the user already have a
-        // root folder?" check internally and is a no-op if so.
-        self.folder_service
-            .ensure_home_folder(user.id(), user.username())
+
+        // Idempotent shortcut: if the user already has a default drive,
+        // nothing to do. Covers re-runs from `on_user_login` plus the
+        // case where `on_user_created` ran successfully but logged in
+        // before reaching the role_grant step (next-login retry lands
+        // here and finds the drive, completing the role_grant if missing).
+        match self.drive_repo.find_default_for_user(user.id()).await {
+            Ok(drive) => {
+                // Drive exists; ensure the Owner role_grant is in
+                // place too. `set_role` is an UPSERT — safe to re-run.
+                self.authorization
+                    .set_role(
+                        user.id(),
+                        Subject::User(user.id()),
+                        Role::Owner,
+                        Resource::Drive(drive.id),
+                        None,
+                    )
+                    .await
+                    .map(|_grant| ())?;
+                return Ok(());
+            }
+            Err(DriveRepositoryError::NotFound(_)) => { /* fall through to create */ }
+            Err(e) => {
+                return Err(DomainError::internal_error(
+                    "PersonalDriveHook",
+                    format!("find_default lookup: {e}"),
+                ));
+            }
+        }
+
+        // Create the drive.
+        let drive = self
+            .drive_repo
+            .create_personal(CreatePersonalDriveInput {
+                name: "Personal".to_owned(),
+                owner_id: user.id(),
+                is_default: true,
+                quota_bytes: Some(user.storage_quota_bytes()),
+            })
             .await
-            .map(|_created| ())
+            .map_err(|e| {
+                DomainError::internal_error("PersonalDriveHook", format!("create_personal: {e}"))
+            })?;
+
+        // Stamp the Owner role_grant.
+        self.authorization
+            .set_role(
+                user.id(),
+                Subject::User(user.id()),
+                Role::Owner,
+                Resource::Drive(drive.id),
+                None,
+            )
+            .await
+            .map(|_grant| ())?;
+
+        // Provision the wrapper `My Folder - <username>` folder under
+        // the new drive. The wrapper is retained through the D0 dual-
+        // write window (M2b retires it later); without it, existing API
+        // surfaces that assume `GET /api/folders` returns a root folder
+        // (the UI listing, the WebDAV resolver, the Hurl baselines) all
+        // break for newly-provisioned users.
+        self.folder_service
+            .ensure_home_folder(user.id(), drive.id, user.username())
+            .await
+            .map(|_created| ())?;
+
+        tracing::info!(
+            target: "user_lifecycle",
+            hook = "personal_drive",
+            user_id = %user.id(),
+            drive_id = %drive.id,
+            "Default personal drive + wrapper folder provisioned"
+        );
+        Ok(())
     }
 }
 
 #[async_trait]
-impl UserLifecycleHook for HomeFolderLifecycleHook {
+impl UserLifecycleHook for PersonalDriveLifecycleHook {
     fn name(&self) -> &'static str {
-        "home_folder"
+        "personal_drive"
     }
 
     async fn on_user_created(&self, user: &User) -> Result<(), DomainError> {
@@ -787,7 +897,7 @@ impl UserLifecycleHook for HomeFolderLifecycleHook {
     }
 
     async fn on_user_logout(&self, _user: &User, _reason: LogoutReason) -> Result<(), DomainError> {
-        // Folders don't react to logout. Explicit no-op per the
+        // Drives don't react to logout. Explicit no-op per the
         // "no defaults" convention.
         Ok(())
     }
@@ -798,24 +908,22 @@ impl UserLifecycleHook for HomeFolderLifecycleHook {
         mode: DeletionMode,
         _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     ) -> Result<(), DomainError> {
-        // For both DeletionMode variants today the FK CASCADE on
-        // `storage.folders.user_id` (and downstream files/blobs)
-        // removes the home folder + contents when the user row goes.
+        // `storage.drives.default_for_user` has ON DELETE CASCADE
+        // referencing `auth.users(id)`, and `storage.folders.drive_id`
+        // / `storage.files.drive_id` both have ON DELETE CASCADE on
+        // `storage.drives(id)` (M3). So a user delete cascades:
+        // user → drive → folders → files in one transaction.
+        //
         // The hook emits a per-mode tracing event so audit can tell
         // AdminDelete (currently recoverable only via DB-level rollback
         // before commit) from GdprPurge (no sweeper exists yet — the
         // variant is reserved for a future PR that adds retention).
-        //
-        // The `tx` is provided per the trait contract but unused here:
-        // emitting a tracing event doesn't require DB access. Future
-        // policy (trash with retention) would write to `storage.trash`
-        // inside this same tx.
         tracing::info!(
             target: "user_lifecycle",
-            hook = "home_folder",
+            hook = "personal_drive",
             user_id = %user.id(),
             mode = ?mode,
-            "Home folder will be removed via FK CASCADE on user delete"
+            "Personal drive (and tree) will be removed via FK CASCADE on user delete"
         );
         Ok(())
     }

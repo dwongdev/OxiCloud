@@ -27,6 +27,10 @@ use crate::infrastructure::services::dedup_service::DedupService;
 pub struct FileBlobWriteRepository {
     pool: Arc<PgPool>,
     dedup: Arc<DedupService>,
+    /// Retained on the struct after D0-8 inlined parent-folder lookups
+    /// directly via SQL; kept for now so D0's diff stays scoped to drive_id
+    /// + provenance plumbing. Slated for removal in a follow-up cleanup.
+    #[allow(dead_code)]
     folder_repo: Arc<FolderDbRepository>,
     /// Shared handle to `FileBlobReadRepository`'s file_id → blob_hash
     /// cache. Content swaps and hard deletes invalidate the mapping here
@@ -128,10 +132,27 @@ impl FileBlobWriteRepository {
         .map_err(|e| DomainError::internal_error("FileBlobWrite", format!("entity: {e}")))
     }
 
-    /// Derive user_id from the parent folder, or error if folder_id is None.
-    async fn resolve_user_id(&self, folder_id: Option<&str>) -> Result<Uuid, DomainError> {
+    /// Derive `(user_id, drive_id)` from the parent folder. Both are
+    /// needed during the D0 dual-write window: `user_id` for the legacy
+    /// column (dropped in D7) and `drive_id` for the new owning-drive
+    /// reference.
+    async fn resolve_owner_and_drive(
+        &self,
+        folder_id: Option<&str>,
+    ) -> Result<(Uuid, Uuid), DomainError> {
         match folder_id {
-            Some(fid) => self.folder_repo.get_folder_user_id(fid).await,
+            Some(fid) => {
+                let row: Option<(Uuid, Uuid)> = sqlx::query_as::<_, (Uuid, Uuid)>(
+                    "SELECT user_id, drive_id FROM storage.folders WHERE id = $1::uuid",
+                )
+                .bind(fid)
+                .fetch_optional(self.pool.as_ref())
+                .await
+                .map_err(|e| {
+                    DomainError::internal_error("FileBlobWrite", format!("parent lookup: {e}"))
+                })?;
+                row.ok_or_else(|| DomainError::not_found("Folder", fid))
+            }
             None => Err(DomainError::internal_error(
                 "FileBlobWrite",
                 "folder_id is required to determine file owner",
@@ -168,7 +189,8 @@ impl FileBlobWriteRepository {
                 )
                 UPDATE storage.files f
                    SET blob_hash = $1, size = $2,
-                       updated_at = COALESCE(to_timestamp($4), NOW())
+                       updated_at = COALESCE(to_timestamp($4), NOW()),
+                       updated_by = f.user_id
                   FROM old
                  WHERE f.id = old.id
                 RETURNING old.blob_hash, EXTRACT(EPOCH FROM f.updated_at)::bigint
@@ -263,11 +285,14 @@ impl FileBlobWriteRepository {
             sqlx::query_as::<_, (String, Uuid, String, i64, i64)>(
                 r#"
                 WITH parent AS (
-                    SELECT id, user_id, path FROM storage.folders WHERE id = $2::uuid
+                    SELECT id, user_id, drive_id, path FROM storage.folders WHERE id = $2::uuid
                 )
                 INSERT INTO storage.files
-                    (name, folder_id, user_id, blob_hash, size, mime_type, category_order)
-                SELECT $1, parent.id, parent.user_id, $3, $4, $5, $6 FROM parent
+                    (name, folder_id, user_id, drive_id, blob_hash, size,
+                     mime_type, category_order, created_by, updated_by)
+                SELECT $1, parent.id, parent.user_id, parent.drive_id, $3, $4,
+                       $5, $6, parent.user_id, parent.user_id
+                  FROM parent
                 RETURNING id::text,
                           user_id,
                           (SELECT path FROM parent),
@@ -363,12 +388,19 @@ impl FileWritePort for FileBlobWriteRepository {
         // If moving to a different folder, get the new user_id (must be same user)
         let row = sqlx::query_as::<_, (String, String, Option<String>, i64, String, i64, i64)>(
             r#"
-            UPDATE storage.files
-               SET folder_id = $1::uuid, updated_at = NOW()
-             WHERE id = $2::uuid AND NOT is_trashed
-            RETURNING id::text, name, folder_id::text, size, mime_type,
-                      EXTRACT(EPOCH FROM created_at)::bigint,
-                      EXTRACT(EPOCH FROM updated_at)::bigint
+            WITH dest AS (
+                SELECT user_id, drive_id FROM storage.folders WHERE id = $1::uuid
+            )
+            UPDATE storage.files f
+               SET folder_id = $1::uuid,
+                   user_id   = COALESCE((SELECT user_id  FROM dest), f.user_id),
+                   drive_id  = COALESCE((SELECT drive_id FROM dest), f.drive_id),
+                   updated_at = NOW(),
+                   updated_by = COALESCE((SELECT user_id FROM dest), f.user_id)
+             WHERE f.id = $2::uuid AND NOT f.is_trashed
+            RETURNING f.id::text, f.name, f.folder_id::text, f.size, f.mime_type,
+                      EXTRACT(EPOCH FROM f.created_at)::bigint,
+                      EXTRACT(EPOCH FROM f.updated_at)::bigint
             "#,
         )
         .bind(&target_folder_id)
@@ -424,16 +456,33 @@ impl FileWritePort for FileBlobWriteRepository {
                       FROM storage.files
                      WHERE id = $1::uuid AND NOT is_trashed
                 ),
+                -- The destination folder may differ from the source's
+                -- folder (when $2 is set); derive drive_id from the
+                -- DESTINATION so cross-drive copies land in the right
+                -- drive. Files in personal drives only copy within the
+                -- same drive today, but the join makes the migration
+                -- future-proof for D2's cross-drive copy story.
+                dest_folder AS (
+                    SELECT id, user_id, drive_id
+                      FROM storage.folders
+                     WHERE id = COALESCE($2::uuid,
+                                         (SELECT folder_id FROM src))
+                ),
                 new_file AS (
-                    INSERT INTO storage.files (name, folder_id, user_id, blob_hash, size, mime_type, category_order)
-                    SELECT COALESCE($3::text, name),
-                           COALESCE($2::uuid, folder_id),
-                           user_id,
-                           blob_hash,
-                           size,
-                           mime_type,
-                           category_order
-                      FROM src
+                    INSERT INTO storage.files
+                        (name, folder_id, user_id, drive_id, blob_hash, size,
+                         mime_type, category_order, created_by, updated_by)
+                    SELECT COALESCE($3::text, src.name),
+                           dest_folder.id,
+                           dest_folder.user_id,
+                           dest_folder.drive_id,
+                           src.blob_hash,
+                           src.size,
+                           src.mime_type,
+                           src.category_order,
+                           dest_folder.user_id,
+                           dest_folder.user_id
+                      FROM src, dest_folder
                     RETURNING id::text, name, folder_id::text, size, mime_type,
                               EXTRACT(EPOCH FROM created_at)::bigint,
                               EXTRACT(EPOCH FROM updated_at)::bigint,
@@ -497,7 +546,7 @@ impl FileWritePort for FileBlobWriteRepository {
         let row = sqlx::query_as::<_, (String, String, Option<String>, i64, String, i64, i64)>(
             r#"
             UPDATE storage.files
-               SET name = $1, updated_at = NOW()
+               SET name = $1, updated_at = NOW(), updated_by = user_id
              WHERE id = $2::uuid AND NOT is_trashed
             RETURNING id::text, name, folder_id::text, size, mime_type,
                       EXTRACT(EPOCH FROM created_at)::bigint,
@@ -580,7 +629,7 @@ impl FileWritePort for FileBlobWriteRepository {
         content_type: String,
         size: u64,
     ) -> Result<(File, PathBuf), DomainError> {
-        let user_id = self.resolve_user_id(folder_id.as_deref()).await?;
+        let (user_id, drive_id) = self.resolve_owner_and_drive(folder_id.as_deref()).await?;
 
         // For deferred registration we use a placeholder hash.
         // The write-behind cache will call update_file_content later.
@@ -589,8 +638,10 @@ impl FileWritePort for FileBlobWriteRepository {
         let row = retry_on_deadlock("files.insert_deferred", || {
             sqlx::query_as::<_, (String, i64, i64)>(
                 r#"
-                INSERT INTO storage.files (name, folder_id, user_id, blob_hash, size, mime_type, category_order)
-                VALUES ($1, $2::uuid, $3, $4, $5, $6, $7)
+                INSERT INTO storage.files
+                    (name, folder_id, user_id, drive_id, blob_hash, size,
+                     mime_type, category_order, created_by, updated_by)
+                VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8, $3, $3)
                 RETURNING id::text,
                           EXTRACT(EPOCH FROM created_at)::bigint,
                           EXTRACT(EPOCH FROM updated_at)::bigint
@@ -599,6 +650,7 @@ impl FileWritePort for FileBlobWriteRepository {
             .bind(&name)
             .bind(&folder_id)
             .bind(user_id)
+            .bind(drive_id)
             .bind(placeholder_hash)
             .bind(size as i64)
             .bind(&content_type)
@@ -638,7 +690,8 @@ impl FileWritePort for FileBlobWriteRepository {
                SET is_trashed = TRUE,
                    trashed_at = NOW(),
                    original_folder_id = folder_id,
-                   updated_at = NOW()
+                   updated_at = NOW(),
+                   updated_by = user_id
              WHERE id = $1::uuid AND NOT is_trashed
             "#,
         )
@@ -665,7 +718,8 @@ impl FileWritePort for FileBlobWriteRepository {
                    trashed_at = NULL,
                    folder_id = COALESCE(original_folder_id, folder_id),
                    original_folder_id = NULL,
-                   updated_at = NOW()
+                   updated_at = NOW(),
+                   updated_by = user_id
              WHERE id = $1::uuid AND is_trashed
             "#,
         )

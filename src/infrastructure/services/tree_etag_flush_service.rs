@@ -113,13 +113,15 @@ impl TreeEtagFlushService {
                                         FROM storage.tree_etag_dirty
                                        ORDER BY id
                                        LIMIT $1)
-                        RETURNING lpath, folder_id
+                        RETURNING lpath, folder_id, drive_id
                     ),
                     targets AS (
                         -- Captured chain: covers target folders deleted or
                         -- moved away since enqueue (the old location's
-                        -- surviving ancestors still get their bump).
-                        SELECT lpath FROM drained
+                        -- surviving ancestors still get their bump). drive_id
+                        -- comes along so the victims walk can enforce
+                        -- cross-drive isolation (D0-13).
+                        SELECT lpath, drive_id FROM drained
                         UNION
                         -- Flush-time resolution: a folder MOVED since
                         -- enqueue had its subtree's lpaths rewritten, so
@@ -128,19 +130,29 @@ impl TreeEtagFlushService {
                         -- this, a bump queued just before a move would be
                         -- silently lost and sync clients would never
                         -- discover the change.
-                        SELECT fo.lpath
+                        SELECT fo.lpath, fo.drive_id
                           FROM storage.folders fo
                           JOIN drained d ON fo.id = d.folder_id
                     ),
                     victims AS (
                         -- `lpath @> target` = the target folder itself plus
-                        -- every ancestor (GiST-indexed). Folder rows deleted
-                        -- since enqueue simply don't match. Lock in id order
-                        -- so overlapping closures cannot deadlock.
+                        -- every ancestor (GiST-indexed). The `drive_id`
+                        -- predicate prevents a numerically-overlapping
+                        -- lpath in a SIBLING drive from spuriously matching
+                        -- (D0-13). Rows from old queue entries (pre-M4) have
+                        -- NULL `drive_id` — `IS NOT DISTINCT FROM` falls
+                        -- back to pure lpath matching for those, preserving
+                        -- the rollover semantics for any rows enqueued
+                        -- between this migration committing and the
+                        -- service restart.
                         SELECT f.id
                           FROM storage.folders f
-                         WHERE EXISTS (SELECT 1 FROM targets t
-                                        WHERE f.lpath @> t.lpath)
+                         WHERE EXISTS (
+                             SELECT 1 FROM targets t
+                              WHERE f.lpath @> t.lpath
+                                AND (t.drive_id IS NULL
+                                     OR f.drive_id = t.drive_id)
+                         )
                          ORDER BY f.id
                            FOR NO KEY UPDATE
                     ),

@@ -2,6 +2,7 @@ pub mod address_book_repository;
 pub mod calendar_event_repository;
 pub mod calendar_repository;
 pub mod contact_repository;
+pub mod drive_repository;
 pub mod file_repository;
 pub mod folder_repository;
 pub mod magic_link_token_repository;

@@ -13,6 +13,7 @@ use utoipa::{Modify, OpenApi};
 use crate::application::dtos::contact_dto::{
     AddressDto, ContactDto, ContactGroupDto, EmailDto, PhoneDto,
 };
+use crate::application::dtos::drive_dto::{DriveDto, DriveKindDto};
 use crate::application::dtos::favorites_dto::{
     BatchFavoritesResult, BatchFavoritesStats, FavoriteItemDto, FavoritesResourceItemDto,
 };
@@ -165,6 +166,8 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
         // Photos handler (free function)
         handlers::photos_handler::list_photos,
         handlers::photos_handler::list_photos_geo,
+        // Drive handler (free function)
+        handlers::drive_handler::list_drives,
         // Batch handlers (free functions)
         handlers::batch_handler::move_files_batch,
         handlers::batch_handler::copy_files_batch,
@@ -359,6 +362,9 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
             SharedWithMeDto,
             SharedWithMeItemDto,
             OutgoingResourceItemDto,
+            // Drive schemas
+            DriveDto,
+            DriveKindDto,
             // Subject-group (ReBAC named groups) schemas
             handlers::subject_group_handler::CreateGroupRequest,
             handlers::subject_group_handler::UpdateGroupRequest,

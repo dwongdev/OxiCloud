@@ -454,6 +454,7 @@ impl AppServiceFactory {
         repos: &RepositoryServices,
         trash_service: Option<Arc<TrashService>>,
         authz: &Arc<PgAclEngine>,
+        drive_repo: &Arc<crate::infrastructure::repositories::pg::DrivePgRepository>,
         storage_usage: &Arc<StorageUsageService>,
         content_index: Option<Arc<TantivyContentIndex>>,
         plugin_dispatch: Option<
@@ -540,6 +541,8 @@ impl AppServiceFactory {
             repos.file_read_repository.clone(),
             repos.folder_repository.clone(),
             content_index_port,
+            Some(authz.clone()),
+            Some(drive_repo.clone()),
             300,  // Cache TTL in seconds (5 minutes)
             1000, // Maximum cache entries
         )));
@@ -1050,6 +1053,12 @@ impl AppServiceFactory {
             subject_group_repo.clone(),
         );
 
+        // Drive repository — needed both by the lifecycle hook (when auth
+        // is enabled) and by `GET /api/drives` on the final `AppState`,
+        // so declared at the outer scope.
+        let drive_repo =
+            Arc::new(crate::infrastructure::repositories::pg::DrivePgRepository::new(pool.clone()));
+
         // 3b. Trash service (needed before application services)
         let trash_service = self
             .create_trash_service(&repos, &core, &authorization)
@@ -1078,6 +1087,7 @@ impl AppServiceFactory {
             &repos,
             trash_service.clone(),
             &authorization,
+            &drive_repo,
             &storage_usage,
             content_index.as_ref().map(|(idx, _)| idx.clone()),
             plugin_dispatch.clone(),
@@ -1190,8 +1200,10 @@ impl AppServiceFactory {
                         crate::application::services::user_lifecycle_service::AuditLifecycleHook,
                     ))
                     .with_hook(Arc::new(
-                        crate::application::services::folder_service::HomeFolderLifecycleHook::new(
+                        crate::application::services::folder_service::PersonalDriveLifecycleHook::new(
+                            drive_repo.clone(),
                             apps.folder_service_concrete.clone(),
+                            authorization.clone(),
                         ),
                     ))
                     .with_hook(Arc::new(
@@ -1379,6 +1391,7 @@ impl AppServiceFactory {
             webdav_lock_store:
                 crate::infrastructure::services::webdav_lock_service::create_webdav_lock_store(),
             authorization,
+            drive_repo: drive_repo.clone(),
             subject_group_service: Some(Arc::new(
                 crate::application::services::subject_group_service::SubjectGroupService::new(
                     subject_group_repo.clone(),
@@ -1839,6 +1852,12 @@ pub struct AppState {
     /// an enum dispatcher or `Arc<dyn AuthorizationEngine>` (with
     /// `async_trait` boxing).
     pub authorization: Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>,
+    /// Drive entity repository — `GET /api/drives`, the personal-drive
+    /// lifecycle hook, and (post-D2) shared-drive creation flow all read
+    /// through this. Backing table is `storage.drives`; membership is
+    /// resolved through `role_grants` not a separate `drive_members`
+    /// table (see `docs/plan/drive.md` §3).
+    pub drive_repo: Arc<crate::infrastructure::repositories::pg::DrivePgRepository>,
     /// ReBAC subject-group management (CRUD + membership). `None` when the
     /// auth subsystem is not configured.
     pub subject_group_service:

@@ -61,6 +61,7 @@ pub trait AuthorizationEngine: Send + Sync + 'static {
             let (kind, id) = match resource {
                 Resource::Folder(id) => ("Folder", id),
                 Resource::File(id) => ("File", id),
+                Resource::Drive(id) => ("Drive", id),
             };
             // Audit-worthy: denials are the interesting signal. Routed
             // through the `audit` tracing target so log aggregators can

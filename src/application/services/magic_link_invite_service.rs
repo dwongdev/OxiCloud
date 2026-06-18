@@ -307,6 +307,23 @@ impl MagicLinkInviteService {
         let (kind, resource_id) = match resource {
             Resource::Folder(id) => (MagicLinkResourceKind::Folder, id),
             Resource::File(id) => (MagicLinkResourceKind::File, id),
+            // Drive sharing — and therefore drive magic-link invitations —
+            // land in D2. The grant DTOs accept `Resource::Drive` from the
+            // wire today (see ResourceTypeDto) but no public API path
+            // actually grants on a drive in D0, so this arm is
+            // defensively unreachable. Treating it as an audit-logged
+            // no-op (grant is in place, mail suppressed) matches the
+            // ineligible-recipient branch above.
+            Resource::Drive(_) => {
+                tracing::info!(
+                    target: "audit",
+                    event = "magic_link.invitation_suppressed",
+                    reason = "drive_resource_unsupported",
+                    user_id = %recipient.id(),
+                    "📭 magic-link invitation suppressed: drive resources aren't invitable until D2",
+                );
+                return Ok(());
+            }
         };
         // Invitation tokens are cross-device by design (recipient has
         // no prior browser context with the server) — no challenge
@@ -329,6 +346,11 @@ impl MagicLinkInviteService {
         let kind_key = match resource {
             Resource::Folder(_) => "server.magic_link.email.kind_folder",
             Resource::File(_) => "server.magic_link.email.kind_file",
+            // Unreachable — the early-return above exits before we get
+            // here for a Drive resource. The arm exists only to satisfy
+            // exhaustiveness; if you find this firing, the early-return
+            // was bypassed.
+            Resource::Drive(_) => "server.magic_link.email.kind_folder",
         };
         // PR C: render in the recipient's preferred locale (set by UI
         // switcher, OIDC JIT claim, or inviter inheritance at row
@@ -731,6 +753,15 @@ impl From<ResourceKind> for MagicLinkResourceKind {
         match kind {
             ResourceKind::Folder => Self::Folder,
             ResourceKind::File => Self::File,
+            // Drives aren't a magic-link invite target in D0. The
+            // grant DTO surface accepts drive resources, but the
+            // grant_handler doesn't issue magic-links for them
+            // (drive sharing lands in D2). Mapping Drive → Folder
+            // gives a non-panicking fallback that would still emit a
+            // valid token shape if the path were ever reached; the
+            // runtime branches above suppress drive invitations
+            // before reaching this conversion.
+            ResourceKind::Drive => Self::Folder,
         }
     }
 }

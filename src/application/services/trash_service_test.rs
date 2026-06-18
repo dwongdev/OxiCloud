@@ -826,6 +826,7 @@ impl FolderRepository for MockFolderRepository {
     async fn create_home_folder(
         &self,
         _user_id: Uuid,
+        _drive_id: Uuid,
         _name: String,
     ) -> std::result::Result<Folder, DomainError> {
         Ok(Folder::default())

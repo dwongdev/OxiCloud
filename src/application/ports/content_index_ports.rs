@@ -35,14 +35,26 @@ pub struct ContentHitDto {
 /// holds an `Option<Arc<dyn ContentIndexPort>>` (the feature is toggleable).
 #[async_trait]
 pub trait ContentIndexPort: Send + Sync + 'static {
-    /// Search indexed file names + content for `query`, scoped to `user_id`.
+    /// Search indexed file names + content for `query`, scoped to the drives
+    /// the caller can read.
     ///
-    /// Returns up to `limit` hits sorted by BM25 score descending. Matching is
-    /// tokenized (not substring): exact terms, typo-tolerant fuzzy terms
-    /// (edit distance 1) and prefix expansion on the last query token.
+    /// The filter is applied as an `Occur::Must` set-membership clause on
+    /// the `drive_id` field — Tantivy's collector only ever sees documents
+    /// in one of the accessible drives, so counts, snippets, and
+    /// pagination cursors all reflect the filtered set (no anti-
+    /// enumeration leak — see `docs/plan/drive.md` §11). Pass the
+    /// caller's full accessible-drive set; the engine already expands
+    /// group-mediated drive grants before this is called.
+    ///
+    /// An empty `accessible_drive_ids` returns no hits — same semantics
+    /// as "no drives, no search" (e.g. external users with grants only).
+    /// Returns up to `limit` hits sorted by BM25 score descending.
+    /// Matching is tokenized (not substring): exact terms, typo-tolerant
+    /// fuzzy terms (edit distance 1) and prefix expansion on the last
+    /// query token.
     async fn search_content(
         &self,
-        user_id: Uuid,
+        accessible_drive_ids: &[Uuid],
         query: &str,
         limit: usize,
     ) -> Result<Vec<ContentHitDto>, DomainError>;
