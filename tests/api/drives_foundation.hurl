@@ -48,8 +48,14 @@ jsonpath "$" count >= 1
 jsonpath "$[0].kind"             == "personal"
 jsonpath "$[0].default_for_user" == "{{admin_user_id}}"
 jsonpath "$[0].name"             == "Personal"
+# root_folder_id surfaces the drive's mount-point folder. Sourced via
+# JOIN from storage.folders.name — drives have no `name` column under
+# the D0 design (docs/plan/drive.md §3). Folder API operations
+# (create-in-drive, rename-drive) all key off this id.
+jsonpath "$[0].root_folder_id"   exists
 [Captures]
 admin_drive_id: jsonpath "$[0].id"
+admin_root_folder_id: jsonpath "$[0].root_folder_id"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -110,6 +116,8 @@ HTTP 200
 jsonpath "$" count == 1
 jsonpath "$[0].kind"             == "personal"
 jsonpath "$[0].default_for_user" == "{{alice_user_id}}"
+jsonpath "$[0].name"             == "Personal"
+jsonpath "$[0].root_folder_id"   exists
 [Captures]
 alice_drive_id: jsonpath "$[0].id"
 
@@ -122,6 +130,8 @@ HTTP 200
 jsonpath "$" count == 1
 jsonpath "$[0].kind"             == "personal"
 jsonpath "$[0].default_for_user" == "{{bob_user_id}}"
+jsonpath "$[0].name"             == "Personal"
+jsonpath "$[0].root_folder_id"   exists
 [Captures]
 bob_drive_id: jsonpath "$[0].id"
 

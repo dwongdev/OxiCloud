@@ -28,8 +28,18 @@ pub trait FolderRepository: Send + Sync + 'static {
     /// Gets a folder by its ID
     async fn get_folder(&self, id: &str) -> Result<Folder, DomainError>;
 
-    /// Gets a folder by its storage path
-    async fn get_folder_by_path(&self, storage_path: &StoragePath) -> Result<Folder, DomainError>;
+    /// Gets a folder by its storage path within the caller's tree.
+    ///
+    /// Post-D0, `storage.folders.path` is no longer globally unique —
+    /// multiple users share root-folder names like `"Personal"`. The
+    /// `user_id` filter scopes the lookup to the caller's own folders
+    /// (the equivalent of the pre-D0 implicit user-namespacing that
+    /// came from `My Folder - <username>` paths).
+    async fn get_folder_by_path(
+        &self,
+        storage_path: &StoragePath,
+        user_id: Uuid,
+    ) -> Result<Folder, DomainError>;
 
     /// Lists folders within a parent folder
     async fn list_folders(&self, parent_id: Option<&str>) -> Result<Vec<Folder>, DomainError>;

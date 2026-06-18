@@ -56,6 +56,28 @@ CREATE INDEX IF NOT EXISTS idx_folders_drive_id ON storage.folders (drive_id);
 CREATE INDEX IF NOT EXISTS idx_files_drive_id   ON storage.files   (drive_id);
 
 
+-- ── 3b. Drive-scoped folder uniqueness indexes ─────────────────────────────
+-- Pre-D0 the "no duplicate folder name under the same parent for the same
+-- user" constraint was user_id-scoped (docs/plan/drive.md §10). The
+-- semantics users actually want is "no duplicate names *within a drive*"
+-- — a folder named "Reports" in your Personal drive shouldn't preclude
+-- another "Reports" in a shared "Team" drive. Flip the scope here, now
+-- that every row has a drive_id.
+--
+-- Same partial predicate as the originals (NOT is_trashed, plus the
+-- root-vs-non-root split via parent_id IS NULL).
+
+DROP INDEX IF EXISTS storage.idx_folders_unique_name;
+DROP INDEX IF EXISTS storage.idx_folders_unique_name_root;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_folders_unique_name
+    ON storage.folders(parent_id, name, drive_id)
+    WHERE NOT is_trashed AND parent_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_folders_unique_name_root
+    ON storage.folders(name, drive_id)
+    WHERE NOT is_trashed AND parent_id IS NULL;
+
+
 -- ── 4. Post-flight: confirm constraints landed ────────────────────────────
 -- Belt-and-suspenders verification that the NOT NULL + FK actually
 -- exist after the ALTERs above. Any failure here means PostgreSQL

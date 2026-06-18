@@ -133,7 +133,7 @@ async fn handle_restore(
         let file_service = &state.applications.file_retrieval_service;
         let dest_taken = file_service.get_file_by_path(&dest_internal).await.is_ok()
             || folder_service
-                .get_folder_by_path(&dest_internal)
+                .get_folder_by_path(&dest_internal, user.id)
                 .await
                 .is_ok();
         if dest_taken {
@@ -248,11 +248,18 @@ fn mime_from_name(name: &str) -> String {
         .to_string()
 }
 
-/// Strip the "My Folder - {username}/" prefix from an original path to produce
-/// the Nextcloud-relative original location.
-fn strip_home_prefix<'a>(original_path: &'a str, username: &str) -> &'a str {
-    let prefix = format!("My Folder - {}/", username);
-    original_path.strip_prefix(&prefix).unwrap_or(original_path)
+/// Strip the home-folder prefix from an original path to produce the
+/// Nextcloud-relative original location.
+///
+/// TODO(D1): replace the hardcoded "Personal/" with the caller's actual
+/// default-drive root folder name read from `drives.root_folder_id`.
+/// Correct for D0-provisioned default drives; secondary drives keep
+/// their original root name. The `_username` arg stays for now so the
+/// upcoming dynamic lookup has a way to identify the caller.
+fn strip_home_prefix<'a>(original_path: &'a str, _username: &str) -> &'a str {
+    original_path
+        .strip_prefix("Personal/")
+        .unwrap_or(original_path)
 }
 
 // ────────────── Trashbin PROPFIND XML Generation ──────────────

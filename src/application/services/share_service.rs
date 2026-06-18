@@ -925,6 +925,7 @@ mod tests {
         async fn get_folder_by_path(
             &self,
             _storage_path: &crate::domain::services::path_service::StoragePath,
+            _user_id: uuid::Uuid,
         ) -> Result<crate::domain::entities::folder::Folder, DomainError> {
             unimplemented!()
         }

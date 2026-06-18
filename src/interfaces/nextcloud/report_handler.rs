@@ -83,7 +83,11 @@ async fn handle_filter_files(
     // All items in this response are favorites.
     let favorite_ids: HashSet<String> = favorites.iter().map(|f| f.item_id.clone()).collect();
 
-    let home_prefix = format!("My Folder - {}/", user.username);
+    // TODO(D1): replace the hardcoded "Personal/" prefix with the
+    // caller's default-drive root folder name read from
+    // `drives.root_folder_id`. Correct for D0-provisioned default
+    // drives; secondary drives keep their original root name.
+    let home_prefix = "Personal/";
 
     // Pass 1: resolve the favorited DTOs in two batch queries (was one
     // get_* per favorite — up to N serial round-trips on a sync client's
@@ -146,7 +150,7 @@ async fn handle_filter_files(
         write_multistatus_start(&mut xml)?;
 
         for file in &files {
-            let subpath = strip_home_prefix(&file.path, &home_prefix);
+            let subpath = strip_home_prefix(&file.path, home_prefix);
             let href = nc_href(&user.username, subpath);
             let fid = file_id_map.get(&file.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
@@ -163,7 +167,7 @@ async fn handle_filter_files(
         }
 
         for folder in &folders {
-            let subpath = strip_home_prefix(&folder.path, &home_prefix);
+            let subpath = strip_home_prefix(&folder.path, home_prefix);
             let href = format!("{}/", nc_href(&user.username, subpath));
             let fid = folder_id_map.get(&folder.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
@@ -210,7 +214,7 @@ async fn handle_search(
     let nresults = parse_nresults(body).unwrap_or(100);
 
     // Resolve folder scope from <d:href> inside <d:scope>.
-    let folder_id = resolve_scope_folder(&state, body, &user.username).await;
+    let folder_id = resolve_scope_folder(&state, body, &user.username, user.id).await;
 
     let criteria = SearchCriteriaDto {
         name_contains: Some(term),
@@ -227,7 +231,10 @@ async fn handle_search(
 
     let nc = state.nextcloud.as_ref();
     let file_id_svc = nc.map(|n| &n.file_ids);
-    let home_prefix = format!("My Folder - {}/", user.username);
+    // TODO(D1): same as the favorites pass above — replace the
+    // hardcoded "Personal/" with the caller's actual default-drive
+    // root folder name from `drives.root_folder_id`.
+    let home_prefix = "Personal/";
 
     // No favorite checking for search results -- pass an empty set.
     let favorite_ids: HashSet<String> = HashSet::new();
@@ -249,7 +256,7 @@ async fn handle_search(
 
         // Files.
         for file in &files {
-            let subpath = strip_home_prefix(&file.path, &home_prefix);
+            let subpath = strip_home_prefix(&file.path, home_prefix);
             let href = nc_href(&user.username, subpath);
             let fid = file_id_map.get(&file.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
@@ -267,7 +274,7 @@ async fn handle_search(
 
         // Folders.
         for folder in &folders {
-            let subpath = strip_home_prefix(&folder.path, &home_prefix);
+            let subpath = strip_home_prefix(&folder.path, home_prefix);
             let href = format!("{}/", nc_href(&user.username, subpath));
             let fid = folder_id_map.get(&folder.id).copied();
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
@@ -461,7 +468,12 @@ fn xml_extract_text(body: &str, local_name: &[u8]) -> Option<String> {
 }
 
 /// Resolve a scope href (e.g. `/files/username/Documents`) to a folder ID.
-async fn resolve_scope_folder(state: &AppState, body: &str, username: &str) -> Option<String> {
+async fn resolve_scope_folder(
+    state: &AppState,
+    body: &str,
+    username: &str,
+    user_id: uuid::Uuid,
+) -> Option<String> {
     let href = parse_scope_href(body)?;
 
     // The href is typically `/files/{user}/subpath` or `/remote.php/dav/files/{user}/subpath`.
@@ -477,7 +489,7 @@ async fn resolve_scope_folder(state: &AppState, body: &str, username: &str) -> O
 
     let folder_service = &state.applications.folder_service;
     folder_service
-        .get_folder_by_path(&internal_path)
+        .get_folder_by_path(&internal_path, user_id)
         .await
         .ok()
         .map(|f| f.id)

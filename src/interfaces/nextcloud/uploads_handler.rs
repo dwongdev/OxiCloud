@@ -256,11 +256,12 @@ async fn handle_assemble(
     let file_service = &state.applications.file_retrieval_service;
     let folder_service = &state.applications.folder_service;
 
-    let internal_path = format!(
-        "My Folder - {}/{}",
-        user.username,
-        dest_subpath.trim_matches('/')
-    );
+    // TODO(D1): read the caller's default-drive root folder name from
+    // `drives.root_folder_id` instead of hardcoding "Personal". The
+    // constant is correct for every default personal drive provisioned
+    // by the D0 lifecycle hook, but secondary drives (M2 backfill from
+    // SQL-created sibling root folders) keep their original name.
+    let internal_path = format!("Personal/{}", dest_subpath.trim_matches('/'));
 
     let filename = filename_from_path(&dest_subpath).to_string();
     let ingested = ingest_stream_to_cas(
@@ -291,15 +292,11 @@ async fn handle_assemble(
             Some((p, n)) => (p, n),
             None => ("", dest_subpath.as_str()),
         };
-        let parent_internal = format!(
-            "My Folder - {}/{}",
-            user.username,
-            parent_sub.trim_matches('/')
-        );
+        let parent_internal = format!("Personal/{}", parent_sub.trim_matches('/'));
         let parent_internal = parent_internal.trim_end_matches('/');
 
         use crate::application::ports::folder_ports::FolderUseCase;
-        let parent_folder = match folder_service.get_folder_by_path(parent_internal).await {
+        let parent_folder = match folder_service.get_folder_by_path(parent_internal, user.id).await {
             Ok(folder) => folder,
             Err(e) => {
                 discard_ingested(&state.core.dedup_service, &ingested).await;

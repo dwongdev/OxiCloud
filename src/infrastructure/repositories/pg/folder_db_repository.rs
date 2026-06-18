@@ -236,7 +236,11 @@ impl FolderRepository for FolderDbRepository {
         Self::row_to_folder(row.0, row.1, row.2, row.3, Some(row.4), row.5, row.6, row.7)
     }
 
-    async fn get_folder_by_path(&self, storage_path: &StoragePath) -> Result<Folder, DomainError> {
+    async fn get_folder_by_path(
+        &self,
+        storage_path: &StoragePath,
+        user_id: Uuid,
+    ) -> Result<Folder, DomainError> {
         let path_str = storage_path.to_string();
         // Strip leading '/' if present — DB stores "Home - user/Docs", not "/Home - user/Docs"
         let lookup = path_str.strip_prefix('/').unwrap_or(&path_str);
@@ -245,6 +249,13 @@ impl FolderRepository for FolderDbRepository {
             return Err(DomainError::not_found("Folder", "empty path"));
         }
 
+        // Scoped by user_id: post-D0 the wrapper folder is named
+        // "Personal" for every user, so `path = 'Personal'` matches
+        // every user's root folder. Without the user_id filter, this
+        // returns a non-deterministic row (whichever the planner emits
+        // first) — which broke owner-short-circuit checks for the
+        // caller whose folder wasn't returned. See bug-fix on rewind
+        // commit.
         let row = sqlx::query_as::<_, FolderRow>(
             r#"
             SELECT id::text, name, path, parent_id::text, user_id,
@@ -252,10 +263,11 @@ impl FolderRepository for FolderDbRepository {
                    EXTRACT(EPOCH FROM updated_at)::bigint,
                        EXTRACT(EPOCH FROM tree_modified_at)::bigint
               FROM storage.folders
-             WHERE path = $1 AND NOT is_trashed
+             WHERE path = $1 AND user_id = $2 AND NOT is_trashed
             "#,
         )
         .bind(lookup)
+        .bind(user_id)
         .fetch_optional(self.pool())
         .await
         .map_err(|e| DomainError::internal_error("FolderDb", format!("path lookup: {e}")))?

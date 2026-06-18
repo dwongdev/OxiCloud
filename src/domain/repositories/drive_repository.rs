@@ -37,52 +37,56 @@ pub enum DriveRepositoryError {
     StorageError(String),
 }
 
-/// Input parameters for creating a new personal drive.
+/// A drive paired with the display name from its root folder.
 ///
-/// Shared drives land in D3 with their own creation surface
-/// (`create_shared_drive`). For now D0 only mints personal drives —
-/// either as the default for a fresh user (via the lifecycle hook) or
-/// as a secondary promoted by the M2 backfill.
-#[derive(Debug, Clone)]
-pub struct CreatePersonalDriveInput {
-    /// Display name. The lifecycle hook passes `"Personal"`; the M2
-    /// backfill carries over the original sibling-root folder name for
-    /// secondaries.
-    pub name: String,
-    /// The owner. For personal drives the owner is exactly one user.
-    pub owner_id: Uuid,
-    /// `true` when this is the user's default drive (sets the partial-
-    /// unique `default_for_user` column). `false` for secondaries.
-    pub is_default: bool,
-    /// Initial storage quota in bytes. `None` defers to admin policy
-    /// (typically copied from `auth.users.storage_quota_bytes` at the
-    /// call site).
-    pub quota_bytes: Option<i64>,
+/// `storage.drives` has no `name` column under the D0 design
+/// (docs/plan/drive.md §3) — the display name lives on
+/// `storage.folders.name` of the row pointed at by `drive.root_folder_id`.
+/// Read paths join the two tables and hand callers this view-model so the
+/// API surface can continue to expose a single "drive with name" shape
+/// without a follow-up query per drive.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DriveWithRootName {
+    pub drive: Drive,
+    /// The drive's display name. Sourced from `storage.folders.name`
+    /// of the root folder via JOIN at read time.
+    pub root_folder_name: String,
 }
 
 #[async_trait::async_trait]
 pub trait DriveRepository: Send + Sync + 'static {
-    /// Insert a personal drive row. The caller is responsible for
-    /// inserting the matching owner row in `storage.role_grants` in the
-    /// same transaction (the lifecycle hook handles this; M2's backfill
-    /// did it directly in SQL).
+    /// Atomically create a personal drive together with its root folder
+    /// and the owner role_grant — all four DB writes in a single SQL
+    /// statement (docs/plan/drive.md §3 "Atomic creation"). The
+    /// statement runs as its own implicit transaction in autocommit mode
+    /// so a server crash mid-statement leaves no half-row state.
     ///
-    /// Returns `DefaultDriveAlreadyExists` when `is_default=true` and the
-    /// owner already has a default drive — relies on the partial UNIQUE
-    /// index on `default_for_user`.
-    async fn create_personal(
+    /// The root folder is created with name `"Personal"` (the canonical
+    /// default) and `parent_id IS NULL`. The drive's `root_folder_id`
+    /// is wired to point at it before the statement commits.
+    ///
+    /// Returns `DefaultDriveAlreadyExists` when the owner already has a
+    /// default drive — relies on the partial UNIQUE index on
+    /// `default_for_user`.
+    async fn create_personal_drive_atomic(
         &self,
-        input: CreatePersonalDriveInput,
-    ) -> Result<Drive, DriveRepositoryError>;
+        owner_id: Uuid,
+        quota_bytes: Option<i64>,
+    ) -> Result<DriveWithRootName, DriveRepositoryError>;
 
-    /// Fetch a drive by id. `NotFound` when no row matches.
-    async fn get_by_id(&self, id: Uuid) -> Result<Drive, DriveRepositoryError>;
+    /// Fetch a drive by id together with its display name. `NotFound`
+    /// when no row matches.
+    async fn get_by_id(&self, id: Uuid) -> Result<DriveWithRootName, DriveRepositoryError>;
 
-    /// Return the caller's default personal drive, or `NotFound` if they
-    /// don't have one (e.g. external users; users created before the
-    /// lifecycle hook fired). Drives the Photos timeline scope, the
-    /// `/api/recent/*` scope, and D1's redirect-from-`/`.
-    async fn find_default_for_user(&self, user_id: Uuid) -> Result<Drive, DriveRepositoryError>;
+    /// Return the caller's default personal drive paired with its
+    /// display name, or `NotFound` if they don't have one (e.g.
+    /// external users; users created before the lifecycle hook fired).
+    /// Drives the Photos timeline scope, the `/api/recent/*` scope, and
+    /// D1's redirect-from-`/`.
+    async fn find_default_for_user(
+        &self,
+        user_id: Uuid,
+    ) -> Result<DriveWithRootName, DriveRepositoryError>;
 
     /// List drives the caller can read, resolved via `role_grants` for
     /// `resource_type='drive'`. The caller's group memberships are
@@ -90,13 +94,13 @@ pub trait DriveRepository: Send + Sync + 'static {
     /// is what this method's `subject_ids` argument carries.
     ///
     /// Returns rows in a stable order: default drive first (if any),
-    /// then by name. The `/api/drives` handler relies on that order for
-    /// the picker UI without a follow-up sort.
+    /// then by display name. The `/api/drives` handler relies on that
+    /// order for the picker UI without a follow-up sort.
     async fn list_for_subjects(
         &self,
         subject_types: &[&str],
         subject_ids: &[Uuid],
-    ) -> Result<Vec<Drive>, DriveRepositoryError>;
+    ) -> Result<Vec<DriveWithRootName>, DriveRepositoryError>;
 }
 
 /// Convenience: convert the canonical kind discriminator from its SQL

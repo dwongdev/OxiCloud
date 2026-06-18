@@ -469,7 +469,7 @@ async fn handle_propfind(
         }
     } else {
         // Fallback: legacy double-query path when PathResolver is unavailable
-        if let Ok(folder) = folder_service.get_folder_by_path(&path).await {
+        if let Ok(folder) = folder_service.get_folder_by_path(&path, user.id).await {
             assert_owner(folder.owner_id.as_deref(), &user.id.to_string(), &path)?;
             let folder_id = folder.id.clone();
             return build_streaming_propfind_response(
@@ -656,7 +656,7 @@ async fn handle_proppatch(
     req: Request<Body>,
     path: String,
 ) -> Result<Response<Body>, AppError> {
-    let _user = extract_user(&req)?;
+    let user = extract_user(&req)?;
 
     // Active-lock guard (RFC 4918 §9.10.4): PROPPATCH writes properties,
     // so a lock on the target must release them via `If:`. Captured
@@ -691,7 +691,7 @@ async fn handle_proppatch(
         state
             .applications
             .folder_service
-            .get_folder_by_path(&path)
+            .get_folder_by_path(&path, user.id)
             .await
             .is_ok()
     };
@@ -877,7 +877,7 @@ async fn handle_head(
     }
 
     // Fallback: legacy double-query path (with ownership check)
-    if let Ok(folder) = folder_service.get_folder_by_path(&path).await {
+    if let Ok(folder) = folder_service.get_folder_by_path(&path, user.id).await {
         assert_owner(folder.owner_id.as_deref(), &user.id.to_string(), &path)?;
         return Ok(Response::builder()
             .status(StatusCode::OK)
@@ -941,7 +941,7 @@ async fn resolve_or_legacy(
 
     let user_id_str = user_id.to_string();
     let folder_service = &state.applications.folder_service;
-    if let Ok(folder) = folder_service.get_folder_by_path(path).await
+    if let Ok(folder) = folder_service.get_folder_by_path(path, user_id).await
         && folder.owner_id.as_deref() == Some(&user_id_str)
     {
         return Some(ResolvedResource::Folder(folder));
@@ -1208,7 +1208,7 @@ async fn handle_mkcol(
         }
         accumulated_path.push_str(segment);
 
-        match folder_service.get_folder_by_path(&accumulated_path).await {
+        match folder_service.get_folder_by_path(&accumulated_path, user.id).await {
             Ok(existing) => {
                 parent_id = Some(existing.id);
             }
@@ -1401,7 +1401,7 @@ async fn handle_move(
                 .unwrap_or(false)
         } else {
             folder_service
-                .get_folder_by_path(&destination_path)
+                .get_folder_by_path(&destination_path, user.id)
                 .await
                 .is_ok()
                 || file_retrieval_service
@@ -1443,7 +1443,7 @@ async fn handle_move(
             let move_dto = crate::application::dtos::folder_dto::MoveFolderDto {
                 parent_id: if dest_parent_path.is_empty() {
                     None
-                } else if let Ok(parent) = folder_service.get_folder_by_path(dest_parent_path).await
+                } else if let Ok(parent) = folder_service.get_folder_by_path(dest_parent_path, user.id).await
                 {
                     assert_owner(
                         parent.owner_id.as_deref(),
@@ -1483,7 +1483,7 @@ async fn handle_move(
                     None
                 } else {
                     let parent = folder_service
-                        .get_folder_by_path(dest_parent_path)
+                        .get_folder_by_path(dest_parent_path, user.id)
                         .await
                         .map_err(|_| {
                             AppError::not_found(format!(
@@ -1610,7 +1610,7 @@ async fn handle_copy(
                 .unwrap_or(false)
         } else {
             folder_service
-                .get_folder_by_path(&destination_path)
+                .get_folder_by_path(&destination_path, user.id)
                 .await
                 .is_ok()
                 || file_retrieval_service
@@ -1644,7 +1644,7 @@ async fn handle_copy(
 
     let target_parent_id = if dest_parent_path.is_empty() {
         None
-    } else if let Ok(parent) = folder_service.get_folder_by_path(dest_parent_path).await {
+    } else if let Ok(parent) = folder_service.get_folder_by_path(dest_parent_path, user.id).await {
         assert_owner(
             parent.owner_id.as_deref(),
             &user.id.to_string(),
@@ -1743,7 +1743,7 @@ async fn handle_lock(
         state
             .applications
             .folder_service
-            .get_folder_by_path(&path)
+            .get_folder_by_path(&path, user.id)
             .await
             .is_ok()
     };

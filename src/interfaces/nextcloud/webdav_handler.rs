@@ -53,8 +53,15 @@ const HEADER_DAV: HeaderName = HeaderName::from_static("dav");
 /// Internal:  My Folder - {username}/{subpath}
 ///
 /// An empty subpath maps to the user's home folder root.
-pub fn nc_to_internal_path(username: &str, subpath: &str) -> Result<String, AppError> {
-    let home = format!("My Folder - {}", username);
+pub fn nc_to_internal_path(_username: &str, subpath: &str) -> Result<String, AppError> {
+    // D0: every default personal drive's root folder is named "Personal"
+    // (docs/plan/drive.md §3 — the canonical post-D0 default). The NC
+    // dispatcher chroots into the caller's default drive, so the leading
+    // segment of the internal path is always the drive's root folder
+    // name. Hardcoded for now; a follow-up will read it from
+    // `drives.root_folder_id`'s name to support secondary drives with
+    // custom root-folder names.
+    let home = "Personal".to_string();
     let subpath = subpath.trim_matches('/');
     if subpath.is_empty() {
         return Ok(home);
@@ -203,7 +210,7 @@ async fn handle_propfind(
     let file_service = &state.applications.file_retrieval_service;
 
     // Try to resolve as folder first.
-    let folder_result = folder_service.get_folder_by_path(&internal_path).await;
+    let folder_result = folder_service.get_folder_by_path(&internal_path, user.id).await;
 
     if let Ok(folder) = folder_result {
         // It's a folder — stream the multistatus: children are fetched in
@@ -281,7 +288,7 @@ async fn handle_get(
 
     // Check if path is a folder first (NC clients use GET as existence check)
     if folder_service
-        .get_folder_by_path(&internal_path)
+        .get_folder_by_path(&internal_path, user.id)
         .await
         .is_ok()
     {
@@ -358,7 +365,7 @@ async fn handle_head(
 
     // Check if path is a folder (NC clients use HEAD as existence check)
     if folder_service
-        .get_folder_by_path(&internal_path)
+        .get_folder_by_path(&internal_path, user.id)
         .await
         .is_ok()
     {
@@ -433,7 +440,7 @@ async fn handle_proppatch(
     let folder_service = &state.applications.folder_service;
     let resource = if let Ok(file) = file_service.get_file_by_path(&internal_path).await {
         Some((file.id, "file"))
-    } else if let Ok(folder) = folder_service.get_folder_by_path(&internal_path).await {
+    } else if let Ok(folder) = folder_service.get_folder_by_path(&internal_path, user.id).await {
         Some((folder.id, "folder"))
     } else {
         None
@@ -733,7 +740,7 @@ async fn handle_mkcol(
     // auto-create doesn't break real clients.
 
     if folder_service
-        .get_folder_by_path(&internal_path)
+        .get_folder_by_path(&internal_path, user.id)
         .await
         .is_ok()
     {
@@ -758,7 +765,7 @@ async fn handle_mkcol(
         format!("{}/{}", user_root, parent_segments.join("/"))
     };
 
-    let parent_folder = match folder_service.get_folder_by_path(&parent_path).await {
+    let parent_folder = match folder_service.get_folder_by_path(&parent_path, user.id).await {
         Ok(folder) => folder,
         Err(_) => {
             return Ok(Response::builder()
@@ -797,7 +804,7 @@ async fn handle_delete(
     // Prefer soft-delete (move to trash) when trash service is available.
     // This is what Nextcloud clients expect — items appear in the trashbin.
     if let Some(trash_svc) = state.trash_service.as_ref() {
-        if let Ok(folder) = folder_service.get_folder_by_path(&internal_path).await {
+        if let Ok(folder) = folder_service.get_folder_by_path(&internal_path, user.id).await {
             trash_svc
                 .move_to_trash(&folder.id, "folder", user.id)
                 .await
@@ -823,7 +830,7 @@ async fn handle_delete(
     // Fallback: hard delete when trash service is not available.
     let file_mgmt = &state.applications.file_management_service;
 
-    if let Ok(folder) = folder_service.get_folder_by_path(&internal_path).await {
+    if let Ok(folder) = folder_service.get_folder_by_path(&internal_path, user.id).await {
         folder_service
             .delete_folder_with_perms(&folder.id, user.id)
             .await
@@ -897,7 +904,7 @@ async fn handle_move(
         .await
         .ok();
     let dest_existing_folder = folder_service
-        .get_folder_by_path(&dest_internal_precheck)
+        .get_folder_by_path(&dest_internal_precheck, user.id)
         .await
         .ok();
     let dest_existed_before = dest_existing_file.is_some() || dest_existing_folder.is_some();
@@ -962,7 +969,7 @@ async fn handle_move(
         } else {
             // Different parent → move.
             let dest_parent = folder_service
-                .get_folder_by_path(&dest_parent_internal)
+                .get_folder_by_path(&dest_parent_internal, user.id)
                 .await
                 .map_err(|_| AppError::not_found("Destination folder not found"))?;
 
@@ -997,7 +1004,7 @@ async fn handle_move(
     }
 
     // Try as folder.
-    if let Ok(folder) = folder_service.get_folder_by_path(&src_internal).await {
+    if let Ok(folder) = folder_service.get_folder_by_path(&src_internal, user.id).await {
         let (dest_parent_sub, dest_name) = match dest_subpath.rsplit_once('/') {
             Some((parent, name)) => (parent, name),
             None => ("", dest_subpath.as_str()),
@@ -1025,7 +1032,7 @@ async fn handle_move(
         } else {
             // Different parent → move.
             let dest_parent = folder_service
-                .get_folder_by_path(&dest_parent_internal)
+                .get_folder_by_path(&dest_parent_internal, user.id)
                 .await
                 .map_err(|_| AppError::not_found("Destination parent not found"))?;
 

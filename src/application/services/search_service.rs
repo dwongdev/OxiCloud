@@ -306,7 +306,7 @@ impl SearchService {
             .list_for_subjects(&subject_types, &subject_ids)
             .await
         {
-            Ok(drives) => drives.into_iter().map(|d| d.id).collect(),
+            Ok(drives) => drives.into_iter().map(|d| d.drive.id).collect(),
             Err(e) => {
                 tracing::warn!("Content-index: drive lookup failed — degrading to empty: {e}");
                 return Vec::new();

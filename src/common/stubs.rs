@@ -242,7 +242,11 @@ impl FolderRepository for StubFolderStoragePort {
         Ok(Folder::default())
     }
 
-    async fn get_folder_by_path(&self, _storage_path: &StoragePath) -> Result<Folder, DomainError> {
+    async fn get_folder_by_path(
+        &self,
+        _storage_path: &StoragePath,
+        _user_id: Uuid,
+    ) -> Result<Folder, DomainError> {
         Ok(Folder::default())
     }
 
@@ -398,7 +402,11 @@ impl FolderUseCase for StubFolderUseCase {
         Ok(FolderDto::default())
     }
 
-    async fn get_folder_by_path(&self, _path: &str) -> Result<FolderDto, DomainError> {
+    async fn get_folder_by_path(
+        &self,
+        _path: &str,
+        _user_id: Uuid,
+    ) -> Result<FolderDto, DomainError> {
         Ok(FolderDto::default())
     }
 

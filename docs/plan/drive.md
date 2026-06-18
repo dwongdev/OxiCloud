@@ -176,17 +176,35 @@ layer (`DriveService` enforces the personal-drive invariants, etc.)
 - A shared drive can have **0 viewers** and **0 editors** — only
   the ≥1-owner invariant matters.
 
-### 3. Drive entity
+### 3. Drive entity — pure metadata + a 1:1 root folder
+
+A drive is a **metadata-only holder** (quota, kind, policies, default flag)
+paired 1:1 with a *root folder* that owns the drive's visible identity
+(name, path materialisation, ltree anchor). The drive itself has no
+`name` column — every property the user thinks of as "the drive"
+(its display name, its containing children, its location in the
+ltree) lives on the root folder row.
+
+This is the Unix-philosophy split: the *filesystem volume* is the drive
+(quota, policies, ownership metadata); the *mount point* is the root
+folder (name, hierarchy, paths). Clients interact with the root folder
+through the standard folder API — no special "drive root" endpoint, no
+polymorphic creation surface, no "create at drive vs in folder" duality.
 
 ```sql
 storage.drives
     id                uuid PRIMARY KEY DEFAULT gen_random_uuid()
-    name              text NOT NULL                       -- "Personal" or user-chosen
     kind              text NOT NULL CHECK (kind IN ('personal','shared'))
     default_for_user  uuid NULL FK → auth.users(id) ON DELETE CASCADE
     quota_bytes       bigint NULL                         -- NULL = unlimited
     used_bytes        bigint NOT NULL DEFAULT 0
     policies          jsonb NOT NULL DEFAULT '{}'
+    -- The drive's mount-point folder. Nullable AT THE COLUMN TYPE LEVEL
+    -- only because the column is set mid-statement during atomic
+    -- creation (see "Atomic creation" below) — invariant: after any
+    -- successful create_personal_drive() call, this is non-NULL. Code
+    -- that reads drives can treat it as Uuid in Rust.
+    root_folder_id    uuid NULL FK → storage.folders(id) ON DELETE CASCADE
     created_at        timestamptz NOT NULL DEFAULT now()
     updated_at        timestamptz NOT NULL DEFAULT now()
     -- `default_for_user` may ONLY be set on personal drives.
@@ -198,6 +216,35 @@ CREATE UNIQUE INDEX drives_default_for_user_idx
     ON storage.drives (default_for_user)
     WHERE default_for_user IS NOT NULL;  -- one DEFAULT personal drive per user
 ```
+
+#### Drive name lives on the root folder
+
+`storage.drives` has no `name` column. The drive's display name is
+`SELECT f.name FROM storage.drives d JOIN storage.folders f
+ON f.id = d.root_folder_id WHERE d.id = $drive_id`.
+
+Why this is the right shape:
+
+- **Single source of truth.** No duplication between `drives.name` and
+  `folders.name`, no drift risk, no decision about which side to
+  serve when they differ.
+- **Renaming is the standard folder API.** `PATCH /api/folders/<root_id>`
+  with a new name renames the drive. No separate
+  `PATCH /api/drives/<id>/name` endpoint. The lifecycle / cascade
+  / search-index behaviour that already exists on folder rename
+  applies automatically.
+- **No "rename the drive but not its mount point" footgun.** They're
+  always in sync because they're the same column.
+
+Identity is still carried by `kind` + `default_for_user` — *not* by
+the name. UI and NC default-drive resolution query on `kind` /
+`default_for_user`, never on `name = 'Personal'`. Renaming "Personal"
+→ "Ed's space" preserves identity; only the label changes.
+
+The migration-time default for personal drive root folder names is
+`'Personal'`. Secondary personal drives (sibling roots from the M2
+backfill — see §10) carry over whatever name the original sibling
+root folder had.
 
 #### Two orthogonal properties: `kind` and `default_for_user`
 
@@ -229,24 +276,123 @@ There is no constraint to write — externals simply have no row
 in `storage.drives` with `default_for_user = <their id>`, and
 nothing tries to create one.
 
-#### Drive naming — `name` is a label, identity lives in `kind` + `default_for_user`
+#### Atomic creation — single transaction, four writes
 
-`name` is owner-editable for every drive (personal or shared). A
-user who renames their drive from "Personal" → "Ed's space" does
-**not** stop having a personal drive, and does not stop having a
-default. The `kind` flag + `default_for_user` pointer carry the
-identity; the name is purely a display label.
+A drive and its root folder reference each other circularly:
+`storage.drives.root_folder_id` points at `storage.folders.id`, and
+`storage.folders.drive_id` points at `storage.drives.id`. Creating
+them naively could leave inconsistent half-state on a server crash
+mid-sequence: drive without folder, folder without drive, or either
+without an owner role_grant.
 
-Why this matters:
-- UI and NC default-drive resolution MUST query on `kind` /
-  `default_for_user`, never on `name = 'Personal'`. The latter
-  would silently break the moment the user renames.
-- The initial migration sets `name = 'Personal'` on the default
-  personal drive for back-compat with the label users see today;
-  further renames go through the normal drive-rename endpoint
-  and persist on the same row. Secondary personal drives carry
-  whatever name the sibling root folder had (e.g. `Archive`,
-  `2024 Projects`).
+The repo's `create_personal_drive_atomic` wraps the four writes in
+a single transaction so they commit together or not at all:
+
+1. INSERT drive (with `root_folder_id = NULL`) → returns drive id.
+2. INSERT folder (with `drive_id` = the drive's id) → returns folder id.
+3. UPDATE drive SET `root_folder_id` = the folder id.
+4. INSERT role_grant (owner, subject = caller, resource = drive).
+5. COMMIT.
+
+Why a transaction rather than one CTE statement: PostgreSQL's CTE
+sub-statements all read the target tables from the *same snapshot*
+— a later sub-statement's `UPDATE storage.drives WHERE id = …`
+cannot match a row inserted by an earlier sub-statement, even if
+the earlier statement returned the new id via `RETURNING`. The
+documented escape hatch (`DEFERRABLE INITIALLY DEFERRED` FKs +
+pre-generated UUIDs) is the alternative but adds constraint
+plumbing to support a single uncommon code path. A transaction is
+boring and correct.
+
+Crash safety: any failure between steps 1 and 4 rolls back — no
+drive without folder, no folder without drive, no drive without
+owner. Once step 5 commits, the invariant holds.
+
+For reference, the equivalent (broken) one-CTE form looks like:
+
+```sql
+WITH new_drive AS (
+    INSERT INTO storage.drives
+        (kind, default_for_user, quota_bytes, policies)
+    VALUES ('personal', $user_id, $quota, '{}'::jsonb)
+    RETURNING id
+),
+new_root AS (
+    INSERT INTO storage.folders
+        (name, parent_id, user_id, drive_id, created_by, updated_by)
+    SELECT 'Personal',     -- root folder name
+           NULL,            -- parent_id (this IS the root)
+           $user_id,
+           new_drive.id,    -- forward-ref to the drive's id
+           $user_id, $user_id
+      FROM new_drive
+    RETURNING id, drive_id
+),
+drive_updated AS (
+    UPDATE storage.drives d
+       SET root_folder_id = new_root.id
+      FROM new_root
+     WHERE d.id = new_root.drive_id
+    RETURNING d.id
+),
+new_grant AS (
+    INSERT INTO storage.role_grants
+        (subject_type, subject_id, resource_type, resource_id, role, granted_by)
+    SELECT 'user', $user_id, 'drive', du.id, 'owner', $user_id
+      FROM drive_updated du
+    RETURNING resource_id
+)
+SELECT d.id, d.root_folder_id, d.kind, d.default_for_user,
+       d.quota_bytes, d.used_bytes, d.policies,
+       d.created_at, d.updated_at
+  FROM storage.drives d
+  JOIN new_grant g ON g.resource_id = d.id;
+```
+
+Why the one-CTE form above does NOT work — and what we ship instead:
+
+The shared-snapshot rule (`postgresql.org/docs/current/queries-with.html`
+§7.8.2: "they cannot 'see' one another's effects on the target tables")
+breaks the `drive_updated` sub-statement. Its `UPDATE storage.drives d
+… WHERE d.id = new_root.drive_id` evaluates `WHERE d.id = …` against
+the snapshot, which doesn't contain the drive inserted by `new_drive`.
+The UPDATE matches zero rows; `RETURNING` returns zero rows;
+`new_grant` (which feeds off `drive_updated`) inserts zero role_grants;
+the final SELECT joins on an empty CTE branch and returns nothing.
+Symptoms in tests: drives exist with `root_folder_id IS NULL`, owners
+have no `role_grants` row, `/api/drives` returns `[]`.
+
+The fix is the four-step transaction described above. Rust:
+
+```rust
+let mut tx = pool.begin().await?;
+let drive_id: Uuid = sqlx::query_scalar(
+    r#"INSERT INTO storage.drives (kind, default_for_user, quota_bytes)
+       VALUES ('personal', $1, $2) RETURNING id"#,
+).bind(owner).bind(quota).fetch_one(&mut *tx).await?;
+
+let folder_id: Uuid = sqlx::query_scalar(
+    r#"INSERT INTO storage.folders
+        (name, parent_id, user_id, drive_id, created_by, updated_by)
+       VALUES ('Personal', NULL, $1, $2, $1, $1) RETURNING id"#,
+).bind(owner).bind(drive_id).fetch_one(&mut *tx).await?;
+
+sqlx::query("UPDATE storage.drives SET root_folder_id = $1 WHERE id = $2")
+    .bind(folder_id).bind(drive_id).execute(&mut *tx).await?;
+
+sqlx::query(
+    r#"INSERT INTO storage.role_grants
+        (subject_type, subject_id, resource_type, resource_id, role, granted_by)
+       VALUES ('user', $1, 'drive', $2, 'owner', $1)"#,
+).bind(owner).bind(drive_id).execute(&mut *tx).await?;
+
+tx.commit().await?;
+```
+
+Each statement sees the prior statements' writes (transaction-local
+visibility, not the CTE shared snapshot). FK timing works without
+`DEFERRABLE`: each FK is satisfied at the moment its row is written
+because the referenced rows already exist.
 
 #### Capabilities matrix
 
@@ -258,11 +404,12 @@ Why this matters:
 | Rename | allowed (by the owner) | allowed (by the owner) | allowed (by any owner) |
 | Delete via API | **refused** — deleting this loses all the user's files; the only path is user-delete cascade | allowed (it's just a silo) | allowed (by an owner; CASCADEs the drive's contents) |
 | Default-drive lookup result | this drive | never | never |
-| On user-delete | `ON DELETE CASCADE` via `default_for_user` FK (free) | application-layer cleanup: enumerate via drive_members and delete | member rows referencing the user are dropped; refuse user-delete if any shared drive would lose its last owner |
+| On user-delete | `ON DELETE CASCADE` via `default_for_user` FK (free) | application-layer cleanup: enumerate via `role_grants` (`subject_id=<user> AND resource_type='drive' AND role='owner'`) and delete | role_grants rows referencing the user are dropped; refuse user-delete if any shared drive would lose its last owner |
 | Group ownership | no | no | yes |
 | Per-resource grant outward | yes (subject to drive policies) | yes | yes |
 | Cross-drive move | yes (subject to `forbid_cross_drive_move`) | yes | yes |
 | Kind conversion | no — always default-personal | yes → may be promoted to `kind='shared'` later (drops the single-user restriction, picks up members) | no |
+| Change `quota_bytes` | **OxiCloud admin only** (not the drive owner — §7) | **OxiCloud admin only** | **OxiCloud admin only** |
 
 ### 4. Roles → permission bundles
 
@@ -273,7 +420,7 @@ expansion:
 |---|---|
 | `viewer` | `Read` |
 | `editor` | `Read`, `Create`, `Update`, `Comment` |
-| `owner`  | `Read`, `Create`, `Update`, `Comment`, `Delete`, `Share`, *and* drive-level admin (rename, edit policies, manage members, change quota) |
+| `owner`  | `Read`, `Create`, `Update`, `Comment`, `Delete`, `Share`, *and* drive-level admin (rename, edit policies, manage members) |
 
 ### 5. Permission resolution — additive over `role_grants`
 
@@ -305,16 +452,16 @@ against the same table.
 
 | Event | Behaviour |
 |---|---|
-| New internal user registers | Auto-create a default personal drive (`kind='personal'`, `name='Personal'`, `default_for_user=<new_user>`, `quota_bytes=<OXICLOUD_DEFAULT_QUOTA_BYTES>`), insert the single `drive_members (drive_id, user, <user_id>, owner)` row. |
+| New internal user registers | Auto-create a default personal drive (`kind='personal'`, `default_for_user=<new_user>`, `quota_bytes=<OXICLOUD_DEFAULT_QUOTA_BYTES>`) + its root folder (`name='Personal'`, `parent_id=NULL`, drive_id pinned) + the Owner role_grant (`role_grants(subject_type='user', subject_id=<user>, resource_type='drive', resource_id=<drive>, role='owner')`) — **all four writes in one CTE statement** (§3), atomic against server crash. |
 | External user invited (magic-link only) | **No personal drive created.** External users are grant-only recipients with no storage. |
 | External user converts to internal (future flow) | Default personal drive created at conversion time. |
-| User deleted | **Default** personal drive cascade-deletes via `ON DELETE CASCADE` on `default_for_user`. **Secondary** personal drives (`kind='personal' AND default_for_user IS NULL` and whose sole `drive_members` row points at the user) are deleted by an application-layer pass in the same transaction. Member rows referencing the deleted user are removed from all shared drives. If a removal would leave a shared drive with zero owners, deletion is refused — admin must transfer first. |
+| User deleted | **Default** personal drive cascade-deletes via `ON DELETE CASCADE` on `default_for_user`. **Secondary** personal drives (`kind='personal' AND default_for_user IS NULL` and whose sole owner `role_grants` row points at the user) are deleted by an application-layer pass in the same transaction. `role_grants` rows referencing the deleted user are removed from all shared drives. If a removal would leave a shared drive with zero owners, deletion is refused — admin must transfer first. |
 | Group deleted | Refuse if the group is a member of any shared drive that would lose its last owner. Admin must transfer or remove the group's role from those drives first. (Groups can't be members of personal drives.) |
 | Add member to personal drive | Refuse. Personal drives are single-user — collaborate via per-resource grants or by moving content into a shared drive. |
 | Remove sole owner of personal drive | Refuse. The only deletion path for a personal drive is user-deletion via cascade. |
 | Delete personal drive | Refuse from the API. Only ON DELETE CASCADE (user deletion) drops it. |
-| Rename personal or shared drive | Allowed for any owner-role caller. `name` is a label only. |
-| Remove last owner of shared drive | Refuse — drive must always have ≥1 owner. App-layer check on `DELETE FROM drive_members`. |
+| Rename personal or shared drive | Allowed for any owner-role caller. The drive's display name lives on its root folder (§3) — rename via `PATCH /api/folders/<root_folder_id>`, not a drive-specific endpoint. |
+| Remove last owner of shared drive | Refuse — drive must always have ≥1 owner. App-layer check on `DELETE FROM role_grants WHERE resource_type='drive' AND resource_id=$drive AND role='owner'`. |
 
 ### 7. Quota model
 
@@ -335,6 +482,38 @@ After the cutover:
 `used_bytes` is maintained incrementally on every file insert/delete
 (plus a periodic reconciliation job to fix drift, similar to the
 existing per-user accounting).
+
+#### Quota mutation is OxiCloud-admin only
+
+Changing `drives.quota_bytes` is **not** in the drive `owner` role
+bundle (§4). It requires the tenant-level OxiCloud admin role
+(`auth.users.role = 'admin'`), checked at
+`PATCH /api/admin/drives/{id}/quota` — the only callsite that
+mutates the column. Drive owners can rename, edit policies, and
+manage members; they cannot self-grant capacity.
+
+Why this seam matters:
+
+- **Resource allocation is a tenant concern, not a drive
+  concern.** Storage bytes are a finite system resource the
+  operator pays for. The drive owner is empowered over the
+  drive's *use*; the admin is empowered over its *budget*. Same
+  separation that exists today between a user and the operator
+  who set `OXICLOUD_DEFAULT_QUOTA_BYTES`.
+- **Privilege-escalation seam closed.** Without this carve-out,
+  any user with a personal drive (= every internal user) could
+  raise their own quota by virtue of being its sole owner —
+  trivially defeating the quota system.
+- **Shared-drive coherence.** A shared drive's quota is set by
+  the operator at provisioning; subsequent capacity requests go
+  through the admin, not the drive's group owners. Keeps the
+  capacity decision auditable and out of intra-team politics.
+
+The admin endpoint is the same surface the operator uses today to
+change `auth.users.storage_quota_bytes`; D4 simply re-targets the
+write at `storage.drives.quota_bytes`. Audit log emits
+`drive.quota_changed` with `granted_by=<admin_user_id>` and the
+old/new values, mirroring the existing user-quota change event.
 
 **Chunk dedup vs per-drive quota.** With the CDC chunk store landed
 in v0.7.0 (see `delta_upload_service`, `upload_ingest`, instant
@@ -479,34 +658,57 @@ discriminator is the literal segment (`files` vs `drives`), never
 the value of `<x>`. A user happening to have a UUID-shaped username
 is no longer a problem.
 
-### 10. Storage paths — wrapper folder retired
+### 10. Storage paths — wrapper folder becomes the drive's root folder
 
 Today `storage.folders.path` is e.g. `My Folder - admin/Docs`. The
 "My Folder - admin" wrapper is the user's home folder, created at
 registration via `format!("My Folder - {}", username)`.
 
-Post-drives, **the wrapper goes away**. The drive itself is the
-root; folders and files that used to live inside the wrapper sit
-directly under the drive with no intermediate folder:
+Post-drives, **the wrapper isn't deleted — it's *adopted* as the
+drive's root folder** (§3). The drive row is created alongside it
+and points at it via `drives.root_folder_id`. The wrapper's row
+survives the migration; only its `name` is updated.
 
 ```
-Drive "Personal" (uuid=…, kind=personal, owner=admin) ← was the "My Folder - admin" wrapper
-├── Docs/
-└── aa.pdf
+Drive (uuid=…, kind=personal, default_for_user=admin)
+└── root folder (parent_id=NULL, drive_id=<drive_uuid>, name="Personal")  ← was "My Folder - admin"
+    ├── Docs/
+    └── aa.pdf
 ```
 
-Same for shared drives — they already had no wrapper:
+Shared drives follow the same shape — drive + root folder + content
+underneath:
 
 ```
-Drive "Engineering" (uuid=…, kind=shared, owners=group:engineering)
-├── Specs/
-├── Roadmap.md
-└── archive/
+Drive (uuid=…, kind=shared, owners=group:engineering)
+└── root folder (parent_id=NULL, drive_id=<drive_uuid>, name="Engineering")
+    ├── Specs/
+    ├── Roadmap.md
+    └── archive/
 ```
 
-The two surfaces share one rule: **drive root = `parent_id IS NULL`
-within the drive's `drive_id`**. The "personal vs shared" branch
-disappears from path resolution — both kinds resolve the same way.
+One rule, one model: **every drive has exactly one folder where
+`parent_id IS NULL` AND `drive_id = <the drive>`**.
+
+#### Why this is a better model
+
+Three things converge:
+
+1. **No API duality.** Folder creation is always `POST /api/folders
+   { name, parent_id: <id> }`. There's no polymorphic "create at
+   drive vs in folder" branch — the drive's root folder is just
+   another folder id from the client's perspective. The `parent_id`
+   field that exists today carries over unchanged.
+2. **No path-prefix rewrite migration.** The wrapper row stays; it's
+   renamed to its drive's canonical name (`"Personal"` for the
+   default, the original sibling-root name for secondaries). The
+   BEFORE-UPDATE path trigger fires on the rename and the cascade
+   trigger automatically rewrites every descendant's `path` /
+   `lpath` — no per-row UPDATE in the migration. The net cost is
+   one UPDATE per drive plus the trigger's cascade.
+3. **No "this user lost their drive" failure mode.** Migration is
+   safe even mid-flight — the wrapper row never disappears, just
+   gains a drive_id pointer above it.
 
 #### Why this is client-safe
 
@@ -519,22 +721,48 @@ The wrapper was already invisible to WebDAV / NC clients pre-drive:
 - Native `/webdav/<path>` was implicitly chrooted to the user's
   home by `resolve_webdav_path`. Same story.
 
-So URL-level back-compat is preserved trivially — clients keep
-asking for `/remote.php/dav/files/admin/Docs/foo.pdf`, the
-resolver no longer prepends the wrapper, and the storage row's
-path is now `Docs/foo.pdf` instead of `My Folder - admin/Docs/foo.pdf`.
-Net effect on the wire: zero.
+Post-migration the resolver chroot becomes `<drive_root_folder.path>/`
+instead of `My Folder - <user>/`. The drive's root folder name
+(e.g. `Personal`) replaces the wrapper name in the materialised
+`path` column; the client's URL still doesn't carry it
+because the resolver still chroots before talking to storage. Net
+effect on the wire: zero.
 
-#### Why this is a better model
+#### Uniqueness constraints become drive-scoped
 
-The original plan kept the wrapper "for back-compat" but it has
-no value beyond the storage layer (clients never see it, the
-filesystem mirror is happy either way). Keeping it forced path
-resolution to always know whether the caller is in a personal or
-shared drive and conditionally prepend a segment. Dropping it
-collapses that branch and makes the personal-vs-shared distinction
-purely a metadata concern (kind, quota source, member shape) —
-**not** a path-shape concern.
+Pre-drive, two indexes enforce "no duplicate folder names under the
+same parent for the same user":
+
+```sql
+CREATE UNIQUE INDEX idx_folders_unique_name
+    ON storage.folders(parent_id, name, user_id)
+    WHERE NOT is_trashed AND parent_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_folders_unique_name_root
+    ON storage.folders(name, user_id)
+    WHERE NOT is_trashed AND parent_id IS NULL;
+```
+
+Both move from `user_id`-scoped to `drive_id`-scoped:
+
+```sql
+CREATE UNIQUE INDEX idx_folders_unique_name
+    ON storage.folders(parent_id, name, drive_id)
+    WHERE NOT is_trashed AND parent_id IS NOT NULL;
+CREATE UNIQUE INDEX idx_folders_unique_name_root
+    ON storage.folders(name, drive_id)
+    WHERE NOT is_trashed AND parent_id IS NULL;
+```
+
+This is a **correctness improvement**, not just a migration concession.
+The semantic users expect is "no duplicate names *within a drive*"
+— a folder named "Reports" in your Personal drive shouldn't preclude
+another "Reports" in a shared "Team" drive. The user-scoped
+constraint forbade that. The drive-scoped constraint allows it.
+
+For the root variant: post-migration each drive has exactly one
+`parent_id IS NULL` row (its root folder), so `(name, drive_id)` is
+trivially unique. The index is still worth keeping as
+defence-in-depth.
 
 #### Sibling root folders also become drives
 
@@ -551,23 +779,26 @@ Post-migration, the model has to absorb them. Rule:
 - For each user, find every row with `parent_id IS NULL AND user_id
   = <this user>`.
 - The one named `My Folder - <username>` becomes the **default
-  personal drive**: `kind='personal'`,
-  `default_for_user=<user>`, sole member = the user.
+  personal drive's root folder**: a new drive row is created with
+  `kind='personal'`, `default_for_user=<user>`, the existing folder
+  row gets a `drive_id` pointer (and the wrapper's name is updated
+  to `"Personal"`), and `drives.root_folder_id` points back at it.
+  Sole `role_grants` row: Owner, subject=`<user>`.
 - Every **other** sibling becomes a fresh **secondary personal
-  drive**: `kind='personal'`, `default_for_user=NULL`, sole
-  member = the user, name carried over from the folder's `name`
-  column, quota initialised from the user's quota
-  (`auth.users.storage_quota_bytes`) — same default as the
-  user's primary personal drive. Membership rules from §2 apply:
-  the user cannot invite co-owners while the drive remains
-  personal. To open the silo up, the user can later **convert**
-  the secondary personal to `kind='shared'` (an
-  application-layer operation that flips the kind and lifts the
-  single-user restriction so the membership API can add other
-  users / groups).
-- The folder row is deleted (the drive replaces it as the root).
-  Its children get their `parent_id` set to `NULL` *within their
-  new `drive_id`*.
+  drive's root folder**: a new drive row with `kind='personal'`,
+  `default_for_user=NULL`, the existing folder row gets its
+  `drive_id` set and *keeps its name* (`Archive`, `2024 Projects`,
+  whatever), quota initialised from the user's quota
+  (`auth.users.storage_quota_bytes`) — same default as the user's
+  primary personal drive. Membership rules from §2 apply: the user
+  cannot invite co-owners while the drive remains personal. To open
+  the silo up, the user can later **convert** the secondary
+  personal to `kind='shared'` (an application-layer operation that
+  flips the kind and lifts the single-user restriction so the
+  membership API can add other users / groups).
+- **No folder row is deleted.** The wrapper rows survive the
+  migration as drive root folders; only their `drive_id` is set and
+  (for the default-Personal case) their `name` is updated.
 
 The chroot POC's "pick a drive at login" picker on
 `feat/nextcloud-drive` already produces the right shape for this:
@@ -918,79 +1149,99 @@ every storage query. We phase it for safety:
 
 ### Phase A — additive (PR D0)
 
-1. Create `storage.drives` and `storage.drive_members`.
+1. Create `storage.drives` (no `name` column — see §3; has
+   `root_folder_id uuid NULL` populated in step 3). **No
+   `storage.drive_members` table** — membership lives in
+   `storage.role_grants` (created in D-Prep) as
+   `resource_type='drive'` rows.
 2. Add `drive_id uuid NULL` to `storage.folders` and `storage.files`.
-3. **Per-user root-folder sweep**: for each internal user, list
-   every `storage.folders` row where `parent_id IS NULL AND
+3. **Per-user root-folder adoption sweep**: for each internal user,
+   list every `storage.folders` row where `parent_id IS NULL AND
    user_id = <this user>`. Exactly one is expected to be
    `My Folder - <username>`; any extras are SQL-created siblings
-   (see §10).
+   (see §10). Each row is **adopted in place** as a drive's root
+   folder — no row is deleted, no descendant `parent_id` changes,
+   no path-prefix strip across the whole tree.
    - The `My Folder - <username>` row → becomes the **default
-     personal drive**: `INSERT INTO storage.drives (name='Personal',
-     kind='personal', default_for_user=<user>, quota_bytes=<user.storage_quota_bytes>)`
-     and insert one `(drive_id, user=<user>, role='owner')`
-     member row.
+     personal drive's root folder**. In one CTE statement per
+     user (same shape as §3's `create_personal_drive`):
+     - INSERT into `storage.drives` with `kind='personal'`,
+       `default_for_user=<user>`, `quota_bytes=<user.storage_quota_bytes>`
+       (no `name` column).
+     - UPDATE the wrapper folder row: set `drive_id=<new drive>`
+       and `name='Personal'` (renames the wrapper to the canonical
+       default name; the BEFORE-UPDATE `path` trigger fires and
+       cascades the new name down every descendant via the
+       existing AFTER-UPDATE cascade trigger — no per-row UPDATE
+       in the migration script).
+     - UPDATE `storage.drives` to set `root_folder_id=<wrapper row id>`.
+     - INSERT one `role_grants` row: subject=`<user>`,
+       `resource_type='drive'`, `resource_id=<new drive>`,
+       `role='owner'`.
    - Every other sibling row → becomes a fresh **secondary
-     personal drive**: `kind='personal'`, `default_for_user=NULL`,
-     name carried over from the folder's `name`,
-     `quota_bytes=<user.storage_quota_bytes>`, and one
-     `(drive_id, user=<user>, role='owner')` member row.
-     Membership rules from §2 apply (single-owner, no `add_member`);
-     the user can later promote one to `kind='shared'` to invite
-     collaborators.
-4. **Promote children, drop the wrapper**: for every folder/file
-   row that has `parent_id = <a root row from step 3>`, set
-   `drive_id = <that root's new drive id>` and `parent_id = NULL`
-   (the drive itself is the new root, not a folder). Then DELETE
-   the root folder rows from step 3 — they no longer exist as
-   folders, the drive replaces them.
-5. **Cascade `drive_id` down the tree** — for every remaining
-   folder/file row, set `drive_id` by walking the ancestry to
-   whichever root the row descends from. After this step every
-   row has the same `drive_id` as its `parent_id`'s row, which
-   chains up to a drive set in step 3/4.
-6. **Full path-metadata reconstruction**. The `path` column on
-   **every** row in `storage.folders` and `storage.files` gets
-   rewritten. For rows that descended from `My Folder - <username>`,
-   strip that prefix; for rows that descended from a sibling root,
-   strip that sibling's `name`. The path column now contains only
-   the in-drive path (e.g. `Docs/foo.pdf`, never
-   `My Folder - admin/Docs/foo.pdf`).
-   - **This is the bulk of D0's runtime cost.** Personal-drive
-     scope = every folder/file the user owns. A 100k-file user
-     gets 100k UPDATEs. Use a single `UPDATE … WHERE drive_id =
-     <id>` per drive, not a row-at-a-time loop. The ltree-path
-     change is what every downstream subsystem keys off, so doing
-     this in one transaction per drive (not per row) is also a
-     correctness boundary.
-   - **Downstream caches and indexes** — audit each for path or
-     path-derived keys:
+     personal drive's root folder**, same four-write CTE shape
+     except: `default_for_user=NULL`, no `name` change (the
+     sibling keeps its original name), and the Owner grant points
+     at the same user. Membership rules from §2 apply
+     (single-owner, no `add_member`); the user can later promote
+     one to `kind='shared'` to invite collaborators.
+4. **Cascade `drive_id` down the tree** — for every folder/file
+   row, set `drive_id` by walking the ancestry up to whichever
+   adopted root the row descends from. After this step every row
+   has the same `drive_id` as its `parent_id`'s row, which chains
+   up to a root folder whose `drive_id` was set in step 3.
+   Reuse the existing ltree-aware recursive helper
+   (`storage.copy_folder_tree`-style descent) — single
+   `UPDATE … WHERE` per drive, not a row-at-a-time loop.
+5. **No bulk path rewrite.** The `path` column on descendants is
+   untouched by this migration. The wrapper rename in step 3
+   (`My Folder - admin` → `Personal`) is the only path-affecting
+   change; the BEFORE-UPDATE folder trigger rewrites the wrapper
+   row's own `path` / `lpath`, and the AFTER-UPDATE cascade
+   trigger propagates the new path prefix to every descendant
+   automatically.
+   - **Downstream caches and indexes** — most are unaffected
+     because path *content* changes only inside the renamed
+     wrapper segment (descendants reflect "Personal/…" instead of
+     "My Folder - admin/…"). Audit:
      - **Tantivy content index (§11)** — the index does NOT
        store paths (see `tantivy_content_index.rs`: indexed
        fields are `file_id`, `user_id`, `name` (basename only),
-       `content`. No `path` field, the wrapper folder name was
-       never a term). So the wrapper removal alone requires no
-       reindex. The reindex §11 calls for is driven by the
-       schema gaining `drive_id` and the query filter pivoting
-       from `user_id` to `drive_id` — NOT by the path rewrite.
-       Same migration window, but for a different reason.
-     - **Thumbnail cache** — if keyed by path rather than
-       file_id, invalidate; preferably switch to file_id-keyed
-       during this migration so the issue doesn't recur. Audit
-       before D0 starts.
+       `content`. No `path` field). Reindex IS still required —
+       not because of paths but because the schema gains
+       `drive_id` and the query filter pivots from `user_id` to
+       `drive_id`. Same migration window, different reason.
+     - **Thumbnail cache** — file_id-keyed: unaffected by the
+       wrapper rename. Path-keyed entries (if any) invalidate on
+       any path change in the wrapper; flush as a precaution and
+       switch to file_id keying during this migration if not
+       already done.
      - **Folder ETag queue (`async_tree_etag_queue`,** see Open
-       Question 8) — flush or recompute; ETags derived from old
-       paths are stale.
+       Question 8) — recompute. The wrapper rename touches the
+       wrapper's own ETag at minimum; ancestors-of-ancestors
+       below the wrapper are structurally unchanged.
      - **Recent-items / favorites** — referenced by file_id, not
-       path; probably fine. Verify.
+       path; unaffected.
    - **On-disk storage mirror** — see Open Question 10. If the
-     filesystem layout is path-mirrored, every file moves on
-     disk too; if content-addressable, the FS is untouched.
-     Audit before D0 starts.
-7. Verify: every row has `drive_id IS NOT NULL`, no row has
-   `parent_id` pointing at a non-existent folder, no `path` value
-   contains the legacy `My Folder - ` prefix.
-8. Add `NOT NULL` constraint on `drive_id`.
+     filesystem layout mirrors `path`, the wrapper directory
+     itself is renamed (one `mv`) and the descendant directories
+     don't move; the rename is atomic on the filesystem. If
+     content-addressable, the FS is untouched.
+6. Verify: every row has `drive_id IS NOT NULL`; every drive has
+   `root_folder_id IS NOT NULL` and pointing at a real folder row
+   whose `parent_id IS NULL` and whose `drive_id` matches the
+   drive's id (the 1:1 invariant from §3); no row has `parent_id`
+   pointing at a non-existent folder.
+7. Add `NOT NULL` constraints: `drive_id` on `storage.folders`
+   and `storage.files`. `root_folder_id` on `storage.drives`
+   stays NULLable at the column level (§3 explains why — the
+   atomic CTE writes NULL on the drive INSERT and populates the
+   column with an UPDATE later in the same statement; a column-
+   level `NOT NULL` would refuse the initial INSERT). The
+   invariant "every drive has a root folder" is enforced by the
+   CTE being the only creation path, not by a constraint.
+   Verification step 6 checks the invariant on the populated
+   dataset; ongoing enforcement is application-layer.
 
 **Keep `user_id`** on resources alongside `drive_id` for the entire
 Phase A release cycle. Code is updated to read `drive_id` everywhere;
@@ -1129,18 +1380,26 @@ place on `storage.files` / `storage.folders`, which already carry
    not.
 
 10. **On-disk storage mirror — does the file path under
-    `OXICLOUD_STORAGE_PATH` change too?** Phase A step 6 strips
-    the `My Folder - <username>/` prefix from `storage.folders.path`
-    / `storage.files.path` columns. If the on-disk layout mirrors
-    these paths (`<storage>/<user_id>/My Folder - admin/Docs/foo.pdf`),
-    the migration also has to `mv` every file on disk. If on-disk
-    is content-addressable (BLAKE3-keyed), the columns can be
-    rewritten without touching the filesystem. **Audit the
-    storage adapter before starting D0** and decide whether the
-    migration script:
-    - just renames the path columns (CAS layout — cheap), or
-    - renames the path columns AND issues a `mv` per file
-      (path-mirrored layout — expensive on big instances).
+    `OXICLOUD_STORAGE_PATH` change too?** Phase A step 3 renames
+    the wrapper folder row (`My Folder - admin` → `Personal`) for
+    each default personal drive; the AFTER-UPDATE trigger
+    rewrites descendant `storage.folders.path` /
+    `storage.files.path` values automatically (no bulk UPDATE in
+    the migration script). If the on-disk layout mirrors these
+    paths (`<storage>/<user_id>/My Folder - admin/Docs/foo.pdf`),
+    the migration ALSO has to rename the wrapper directory on
+    disk — **but only the wrapper directory itself**, one `mv`
+    per drive, atomic on the filesystem; no descendant `mv`
+    needed. If on-disk is content-addressable (BLAKE3-keyed),
+    the columns can be rewritten without touching the filesystem
+    at all. **Audit the storage adapter before starting D0** and
+    decide whether the migration script:
+    - just lets the trigger rewrite the path columns (CAS layout
+      — cheap), or
+    - rewrites the path columns AND issues a single `mv` per
+      drive on disk (path-mirrored layout — still cheap; only
+      the wrapper directory moves, the subtree comes along for
+      free).
     The blob store is content-addressable as of v0.7.0 so most
     file content lives under `.blobs/<hash[..2]>/<hash>` and is
     already wrapper-agnostic; the concern is only the
@@ -1186,11 +1445,13 @@ place on `storage.files` / `storage.folders`, which already carry
   check uses this to resolve group-owner subjects.
 - **`folder_service::create_home_folder`** at
   `src/application/services/folder_service.rs:644` is where the
-  per-user wrapper folder is created today. Post-migration this
-  function **goes away** — there is no wrapper folder anymore. The
-  user-create lifecycle hook now creates a Drive row directly and
-  inserts the owner-role member row. The lifecycle path is the same;
-  the work it does shrinks.
+  per-user wrapper folder is created today. Post-migration the
+  function is **replaced** by a single `create_personal_drive`
+  call against `DriveRepository` that runs the §3 atomic CTE:
+  drive + root folder (named "Personal", `parent_id=NULL`,
+  `drive_id` pinned) + Owner `role_grants` row, all in one SQL
+  statement. The lifecycle path is the same; the work moves to
+  the drive repository.
 - **NC path resolver `nc_to_internal_path`** at
   `src/interfaces/nextcloud/webdav_handler.rs:51` and the native
   resolver `resolve_webdav_path` at
@@ -1198,11 +1459,12 @@ place on `storage.files` / `storage.folders`, which already carry
   callsites that learn about drives. Both gain a "drive context"
   parameter resolved from the URL prefix (`/files/<u>/` or
   `{user}~{uuid}` for NC; `/webdav/` or `/webdav/drives/<uuid>/`
-  for native). **Neither resolver prepends `My Folder - <user>/`
-  anymore** — the storage path IS the in-drive path. Both
-  functions also get simpler, not more complex, despite gaining
-  the drive parameter (the personal-vs-shared branch is now a
-  metadata lookup, not a path-shape decision).
+  for native). Each resolves to the drive's root folder via
+  `drives.root_folder_id` and prepends that folder's `path`
+  (after the migration this is `Personal/…` for default personal
+  drives, the original sibling-root name for secondaries, the
+  shared-drive root name for shared drives). The personal-vs-shared
+  branch is now a single metadata lookup, not a path-shape decision.
 - **`MagicLinkInviteService`** and the share-notification pipeline
   (`RecipientNotificationService`) need the new policy checks
   (`forbid_external_sharing`, `forbid_sharing`) wired in at their
@@ -1258,12 +1520,19 @@ test`), **(c)** `cargo fmt && cargo clippy --all-features
   cleanly with the expected `DomainError`.
 - **Migration round-trip**: roll forward against a populated DB →
   every existing folder/file row has `drive_id` set (no NULLs);
-  every user has exactly one drive with `default_for_user` set;
-  sibling root folders became secondary `kind='personal'` drives;
-  every `storage.folders.path` and `storage.files.path` value has
-  the `My Folder - <username>/` prefix stripped → roll back via
-  `sqlx migrate revert` → `drive_id` column gone, `user_id` intact
-  thanks to dual-write, original paths recovered.
+  every drive has `root_folder_id IS NOT NULL` and the row it
+  points at has `parent_id IS NULL AND drive_id = <self>` (the
+  1:1 invariant from §3); every user has exactly one drive with
+  `default_for_user` set; sibling root folders became secondary
+  `kind='personal'` drives whose root folders kept their original
+  names; default-personal wrapper folders were renamed from
+  `My Folder - <username>` to `Personal` and the AFTER-UPDATE
+  trigger cascaded the rename down the descendant `path` values
+  → roll back via `sqlx migrate revert` → `drive_id` /
+  `root_folder_id` columns gone, `user_id` intact thanks to
+  dual-write, wrapper folder names restored to
+  `My Folder - <username>` (and the trigger cascade restores
+  descendant paths).
 - **Storage check**: post-migration `bash tests/api/storage_cleanup_check.sh`
   still reports a clean tree (no orphans).
 - **Tantivy reindex**: every indexed doc carries a `drive_id`;
@@ -1498,6 +1767,13 @@ static/css/components/driveSwitcher.css     ← D1
   the `auth.app_passwords.drive_id` binding — see §9).
 - **Wrapper folder** — historical name for
   `My Folder - <username>`, the folder created at registration
-  via `format!("My Folder - {}", username)`. **Retired** in the
-  Drive migration: drive root replaces it. Every reference to
+  via `format!("My Folder - {}", username)`. **Adopted** in the
+  Drive migration: the same folder row is renamed to `Personal`
+  and reused as the default personal drive's root folder
+  (`drives.root_folder_id`). No row is deleted; the wrapper IS
+  the root folder under the new model. Every reference to
   "wrapper" in older comments / docs is by definition pre-Drive.
+- **Drive's root folder** — the folder row pointed at by
+  `storage.drives.root_folder_id`. `parent_id IS NULL`,
+  `drive_id` = the drive. Every drive has exactly one (§3); the
+  drive's display name lives on this folder's `name` column.

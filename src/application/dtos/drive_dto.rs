@@ -8,7 +8,8 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 use uuid::Uuid;
 
-use crate::domain::entities::drive::{Drive, DriveKind};
+use crate::domain::entities::drive::DriveKind;
+use crate::domain::repositories::drive_repository::DriveWithRootName;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, ToSchema, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -34,12 +35,22 @@ impl From<DriveKind> for DriveKindDto {
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct DriveDto {
     pub id: Uuid,
+    /// Display name. Sourced from `storage.folders.name` of the row
+    /// pointed at by `root_folder_id` (drives have no `name` column —
+    /// see docs/plan/drive.md §3). The wire shape is unchanged from
+    /// the client's perspective.
     pub name: String,
     pub kind: DriveKindDto,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_for_user: Option<Uuid>,
+    /// The drive's mount-point folder. Folder API calls
+    /// (`POST /api/folders { parent_id: <root_folder_id> }`,
+    /// `PATCH /api/folders/<root_folder_id>` to rename) use this id —
+    /// no polymorphic "create at drive root" surface needed.
+    pub root_folder_id: Uuid,
     /// Storage cap in bytes. `None` means "no quota" (admin override /
-    /// future system drives).
+    /// future system drives). Mutation is OxiCloud-admin only — drive
+    /// owners cannot self-grant capacity.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quota_bytes: Option<i64>,
     /// Running total of bytes consumed. Maintained incrementally in D4;
@@ -53,18 +64,19 @@ pub struct DriveDto {
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-impl From<Drive> for DriveDto {
-    fn from(d: Drive) -> Self {
+impl From<DriveWithRootName> for DriveDto {
+    fn from(d: DriveWithRootName) -> Self {
         Self {
-            id: d.id,
-            name: d.name,
-            kind: d.kind.into(),
-            default_for_user: d.default_for_user,
-            quota_bytes: d.quota_bytes,
-            used_bytes: d.used_bytes,
-            policies: d.policies,
-            created_at: d.created_at,
-            updated_at: d.updated_at,
+            id: d.drive.id,
+            name: d.root_folder_name,
+            kind: d.drive.kind.into(),
+            default_for_user: d.drive.default_for_user,
+            root_folder_id: d.drive.root_folder_id,
+            quota_bytes: d.drive.quota_bytes,
+            used_bytes: d.drive.used_bytes,
+            policies: d.drive.policies,
+            created_at: d.drive.created_at,
+            updated_at: d.drive.updated_at,
         }
     }
 }

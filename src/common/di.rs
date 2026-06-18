@@ -1202,7 +1202,6 @@ impl AppServiceFactory {
                     .with_hook(Arc::new(
                         crate::application::services::folder_service::PersonalDriveLifecycleHook::new(
                             drive_repo.clone(),
-                            apps.folder_service_concrete.clone(),
                             authorization.clone(),
                         ),
                     ))

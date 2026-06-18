@@ -1,24 +1,28 @@
 -- ════════════════════════════════════════════════════════════════════════════
--- D0 / M2 — Drive backfill: create drives + stamp drive_id + provenance
+-- D0 / M2 — Drive backfill: adopt wrappers + stamp drive_id + provenance
 -- ════════════════════════════════════════════════════════════════════════════
--- Second of the D0 migration trio. Half (1) of the §A backfill — the safe,
--- focused half:
+-- Second of the D0 migration trio. Implements §A of the migration plan in
+-- docs/plan/drive.md — the "rename-and-adopt" model:
 --
---   * For every internal user with a root folder, create a Personal drive.
---   * The folder literally named `My Folder - <username>` becomes the
---     user's default Personal drive (`default_for_user = <uid>`).
---   * Any sibling root folders become secondary Personal drives
---     (`default_for_user = NULL`, name carried over verbatim).
+--   * For every internal user with a root folder, create a Personal drive
+--     (metadata only — no `name` column; the display name lives on the
+--     root folder).
+--   * The folder literally named `My Folder - <username>` is **adopted
+--     in place** as the user's default Personal drive's root folder:
+--     `drives.root_folder_id` points at it, its `drive_id` is stamped,
+--     and it is renamed to `Personal`. The wrapper row is NOT deleted;
+--     descendants are NOT promoted. The AFTER-UPDATE folder cascade
+--     trigger rewrites descendant `path`/`lpath` automatically when the
+--     wrapper rename fires — no bulk path UPDATE in this migration.
+--   * Any sibling root folders become secondary Personal drives'
+--     root folders (`default_for_user = NULL`, original folder name
+--     preserved). Same adoption pattern: drive_id stamped, drives.root_folder_id
+--     wired, no rename.
 --   * One owner role_grants row per new drive.
 --   * Every existing folder/file row gets a `drive_id` (cascaded down the
 --     ltree from the wrapper).
 --   * Every existing folder/file row gets `created_by` and `updated_by`
 --     backfilled from the existing `user_id` column.
---
--- The aggressive half (drop the wrapper folder, rewrite path columns,
--- strip the `My Folder - <username>/` prefix from every path/lpath value)
--- lands in M2b — kept separate so the tree-shape rewrite can be reviewed
--- in isolation.
 --
 -- External users (`auth.users.is_external = TRUE`) are intentionally
 -- skipped — they have no root folder of their own, only role_grants
@@ -52,6 +56,49 @@ BEGIN
             'WHERE f.parent_id IS NULL AND NOT f.is_trashed AND lower(f.name) '
             '= ''drives'' AND NOT u.is_external;',
             bad_count;
+    END IF;
+END $BODY$;
+
+
+-- ── Pre-flight 1b: refuse on rename collision with sibling root 'Personal' ─
+-- The default-wrapper rename in step 4 changes `My Folder - <username>` →
+-- `Personal`. The pre-M3 folder unique index is user_id-scoped
+-- (`(name, user_id) WHERE parent_id IS NULL`), so a user who already has
+-- a SQL-created sibling root literally named `Personal` would trip the
+-- index when M2 tries to rename the wrapper. Surface the collision now —
+-- operator renames the offending sibling before retrying, then it gets
+-- adopted as a secondary drive with whatever new name it carries.
+
+DO $BODY$
+DECLARE
+    collisions BIGINT;
+BEGIN
+    SELECT count(*) INTO collisions
+    FROM auth.users u
+    JOIN storage.folders wrapper
+      ON wrapper.user_id   = u.id
+     AND wrapper.parent_id IS NULL
+     AND NOT wrapper.is_trashed
+     AND wrapper.name      = 'My Folder - ' || u.username
+    JOIN storage.folders sibling
+      ON sibling.user_id   = u.id
+     AND sibling.parent_id IS NULL
+     AND NOT sibling.is_trashed
+     AND sibling.id        != wrapper.id
+     AND sibling.name      = 'Personal'
+    WHERE NOT u.is_external;
+
+    IF collisions > 0 THEN
+        RAISE EXCEPTION
+            'D0 backfill refused: % user(s) have both a `My Folder - <username>` '
+            'wrapper AND a sibling root named ''Personal''. The wrapper rename '
+            'step would collide on the user_id-scoped folder unique index. '
+            'Rename the offending sibling first. Query to inspect: SELECT u.id, '
+            'u.username FROM auth.users u JOIN storage.folders w ON w.user_id=u.id '
+            'AND w.parent_id IS NULL AND w.name=''My Folder - ''||u.username '
+            'JOIN storage.folders s ON s.user_id=u.id AND s.parent_id IS NULL '
+            'AND s.id!=w.id AND s.name=''Personal'' WHERE NOT u.is_external;',
+            collisions;
     END IF;
 END $BODY$;
 
@@ -173,16 +220,15 @@ BEGIN
 END $BODY$;
 
 
--- ── 2. Insert the drive rows ───────────────────────────────────────────────
--- Default drives carry the i18n-neutral name 'Personal' (renameable
--- later via the drive settings panel). Secondary drives carry their
--- original folder name verbatim.
+-- ── 2. Insert the drive rows (metadata only — no `name` column) ───────────
+-- Drives are pure metadata under the new design (docs/plan/drive.md §3).
+-- The display name lives on the root folder; the wrapper is renamed in
+-- step 4b for default drives and kept as-is for secondaries.
 
 INSERT INTO storage.drives
-    (id, name, kind, default_for_user, quota_bytes)
+    (id, kind, default_for_user, quota_bytes)
 SELECT
     p.new_drive_id,
-    CASE WHEN p.is_default THEN 'Personal' ELSE p.wrapper_name END,
     'personal',
     CASE WHEN p.is_default THEN p.user_id ELSE NULL END,
     p.quota
@@ -199,15 +245,28 @@ SELECT 'user', p.user_id, 'drive', p.new_drive_id, 'owner', p.user_id
 FROM _drive_plan p;
 
 
--- ── 4. Stamp drive_id on each wrapper folder ──────────────────────────────
--- The wrapper still exists as a folder during M2 (the wrapper-drop lives
--- in M2b). Setting drive_id on the wrapper lets the cascade in §5 walk
--- the ltree subtree without needing a separate index.
+-- ── 4. Adopt the wrapper as the drive's root folder ───────────────────────
+-- 4a. Stamp drive_id on each wrapper so the cascade in §5 can walk the
+--     ltree subtree without a separate index.
+-- 4b. Rename the default-drive wrapper from `My Folder - <username>` to
+--     `Personal` (the canonical default name; renameable via the folder
+--     API later). The BEFORE-UPDATE folder path trigger fires on the
+--     rename and the AFTER-UPDATE cascade trigger rewrites every
+--     descendant `path` / `lpath` automatically — no per-row UPDATE here.
+-- 4c. Wire drives.root_folder_id to the wrapper. This is the adoption
+--     step: the wrapper row IS the drive's root folder after M2 (no
+--     wrapper-deletion, no descendant promotion).
 
 UPDATE storage.folders f
-   SET drive_id = p.new_drive_id
+   SET drive_id = p.new_drive_id,
+       name     = CASE WHEN p.is_default THEN 'Personal' ELSE f.name END
   FROM _drive_plan p
  WHERE f.id = p.wrapper_id;
+
+UPDATE storage.drives d
+   SET root_folder_id = p.wrapper_id
+  FROM _drive_plan p
+ WHERE d.id = p.new_drive_id;
 
 
 -- ── 5. Cascade drive_id down the folder tree ──────────────────────────────
@@ -284,6 +343,7 @@ DECLARE
     grantless_drives BIGINT;
     null_folder_drive_id BIGINT;
     null_file_drive_id BIGINT;
+    rootless_drives BIGINT;
 BEGIN
     SELECT count(*) INTO missing_default
     FROM auth.users u
@@ -318,6 +378,29 @@ BEGIN
             'role_grants row. Investigate before declaring the migration '
             'successful.',
             grantless_drives;
+    END IF;
+
+    -- Root-folder adoption invariant (docs/plan/drive.md §3): every
+    -- drive must point at a real folder row whose drive_id closes the
+    -- cycle. The column is NULLable at the type level so the atomic
+    -- CTE can write it mid-statement; this check enforces the data
+    -- invariant after the migration.
+    SELECT count(*) INTO rootless_drives
+    FROM storage.drives d
+    WHERE d.root_folder_id IS NULL
+       OR NOT EXISTS (
+           SELECT 1 FROM storage.folders f
+            WHERE f.id        = d.root_folder_id
+              AND f.drive_id  = d.id
+              AND f.parent_id IS NULL
+       );
+    IF rootless_drives > 0 THEN
+        RAISE EXCEPTION
+            'D0 backfill consistency check failed: % drive(s) have no '
+            'valid root_folder_id (NULL, or pointing at a folder that '
+            'isn''t a root in this drive). Investigate before declaring '
+            'the migration successful.',
+            rootless_drives;
     END IF;
 
     SELECT count(*) INTO null_folder_drive_id

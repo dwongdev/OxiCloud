@@ -43,39 +43,50 @@ psql -v ON_ERROR_STOP=1 -c "
 " >/dev/null
 
 # The OxiCloud server normally provisions a default Personal drive +
-# Owner role_grant on user creation via PersonalDriveLifecycleHook
-# (D0). This script bypasses that pipeline — it INSERTs directly into
-# auth.users — so we mirror the hook's behaviour here. Without it,
-# integration test fixtures that hand-roll INSERTs into storage.files
-# fail with "drive_id not-null violation" (M3 made the column
-# mandatory), and helpers that JOIN auth.users with storage.drives
-# return RowNotFound.
+# its root folder + Owner role_grant on user creation via
+# PersonalDriveLifecycleHook (D0). This script bypasses that pipeline
+# — it INSERTs directly into auth.users — so we mirror the hook's
+# behaviour here. Without it, integration test fixtures that hand-roll
+# INSERTs into storage.files fail with "drive_id not-null violation"
+# (M3 made the column mandatory), and helpers that JOIN auth.users
+# with storage.drives return RowNotFound.
+#
+# Four sequential writes inside one transaction (docs/plan/drive.md §3):
+# drive + root folder + drives.root_folder_id wire-up + Owner role_grant.
+# A single CTE would be more compact but doesn't work — PG's CTE
+# sub-statements share an MVCC snapshot, so a later branch's UPDATE
+# can't match a row inserted by an earlier branch. The transaction
+# form is the production path's shape (DrivePgRepository::create_personal_drive_atomic).
+# Idempotency: skipped on retry by the `default_for_user` precondition.
 echo "[init-schema] provisioning ci-admin's default Personal drive (idempotent)"
 psql -v ON_ERROR_STOP=1 <<'SQL' >/dev/null
-WITH admin AS (
-    SELECT id FROM auth.users WHERE username = 'ci-admin'
-),
-ins_drive AS (
-    INSERT INTO storage.drives (name, kind, default_for_user, quota_bytes)
-    SELECT 'Personal', 'personal', admin.id, NULL
-      FROM admin
-     WHERE NOT EXISTS (
-         SELECT 1 FROM storage.drives d WHERE d.default_for_user = admin.id
-     )
-    RETURNING id, default_for_user
-)
-INSERT INTO storage.role_grants
-    (subject_type, subject_id, resource_type, resource_id, role, granted_by)
-SELECT 'user', ins_drive.default_for_user, 'drive', ins_drive.id, 'owner',
-       ins_drive.default_for_user
-  FROM ins_drive
- WHERE NOT EXISTS (
-     SELECT 1 FROM storage.role_grants g
-      WHERE g.subject_type   = 'user'
-        AND g.subject_id     = ins_drive.default_for_user
-        AND g.resource_type  = 'drive'
-        AND g.resource_id    = ins_drive.id
- );
+DO $$
+DECLARE
+    admin_id   uuid;
+    drive_id   uuid;
+    folder_id  uuid;
+BEGIN
+    SELECT id INTO admin_id FROM auth.users WHERE username = 'ci-admin';
+    IF EXISTS (SELECT 1 FROM storage.drives WHERE default_for_user = admin_id) THEN
+        RETURN;  -- already provisioned, idempotent no-op
+    END IF;
+
+    INSERT INTO storage.drives (kind, default_for_user, quota_bytes)
+    VALUES ('personal', admin_id, NULL)
+    RETURNING id INTO drive_id;
+
+    INSERT INTO storage.folders
+        (name, parent_id, user_id, drive_id, created_by, updated_by)
+    VALUES ('Personal', NULL, admin_id, drive_id, admin_id, admin_id)
+    RETURNING id INTO folder_id;
+
+    UPDATE storage.drives SET root_folder_id = folder_id WHERE id = drive_id;
+
+    INSERT INTO storage.role_grants
+        (subject_type, subject_id, resource_type, resource_id, role, granted_by)
+    VALUES ('user', admin_id, 'drive', drive_id, 'owner', admin_id);
+END
+$$;
 SQL
 
 echo "[init-schema] done"

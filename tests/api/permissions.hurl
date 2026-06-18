@@ -281,12 +281,16 @@ jsonpath "$.items[*].resource.name" not contains "bob-attack-2"
 # WebDAV MKCOL — namespace isolation
 # ═════════════════════════════════════════════════════════════
 # WebDAV requests are isolated per-user by `resolve_webdav_path`
-# (webdav_handler.rs:189). If the requested path doesn't begin
-# with the caller's home folder name ("My Folder - <username>"),
-# the handler silently prefixes the caller's home folder path
-# onto the front. Effect: any WebDAV path a client sends is
-# always resolved INSIDE the caller's own tree, regardless of
-# what they wrote.
+# (webdav_handler.rs:235). If the requested path doesn't begin
+# with the caller's home folder name (the drive's root folder
+# name — "Personal" by default post-D0), the handler silently
+# prefixes the caller's home folder path onto the front. Effect:
+# any WebDAV path a client sends is always resolved INSIDE the
+# caller's own tree, regardless of what they wrote.
+# The test URLs below use "My Folder - <username>" as a path
+# segment that's GUARANTEED not to match any caller's home name
+# (all home folders are "Personal" post-D0), so the resolver's
+# prepend branch always fires.
 #
 # These tests assert the isolation works (regression guard) and
 # that the service-level verify_owner still acts as
@@ -307,8 +311,13 @@ HTTP 201
 
 # ─────────────────────────────────────────────────────────────
 # Step 17 – Positive control: bob MKCOL inside his own home.
+# Uses "Personal" — bob's home folder name post-D0
+# (docs/plan/drive.md §3, the canonical default). The resolver
+# detects the URL already starts with the caller's home name and
+# does NOT prepend again, so the new folder lands directly in
+# bob's home rather than in a fresh intermediate.
 # ─────────────────────────────────────────────────────────────
-MKCOL {{base_url}}/webdav/My%20Folder%20-%20bob/bob-webdav-own
+MKCOL {{base_url}}/webdav/Personal/bob-webdav-own
 Authorization: Bearer {{bob_token}}
 
 HTTP 201

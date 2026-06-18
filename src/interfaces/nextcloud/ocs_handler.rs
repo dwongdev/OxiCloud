@@ -399,10 +399,14 @@ pub async fn handle_search(
     let mut entries: Vec<serde_json::Value> = Vec::new();
 
     // Map file results
+    // TODO(D1): drop the hardcoded "Personal/" prefix and read the
+    // caller's default-drive root folder name from `drives.root_folder_id`
+    // instead. Correct for D0-provisioned default drives; secondary
+    // drives keep their original root name.
     for file in &results.files {
         let display_path = file
             .path
-            .strip_prefix(&format!("My Folder - {}/", user.username))
+            .strip_prefix("Personal/")
             .unwrap_or(&file.path);
         let display_path = format!("/{}", display_path);
 
@@ -427,11 +431,11 @@ pub async fn handle_search(
         }));
     }
 
-    // Map folder results
+    // Map folder results — same TODO(D1) as above.
     for folder in &results.folders {
         let display_path = folder
             .path
-            .strip_prefix(&format!("My Folder - {}/", user.username))
+            .strip_prefix("Personal/")
             .unwrap_or(&folder.path);
         let display_path = format!("/{}", display_path);
 

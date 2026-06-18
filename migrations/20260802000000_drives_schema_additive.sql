@@ -20,7 +20,6 @@
 
 CREATE TABLE IF NOT EXISTS storage.drives (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name                TEXT NOT NULL,
 
     -- Discriminant. Two kinds today; extending the set is a DROP + ADD
     -- CHECK constraint pair (no separate lookup table).
@@ -36,10 +35,24 @@ CREATE TABLE IF NOT EXISTS storage.drives (
     default_for_user    UUID
         REFERENCES auth.users(id) ON DELETE CASCADE,
 
+    -- The drive's mount-point folder. The display name lives here (drives
+    -- have no `name` column — see docs/plan/drive.md §3). NULL at the
+    -- column type level so the atomic creation CTE can INSERT the drive
+    -- row before the root folder exists, then UPDATE this column from
+    -- a later CTE branch within the same statement (a column-level
+    -- NOT NULL would refuse that initial INSERT). The invariant
+    -- "every drive has a root folder" is enforced by the CTE being
+    -- the only creation path, plus the M2 backfill populating this
+    -- column for migrated drives. Code reading this column may treat
+    -- it as Uuid (not Option<Uuid>); a NULL here is a bug.
+    root_folder_id      UUID
+        REFERENCES storage.folders(id) ON DELETE CASCADE,
+
     -- Storage quota in bytes. NULL = no quota (admin override / system
     -- drives). Initial value on personal-drive creation is taken from
     -- the owner's `auth.users.storage_quota_bytes` at the application
-    -- layer.
+    -- layer. **Mutation is OxiCloud-admin only** (docs/plan/drive.md §7) —
+    -- not in the drive `owner` role bundle.
     quota_bytes         BIGINT,
 
     -- Running total of bytes consumed. Maintained by D4's incremental
@@ -59,13 +72,19 @@ CREATE TABLE IF NOT EXISTS storage.drives (
 );
 
 COMMENT ON TABLE storage.drives IS
-    'Drive entity. Top-level container that owns a tree of folders/files; '
-    'membership lives in storage.role_grants with resource_type=''drive''. '
-    'Replaced the per-user My Folder wrapper at D0 (see docs/plan/drive.md).';
+    'Drive entity — pure metadata. The display name and mount point live '
+    'on the root folder (root_folder_id). Membership lives in '
+    'storage.role_grants with resource_type=''drive''. Replaces the '
+    'per-user My Folder wrapper at D0 (see docs/plan/drive.md §3).';
 COMMENT ON COLUMN storage.drives.kind IS
     'personal = single-owner (no add_member); shared = multi-member with full role roster.';
 COMMENT ON COLUMN storage.drives.default_for_user IS
     'Set iff this is the user''s default personal drive. NULL on secondaries and shared drives.';
+COMMENT ON COLUMN storage.drives.root_folder_id IS
+    'Drive''s root folder. NULLable at the column level only so the '
+    'atomic creation CTE can write it mid-statement; populated invariant '
+    'enforced by application. Display name = SELECT name FROM '
+    'storage.folders WHERE id = root_folder_id.';
 COMMENT ON COLUMN storage.drives.policies IS
     'JSONB capability-flag bag; see docs/plan/drive.md §8 §15 for known keys.';
 

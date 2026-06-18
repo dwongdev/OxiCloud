@@ -82,7 +82,11 @@ impl FolderService {
                 Ok(FolderDto::empty())
             }
 
-            async fn get_folder_by_path(&self, _path: &str) -> Result<FolderDto, DomainError> {
+            async fn get_folder_by_path(
+                &self,
+                _path: &str,
+                _user_id: Uuid,
+            ) -> Result<FolderDto, DomainError> {
                 Ok(FolderDto::empty())
             }
 
@@ -293,14 +297,17 @@ impl FolderUseCase for FolderService {
         self.get_folder(id).await
     }
 
-    /// Gets a folder by its path
-    async fn get_folder_by_path(&self, path: &str) -> Result<FolderDto, DomainError> {
-        // Convert the string path to StoragePath
+    /// Gets a folder by its path, scoped to the caller's tree.
+    async fn get_folder_by_path(
+        &self,
+        path: &str,
+        user_id: Uuid,
+    ) -> Result<FolderDto, DomainError> {
         let storage_path = StoragePath::from_string(path);
 
         let folder = self
             .folder_storage
-            .get_folder_by_path(&storage_path)
+            .get_folder_by_path(&storage_path, user_id)
             .await
             .map_err(|e| {
                 DomainError::internal_error(
@@ -766,23 +773,22 @@ use crate::domain::entities::user::User;
 /// when the Owner row is already present.
 pub struct PersonalDriveLifecycleHook {
     drive_repo: Arc<dyn crate::domain::repositories::drive_repository::DriveRepository>,
-    folder_service: Arc<FolderService>,
     // The `AuthorizationEngine` trait isn't `dyn`-compatible (native
     // async-fn-in-trait methods are not object-safe), so we hold the
     // concrete engine. This matches the convention already used by
-    // `AppState.authorization`.
+    // `AppState.authorization`. Only the idempotent-rerun path uses it
+    // now; the create path goes through the repo's atomic CTE which
+    // writes the role_grant inline.
     authorization: Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>,
 }
 
 impl PersonalDriveLifecycleHook {
     pub fn new(
         drive_repo: Arc<dyn crate::domain::repositories::drive_repository::DriveRepository>,
-        folder_service: Arc<FolderService>,
         authorization: Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>,
     ) -> Self {
         Self {
             drive_repo,
-            folder_service,
             authorization,
         }
     }
@@ -792,9 +798,7 @@ impl PersonalDriveLifecycleHook {
     /// trait docstring — they have no resources of their own, only
     /// grants on other users' resources.
     async fn provision_if_needed(&self, user: &User) -> Result<(), DomainError> {
-        use crate::domain::repositories::drive_repository::{
-            CreatePersonalDriveInput, DriveRepositoryError,
-        };
+        use crate::domain::repositories::drive_repository::DriveRepositoryError;
         use crate::domain::services::authorization::{Resource, Role, Subject};
 
         if user.is_external() {
@@ -802,20 +806,19 @@ impl PersonalDriveLifecycleHook {
         }
 
         // Idempotent shortcut: if the user already has a default drive,
-        // nothing to do. Covers re-runs from `on_user_login` plus the
-        // case where `on_user_created` ran successfully but logged in
-        // before reaching the role_grant step (next-login retry lands
-        // here and finds the drive, completing the role_grant if missing).
+        // the atomic CTE already ran on a prior turn. The CTE writes
+        // the Owner role_grant inline, so there's nothing to repair —
+        // but we still re-emit the grant via `set_role` (UPSERT-safe)
+        // to cover the historical case where a pre-CTE provisioning
+        // path partially completed (drive created, grant missing).
         match self.drive_repo.find_default_for_user(user.id()).await {
-            Ok(drive) => {
-                // Drive exists; ensure the Owner role_grant is in
-                // place too. `set_role` is an UPSERT — safe to re-run.
+            Ok(drive_with_name) => {
                 self.authorization
                     .set_role(
                         user.id(),
                         Subject::User(user.id()),
                         Role::Owner,
-                        Resource::Drive(drive.id),
+                        Resource::Drive(drive_with_name.drive.id),
                         None,
                     )
                     .await
@@ -831,49 +834,28 @@ impl PersonalDriveLifecycleHook {
             }
         }
 
-        // Create the drive.
-        let drive = self
+        // One atomic CTE — drive row + root folder ("Personal",
+        // parent_id=NULL, drive_id pinned) + drives.root_folder_id
+        // wire-up + Owner role_grant. Single SQL statement, atomic
+        // against server crash mid-sequence (docs/plan/drive.md §3).
+        let drive_with_name = self
             .drive_repo
-            .create_personal(CreatePersonalDriveInput {
-                name: "Personal".to_owned(),
-                owner_id: user.id(),
-                is_default: true,
-                quota_bytes: Some(user.storage_quota_bytes()),
-            })
+            .create_personal_drive_atomic(user.id(), Some(user.storage_quota_bytes()))
             .await
             .map_err(|e| {
-                DomainError::internal_error("PersonalDriveHook", format!("create_personal: {e}"))
+                DomainError::internal_error(
+                    "PersonalDriveHook",
+                    format!("create_personal_drive_atomic: {e}"),
+                )
             })?;
-
-        // Stamp the Owner role_grant.
-        self.authorization
-            .set_role(
-                user.id(),
-                Subject::User(user.id()),
-                Role::Owner,
-                Resource::Drive(drive.id),
-                None,
-            )
-            .await
-            .map(|_grant| ())?;
-
-        // Provision the wrapper `My Folder - <username>` folder under
-        // the new drive. The wrapper is retained through the D0 dual-
-        // write window (M2b retires it later); without it, existing API
-        // surfaces that assume `GET /api/folders` returns a root folder
-        // (the UI listing, the WebDAV resolver, the Hurl baselines) all
-        // break for newly-provisioned users.
-        self.folder_service
-            .ensure_home_folder(user.id(), drive.id, user.username())
-            .await
-            .map(|_created| ())?;
 
         tracing::info!(
             target: "user_lifecycle",
             hook = "personal_drive",
             user_id = %user.id(),
-            drive_id = %drive.id,
-            "Default personal drive + wrapper folder provisioned"
+            drive_id = %drive_with_name.drive.id,
+            root_folder_id = %drive_with_name.drive.root_folder_id,
+            "Default personal drive + root folder + owner grant provisioned (atomic CTE)"
         );
         Ok(())
     }

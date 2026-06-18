@@ -76,29 +76,39 @@ impl DriveKind {
 
 /// Domain entity for a row in `storage.drives`.
 ///
+/// Drives are pure metadata under the D0 design (docs/plan/drive.md §3):
+/// no `name` column — the display name lives on the root folder pointed
+/// at by `root_folder_id`. Code that needs the name pairs this struct
+/// with a JOIN through `storage.folders`; see the repository's
+/// `DriveWithRootName` view-model.
+///
 /// Field-level constraints are enforced at the SQL layer (CHECK on
 /// `kind`, partial UNIQUE on `default_for_user`). The struct mirrors
 /// the column set 1:1; behaviour beyond field access lives in
-/// `DriveRepository` (D0-5) and `DriveService` (post-D0).
+/// `DriveRepository` and `DriveService` (post-D0).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Drive {
     /// Stable identifier. Generated server-side at creation.
     pub id: Uuid,
-    /// Display name. Renameable by owners; defaults to "Personal" for
-    /// the user's default personal drive, or the original sibling-root
-    /// folder name for secondaries promoted by the D0 backfill.
-    pub name: String,
     /// Discriminant — see [`DriveKind`].
     pub kind: DriveKind,
     /// Set iff this is the user's default personal drive (UNIQUE in SQL
     /// via a partial index `WHERE default_for_user IS NOT NULL`). NULL
     /// on shared drives and on secondary personal drives.
     pub default_for_user: Option<Uuid>,
+    /// The drive's mount-point folder. The column is NULLable in SQL
+    /// only because the atomic creation CTE writes it mid-statement
+    /// (a column-level `NOT NULL` would refuse the initial drive INSERT
+    /// — see docs/plan/drive.md §3). After any successful creation path,
+    /// this is populated; code reading `Drive` may treat it as `Uuid`,
+    /// not `Option<Uuid>`. A NULL at read time is a data-invariant bug.
+    pub root_folder_id: Uuid,
     /// Soft cap on this drive's storage usage, in bytes. `None` means
     /// "no quota" (rare; reserved for admin overrides). The default
     /// initial quota for a fresh personal drive is taken from the
-    /// owner's `auth.users.storage_quota_bytes` at creation time (see
-    /// Open Question 2 in `docs/plan/drive.md`).
+    /// owner's `auth.users.storage_quota_bytes` at creation time.
+    /// **Mutation is OxiCloud-admin only** (docs/plan/drive.md §7) —
+    /// not in the drive `owner` role bundle.
     pub quota_bytes: Option<i64>,
     /// Running total of bytes consumed. Maintained incrementally by
     /// upload/delete paths in D4; on D0 still reflects the pre-Drive

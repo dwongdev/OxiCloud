@@ -709,6 +709,7 @@ impl FolderRepository for MockFolderRepository {
     async fn get_folder_by_path(
         &self,
         _storage_path: &StoragePath,
+        _user_id: Uuid,
     ) -> std::result::Result<Folder, DomainError> {
         unimplemented!()
     }
