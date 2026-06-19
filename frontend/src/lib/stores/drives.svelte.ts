@@ -46,6 +46,12 @@ class DrivesStore {
 		if (!id) return null;
 		return this.drives.find((d) => d.root_folder_id === id) ?? null;
 	}
+
+	/** Drive whose own UUID matches `id`, or null. */
+	findById(id: string | null | undefined): Drive | null {
+		if (!id) return null;
+		return this.drives.find((d) => d.id === id) ?? null;
+	}
 }
 
 export const drives = new DrivesStore();

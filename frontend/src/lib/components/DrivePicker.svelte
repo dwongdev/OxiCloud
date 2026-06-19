@@ -66,11 +66,10 @@
 {#if drivesStore.loaded && drivesStore.drives.length > 0}
 	<ul class="drive-picker" aria-label={t('drive.picker', 'Drives')}>
 		{#each sortedDrives as d (d.id)}
-			<li>
+			<li class="drive-picker__row" class:drive-picker__row--active={isActive(d)}>
 				<button
 					type="button"
 					class="drive-picker__item"
-					class:drive-picker__item--active={isActive(d)}
 					onclick={() => open(d)}
 					title={pctUsed(d) !== null
 						? `${d.name} — ${formatBytes(d.used_bytes)} / ${formatBytes(d.quota_bytes ?? 0)}`
@@ -79,6 +78,15 @@
 					<Icon name={driveIcon(d)} />
 					<span class="drive-picker__name">{d.name}</span>
 				</button>
+				<a
+					href={`/config/drive/${d.id}`}
+					class="drive-picker__settings"
+					title={t('drive.settings_aria', 'Drive settings')}
+					aria-label={t('drive.settings_aria', 'Drive settings')}
+					onclick={() => onnavigate?.()}
+				>
+					<Icon name="cog" />
+				</a>
 				{#if pctUsed(d) !== null}
 					<div
 						class="drive-picker__bar"
@@ -107,12 +115,19 @@
 		flex-direction: column;
 	}
 
+	/* Each row is a small grid: drive button + gear icon on the top line,
+	   optional usage bar spanning both columns below. */
+	.drive-picker__row {
+		display: grid;
+		grid-template-columns: 1fr auto;
+		align-items: center;
+	}
+
 	.drive-picker__item {
 		display: flex;
 		align-items: center;
 		gap: 0.4rem;
-		width: 100%;
-		padding: 0.3rem 1rem 0.3rem 2rem;
+		padding: 0.3rem 0.5rem 0.3rem 2rem;
 		background: transparent;
 		border: none;
 		color: var(--color-sidebar-text);
@@ -131,9 +146,24 @@
 	   carries the orange-tinted active bg — anything more on the child
 	   crowds the sidebar. Typography alone reads as "you are here" since
 	   only one drive can be active at a time. */
-	.drive-picker__item--active {
+	.drive-picker__row--active .drive-picker__item {
 		color: var(--color-sidebar-text-active);
 		font-weight: var(--weight-semibold);
+	}
+
+	.drive-picker__settings {
+		display: inline-flex;
+		align-items: center;
+		justify-content: center;
+		padding: 0.25rem 0.75rem;
+		color: var(--color-sidebar-text);
+		opacity: 0.6;
+		text-decoration: none;
+	}
+
+	.drive-picker__settings:hover {
+		opacity: 1;
+		color: var(--color-sidebar-text-hover);
 	}
 
 	.drive-picker__name {
@@ -143,8 +173,10 @@
 		white-space: nowrap;
 	}
 
-	/* Mini usage bar tucked under the row, indented to align with the name. */
+	/* Mini usage bar tucked under the row, indented to align with the name,
+	   spans both grid columns so the gear icon sits above its right edge. */
 	.drive-picker__bar {
+		grid-column: 1 / -1;
 		height: 3px;
 		background: var(--color-sidebar-storage-bar);
 		border-radius: 1.5px;
