@@ -64,9 +64,9 @@ use crate::interfaces::api::handlers::file_handler::{
 };
 #[allow(deprecated)]
 use crate::interfaces::api::handlers::folder_handler::{
-    create_folder, delete_folder_with_trash, download_folder_zip, get_folder, list_folder_contents,
-    list_folder_contents_paginated, list_folder_listing, list_folder_resources, list_root_folders,
-    list_root_folders_paginated, move_folder, rename_folder,
+    create_folder, delete_folder_with_trash, download_folder_zip, get_folder, list_folder_listing,
+    list_folder_resources, list_root_folders, list_root_folders_paginated, move_folder,
+    rename_folder,
 };
 use crate::interfaces::api::handlers::i18n_handler::{
     get_locales, get_translations_by_locale, translate,
@@ -198,11 +198,6 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/", get(list_root_folders))
         .route("/paginated", get(list_root_folders_paginated))
         .route("/{id}", get(get_folder))
-        .route("/{id}/contents", get(list_folder_contents))
-        .route(
-            "/{id}/contents/paginated",
-            get(list_folder_contents_paginated),
-        )
         .route("/{id}/resources", get(list_folder_resources))
         .route("/{id}/rename", put(rename_folder))
         .route("/{id}/move", put(move_folder))
@@ -343,13 +338,9 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     // Create a router without the i18n routes
     // Create routes for favorites if the service is available
     let favorites_router = if let Some(favorites_service) = favorites_service.clone() {
-        #[allow(deprecated)]
-        use crate::interfaces::api::handlers::favorites_handler::{
-            self, get_favorites, list_favorites_resources,
-        };
+        use crate::interfaces::api::handlers::favorites_handler::{self, list_favorites_resources};
 
         Router::new()
-            .route("/", get(get_favorites)) // deprecated — kept for external compat
             .route("/resources", get(list_favorites_resources))
             .route("/batch", post(favorites_handler::batch_add_favorites))
             .route(
@@ -367,11 +358,9 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
 
     // Create routes for recent items if the service is available
     let recent_router = if let Some(recent_service) = recent_service.clone() {
-        #[allow(deprecated)]
         use crate::interfaces::api::handlers::recent_handler;
 
         Router::new()
-            .route("/", get(recent_handler::get_recent_items)) // deprecated — kept for external compat
             .route("/resources", get(recent_handler::list_recent_resources))
             .route(
                 "/{item_type}/{item_id}",
@@ -475,11 +464,9 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     if let Some(_trash_service_ref) = trash_service.clone() {
         tracing::info!("Setting up trash routes for trash view");
 
-        #[allow(deprecated)]
         let trash_router = Router::new()
             // Literal paths first — order matters for axum overlap handling
             // when a wildcard like /{id} could otherwise capture them.
-            .route("/", get(trash_handler::get_trash_items)) // deprecated — kept for external compat
             .route("/resources", get(trash_handler::get_trash_resources))
             .route("/empty", delete(trash_handler::empty_trash))
             .route("/files/{id}", delete(trash_handler::move_file_to_trash))

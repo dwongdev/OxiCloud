@@ -98,9 +98,7 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
         handlers::folder_handler::create_folder,
         handlers::folder_handler::get_folder,
         handlers::folder_handler::list_root_folders,
-        handlers::folder_handler::list_folder_contents,
         handlers::folder_handler::list_root_folders_paginated,
-        handlers::folder_handler::list_folder_contents_paginated,
         handlers::folder_handler::list_folder_resources,
         handlers::folder_handler::list_folder_listing,
         handlers::folder_handler::rename_folder,
@@ -130,7 +128,6 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
         handlers::dedup_handler::get_blob,
         handlers::dedup_handler::recalculate_stats,
         // Trash handlers (free functions)
-        handlers::trash_handler::get_trash_items,
         handlers::trash_handler::get_trash_resources,
         handlers::trash_handler::move_file_to_trash,
         handlers::trash_handler::move_folder_to_trash,
@@ -152,13 +149,11 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
         handlers::share_handler::download_share_zip_root,
         handlers::share_handler::download_share_zip_subfolder,
         // Favorites handlers (free functions)
-        handlers::favorites_handler::get_favorites,
         handlers::favorites_handler::list_favorites_resources,
         handlers::favorites_handler::add_favorite,
         handlers::favorites_handler::remove_favorite,
         handlers::favorites_handler::batch_add_favorites,
         // Recent handlers (free functions)
-        handlers::recent_handler::get_recent_items,
         handlers::recent_handler::list_recent_resources,
         handlers::recent_handler::record_item_access,
         handlers::recent_handler::remove_from_recent,
@@ -433,18 +428,23 @@ mod tests {
             "expected at least 10 paths, got {}",
             paths.paths.len()
         );
-        assert!(paths.paths.contains_key("/api/trash"), "missing /api/trash");
+        // The old grouped list endpoints (/api/trash, /api/favorites, /api/recent)
+        // were removed in favour of the normalized cursor-paginated /resources API.
+        assert!(
+            paths.paths.contains_key("/api/trash/resources"),
+            "missing /api/trash/resources"
+        );
         assert!(
             paths.paths.contains_key("/api/shares"),
             "missing /api/shares"
         );
         assert!(
-            paths.paths.contains_key("/api/favorites"),
-            "missing /api/favorites"
+            paths.paths.contains_key("/api/favorites/resources"),
+            "missing /api/favorites/resources"
         );
         assert!(
-            paths.paths.contains_key("/api/recent"),
-            "missing /api/recent"
+            paths.paths.contains_key("/api/recent/resources"),
+            "missing /api/recent/resources"
         );
 
         let schemas = &spec

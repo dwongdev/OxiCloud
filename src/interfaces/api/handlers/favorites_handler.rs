@@ -6,7 +6,7 @@ use axum::{
 };
 use serde::Deserialize;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use utoipa::ToSchema;
 
 use crate::application::dtos::display_helpers::{
@@ -35,52 +35,6 @@ pub struct BatchFavoriteItem {
 #[derive(Debug, Deserialize, ToSchema)]
 pub struct BatchFavoritesRequest {
     pub items: Vec<BatchFavoriteItem>,
-}
-
-/// Handler for favorite-related API endpoints
-///
-/// # Deprecated
-/// Use `GET /api/favorites/resources` instead. This endpoint is kept for
-/// backwards compatibility but will be removed in a future release.
-#[deprecated = "Use GET /api/favorites/resources instead"]
-#[utoipa::path(
-    get,
-    path = "/api/favorites",
-    responses(
-        (status = 200, description = "List of favorites (deprecated — use /api/favorites/resources)", body = Vec<crate::application::dtos::favorites_dto::FavoriteItemDto>)
-    ),
-    security(("bearerAuth" = [])),
-    tag = "favorites"
-)]
-pub async fn get_favorites(
-    State(favorites_service): State<Arc<FavoritesService>>,
-    auth_user: AuthUser,
-) -> impl IntoResponse {
-    let user_id = auth_user.id;
-    warn!(
-        "Deprecated endpoint called: GET /api/favorites — use GET /api/favorites/resources instead"
-    );
-
-    match favorites_service.get_favorites(user_id).await {
-        Ok(favorites) => {
-            info!(
-                "Retrieved {} favorites for user {}",
-                favorites.len(),
-                auth_user.id
-            );
-            (StatusCode::OK, Json(serde_json::json!(favorites))).into_response()
-        }
-        Err(err) => {
-            error!("Error retrieving favorites: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to retrieve favorites"
-                })),
-            )
-                .into_response()
-        }
-    }
 }
 
 /// Add an item to user's favorites

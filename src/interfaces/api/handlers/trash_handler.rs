@@ -12,69 +12,6 @@ use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::AuthUser;
 use std::sync::Arc;
 
-/// Gets all items in the trash for the current user.
-///
-/// # Deprecated
-/// Use `GET /api/trash/resources` instead. This endpoint is kept for
-/// backwards compatibility but will be removed in a future release.
-#[deprecated = "Use GET /api/trash/resources instead"]
-#[utoipa::path(
-    get,
-    path = "/api/trash",
-    responses(
-        (status = 200, description = "List of trashed items (deprecated — use /api/trash/resources)"),
-        (status = 501, description = "Trash feature not enabled")
-    ),
-    security(("bearerAuth" = [])),
-    tag = "trash"
-)]
-#[instrument(skip_all)]
-pub async fn get_trash_items(
-    State(state): State<Arc<AppState>>,
-    auth_user: AuthUser,
-) -> (StatusCode, Json<serde_json::Value>) {
-    // SECURITY: Always use the authenticated user's ID from the JWT token.
-    // Never allow user ID override via query parameters to prevent
-    // privilege escalation attacks.
-    let effective_user = auth_user.id;
-
-    warn!(
-        "Deprecated endpoint called: GET /api/trash — use GET /api/trash/resources instead (user {effective_user})"
-    );
-
-    debug!("Request to list trash items for user {}", effective_user);
-
-    let trash_service = match state.trash_service.as_ref() {
-        Some(service) => service,
-        None => {
-            return (
-                StatusCode::NOT_IMPLEMENTED,
-                Json(json!({
-                    "error": "Trash feature is not enabled"
-                })),
-            );
-        }
-    };
-
-    let result = trash_service.get_trash_items(effective_user).await;
-
-    match result {
-        Ok(items) => {
-            debug!("Found {} items in trash", items.len());
-            (StatusCode::OK, Json(json!(items)))
-        }
-        Err(e) => {
-            error!("Error retrieving trash items: {:?}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({
-                    "error": "Error retrieving trash items"
-                })),
-            )
-        }
-    }
-}
-
 /// Cursor-paginated list of a user's trashed resources.
 ///
 /// Sorts by `deletion_date` (default — soonest expiry first), `trashed_at`

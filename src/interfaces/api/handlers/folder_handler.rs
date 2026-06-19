@@ -111,16 +111,6 @@ impl FolderHandler {
         Self::list_folders_scoped(service, None, &auth_user).await
     }
 
-    /// Lists contents of a specific folder by its ID.
-    /// Scoped to the authenticated user's folders.
-    pub(super) async fn list_folder_contents_impl(
-        State(service): State<AppState>,
-        auth_user: AuthUser,
-        Path(id): Path<String>,
-    ) -> axum::response::Response {
-        Self::list_folders_scoped(service, Some(&id), &auth_user).await
-    }
-
     /// Lists root folders with pagination.
     /// Scoped to the authenticated user — only returns folders owned by this user.
     pub(super) async fn list_root_folders_paginated_impl(
@@ -129,22 +119,6 @@ impl FolderHandler {
         _pagination: Query<PaginationRequestDto>,
     ) -> axum::response::Response {
         Self::list_folders_scoped(service, None, &auth_user).await
-    }
-
-    /// Lists sub-folders inside a folder with pagination.
-    pub(super) async fn list_folder_contents_paginated_impl(
-        State(service): State<AppState>,
-        auth_user: AuthUser,
-        Path(id): Path<String>,
-        pagination: Query<PaginationRequestDto>,
-    ) -> axum::response::Response {
-        match service
-            .list_folders_paginated_with_perms(Some(&id), auth_user.id, &pagination)
-            .await
-        {
-            Ok(paginated_result) => (StatusCode::OK, Json(paginated_result)).into_response(),
-            Err(err) => AppError::from(err).into_response(),
-        }
     }
 
     /// Internal helper: lists folders scoped to the authenticated user.
@@ -525,30 +499,6 @@ pub async fn list_root_folders(
     FolderHandler::list_root_folders_impl(state, auth_user).await
 }
 
-#[deprecated = "Use /api/folders/{id}/resources instead"]
-#[utoipa::path(
-    get,
-    path = "/api/folders/{id}/contents",
-    params(("id" = String, Path, description = "Folder ID")),
-    responses(
-        (status = 200, description = "List of sub-folders", body = Vec<FolderDto>),
-        (status = 404, description = "Folder not found"),
-    ),
-    security(("bearerAuth" = [])),
-    tag = "folders"
-)]
-#[allow(deprecated)]
-pub async fn list_folder_contents(
-    state: State<AppState>,
-    auth_user: AuthUser,
-    path: Path<String>,
-) -> axum::response::Response {
-    tracing::warn!(
-        "Deprecated endpoint called: GET /api/folders/{{id}}/contents — use GET /api/folders/{{id}}/resources?resource_types=folder instead"
-    );
-    FolderHandler::list_folder_contents_impl(state, auth_user, path).await
-}
-
 #[utoipa::path(
     get,
     path = "/api/folders/paginated",
@@ -565,34 +515,6 @@ pub async fn list_root_folders_paginated(
     pagination: Query<PaginationRequestDto>,
 ) -> axum::response::Response {
     FolderHandler::list_root_folders_paginated_impl(state, auth_user, pagination).await
-}
-
-#[deprecated = "Use /api/folders/{id}/resources instead"]
-#[utoipa::path(
-    get,
-    path = "/api/folders/{id}/contents/paginated",
-    params(
-        ("id" = String, Path, description = "Folder ID"),
-        PaginationRequestDto,
-    ),
-    responses(
-        (status = 200, description = "Paginated list of sub-folders"),
-        (status = 404, description = "Folder not found"),
-    ),
-    security(("bearerAuth" = [])),
-    tag = "folders"
-)]
-#[allow(deprecated)]
-pub async fn list_folder_contents_paginated(
-    state: State<AppState>,
-    auth_user: AuthUser,
-    path: Path<String>,
-    pagination: Query<PaginationRequestDto>,
-) -> axum::response::Response {
-    tracing::warn!(
-        "Deprecated endpoint called: GET /api/folders/{{id}}/contents/paginated — use GET /api/folders/{{id}}/resources instead"
-    );
-    FolderHandler::list_folder_contents_paginated_impl(state, auth_user, path, pagination).await
 }
 
 #[deprecated = "Use /api/folders/{id}/resources instead"]

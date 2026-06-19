@@ -301,17 +301,17 @@ avoids a breaking API change when a second sort is added later.
 | `GET /api/photos` | ⚠️ `before` header | ❌ | Non-standard — migrate to body cursor |
 | `GET /api/search` | ❌ offset | ✅ | Migrate cursor |
 | `GET /api/folders/paginated` | ❌ page | ❌ | Migrate cursor |
-| `GET /api/folders/{id}/contents/paginated` | ❌ page | ❌ | Migrate cursor |
+| `GET /api/folders/{id}/contents/paginated` | — | — | ✅ **Removed** — use `/api/folders/{id}/resources` |
 | `GET /api/admin/users` | ❌ offset | ❌ | Migrate cursor |
 | `GET /api/address-books/{id}/contacts` | ❌ offset | ❌ | Migrate cursor |
 | `GET /api/shares` | ❌ page | ❌ | Migrate cursor |
 | `GET /api/playlists` | ❌ offset | ❌ | Migrate cursor |
-| `GET /api/recent` | ❌ limit only | ❌ | Migrate cursor |
+| `GET /api/recent` | — | — | ✅ **Removed** — use `/api/recent/resources` |
 | `GET /api/files` | ❌ **none** | ❌ | Unbounded — **urgent** |
 | `GET /api/folders` | ❌ **none** | ❌ | Unbounded — **urgent** |
 | `GET /api/folders/{id}/listing` | ❌ **none** | ❌ | Unbounded — **urgent** |
-| `GET /api/favorites` | ❌ **none** | ❌ | Unbounded — **urgent** |
-| `GET /api/trash` | ❌ **none** | ❌ | Unbounded — **urgent** |
+| `GET /api/favorites` | — | — | ✅ **Removed** — use `/api/favorites/resources` |
+| `GET /api/trash` | — | — | ✅ **Removed** — use `/api/trash/resources` |
 | `GET /api/grants/incoming` | ❌ **none** | ❌ | Unbounded |
 | `GET /api/grants/outgoing` | ❌ **none** | ❌ | Unbounded |
 

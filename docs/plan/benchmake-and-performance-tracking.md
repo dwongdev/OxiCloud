@@ -71,7 +71,7 @@ All scenarios load `baseline.json` at startup and set `thresholds` dynamically f
 
 **Endpoint contracts (confirmed by exploration):**
 - Login: `POST /api/auth/login` body `{username, password}` → `{access_token, ...}`.
-- Folder ops: `POST /api/folders`, `GET /api/folders/{id}/contents` (or `/contents/paginated` at high depth), `PUT /api/folders/{id}/move`, `POST /api/batch/folders/copy`, `DELETE /api/folders/{id}`. Handlers in `src/interfaces/api/handlers/folder_handler.rs` and `batch_handler.rs`.
+- Folder ops: `POST /api/folders`, `GET /api/folders/{id}/resources` (cursor-paginated; replaced the removed `/contents` + `/contents/paginated`), `PUT /api/folders/{id}/move`, `POST /api/batch/folders/copy`, `DELETE /api/folders/{id}`. Handlers in `src/interfaces/api/handlers/folder_handler.rs` and `batch_handler.rs`.
 - Grants: `POST /api/grants` (subject `{type, id|email}`, resource `{type, id}`, `role` or `permissions[]`), `GET /api/grants?resource_type=folder&resource_id=…`. Handler `src/interfaces/api/handlers/grant_handler.rs`.
 - Groups: `POST /api/groups` (admin), `POST /api/groups/{id}/members` body `{user_id}` or `{group_id}`. Handler `src/interfaces/api/handlers/subject_group_handler.rs`. Nesting limit is 8 — `--group-depth 3` is well inside.
 - Files: multipart `POST /api/files/upload` with fields `folder_id` + `file`.

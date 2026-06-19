@@ -4,9 +4,8 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use serde::Deserialize;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
 use crate::application::dtos::display_helpers::{
     category_for, format_file_size, icon_class_for, icon_special_class_for,
@@ -23,50 +22,6 @@ use crate::domain::entities::file::File;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::AuthUser;
 use uuid::Uuid;
-
-/// Query parameters for getting recent items
-#[derive(Deserialize)]
-pub struct GetRecentParams {
-    #[serde(default)]
-    limit: Option<i32>,
-}
-
-/// Get user's recent items (deprecated — use `GET /api/recent/resources` instead)
-#[deprecated = "Use GET /api/recent/resources instead"]
-#[utoipa::path(
-    get,
-    path = "/api/recent",
-    responses(
-        (status = 200, description = "List of recent items", body = Vec<crate::application::dtos::recent_dto::RecentItemDto>)
-    ),
-    security(("bearerAuth" = [])),
-    tag = "recent"
-)]
-pub async fn get_recent_items(
-    State(recent_service): State<Arc<RecentService>>,
-    auth_user: AuthUser,
-    Query(params): Query<GetRecentParams>,
-) -> impl IntoResponse {
-    let user_id = auth_user.id;
-    warn!("Deprecated endpoint called: GET /api/recent — use GET /api/recent/resources instead");
-
-    match recent_service.get_recent_items(user_id, params.limit).await {
-        Ok(items) => {
-            info!("Retrieved {} recent items for user", items.len());
-            (StatusCode::OK, Json(items)).into_response()
-        }
-        Err(err) => {
-            error!("Error retrieving recent items: {}", err);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "Failed to retrieve recent items"
-                })),
-            )
-                .into_response()
-        }
-    }
-}
 
 /// Record access to an item
 #[utoipa::path(
