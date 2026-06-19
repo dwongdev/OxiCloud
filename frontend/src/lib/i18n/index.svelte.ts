@@ -207,9 +207,13 @@ export async function initI18n(): Promise<void> {
 		store.locale = saved;
 	}
 	await loadDict(store.locale);
-	if (store.locale !== 'en') await loadDict('en');
 	applyHtmlLang(store.locale);
 	store.loaded = true;
+	// Warm the English fallback in the background. `t()` only consults it for
+	// keys the active (complete) locale is missing — and most call sites already
+	// pass an inline English fallback — so it must not block first paint. When it
+	// arrives, `dicts.en` is reactive, so any key that fell through re-renders.
+	if (store.locale !== 'en') void loadDict('en');
 }
 
 export async function setLocale(locale: Locale): Promise<boolean> {

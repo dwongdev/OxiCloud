@@ -1,5 +1,12 @@
-import { describe, expect, it } from 'vitest';
-import { getNestedValue, interpolate, resolveBrowserLocale } from './index.svelte';
+import { describe, expect, it, vi, beforeEach } from 'vitest';
+import {
+	getNestedValue,
+	interpolate,
+	resolveBrowserLocale,
+	initI18n,
+	t,
+	i18n
+} from './index.svelte';
 
 describe('resolveBrowserLocale', () => {
 	it('matches an exact full tag', () => {
@@ -67,5 +74,46 @@ describe('interpolate', () => {
 
 	it('coerces non-string params', () => {
 		expect(interpolate('{{count}} items', { count: 5 })).toBe('5 items');
+	});
+});
+
+describe('initI18n — lazy English fallback', () => {
+	let resolveEn: () => void;
+
+	beforeEach(() => {
+		localStorage.setItem('oxicloud-locale', 'es');
+		resolveEn = () => {};
+		globalThis.fetch = vi.fn((input: RequestInfo | URL) => {
+			const url = String(input);
+			if (url.includes('/es.json')) {
+				return Promise.resolve(new Response(JSON.stringify({ greeting: 'Hola' }), { status: 200 }));
+			}
+			if (url.includes('/en.json')) {
+				// Deferred: only resolves when the test flips it, proving init didn't wait.
+				return new Promise<Response>((res) => {
+					resolveEn = () =>
+						res(new Response(JSON.stringify({ only_en: 'English only' }), { status: 200 }));
+				});
+			}
+			return Promise.resolve(new Response('{}', { status: 404 }));
+		}) as unknown as typeof fetch;
+	});
+
+	it('is ready after only the active locale and warms en in the background', async () => {
+		// Resolves even though the en fetch is still pending — it isn't awaited.
+		await initI18n();
+		expect(i18n.loaded).toBe(true);
+		expect(i18n.locale).toBe('es');
+		expect(t('greeting')).toBe('Hola');
+
+		const urls = vi.mocked(globalThis.fetch).mock.calls.map((c) => String(c[0]));
+		expect(urls.some((u) => u.includes('/es.json'))).toBe(true);
+		expect(urls.some((u) => u.includes('/en.json'))).toBe(true); // en was kicked off
+
+		// A key missing from es is unresolved until en arrives, then falls back.
+		expect(t('only_en')).toBe('only_en');
+		resolveEn();
+		await new Promise((r) => setTimeout(r, 0));
+		expect(t('only_en')).toBe('English only');
 	});
 });
