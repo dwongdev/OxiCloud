@@ -13,6 +13,7 @@ use crate::common::di::AppState;
 // Re-export CurrentUser from application layer for use in handlers
 pub use crate::application::dtos::user_dto::CurrentUser;
 use crate::application::ports::auth_ports::TokenServicePort;
+use crate::interfaces::middleware::user::{LiveRole, resolve_live_role};
 
 /// Marker inserted into request extensions when the user was authenticated
 /// via the `oxicloud_access` HttpOnly cookie rather than a Bearer/Basic header.
@@ -111,6 +112,9 @@ pub enum AuthError {
     #[error("User not found")]
     UserNotFound,
 
+    #[error("Account is no longer active")]
+    AccountInactive,
+
     #[error("Access denied: {0}")]
     AccessDenied(String),
 
@@ -127,6 +131,10 @@ impl IntoResponse for AuthError {
             AuthError::InvalidToken(msg) => (StatusCode::UNAUTHORIZED, msg),
             AuthError::TokenExpired => (StatusCode::UNAUTHORIZED, "Token expired".to_string()),
             AuthError::UserNotFound => (StatusCode::UNAUTHORIZED, "User not found".to_string()),
+            AuthError::AccountInactive => (
+                StatusCode::UNAUTHORIZED,
+                "Account is no longer active".to_string(),
+            ),
             AuthError::AccessDenied(msg) => (StatusCode::FORBIDDEN, msg),
             AuthError::AuthServiceUnavailable => (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -181,11 +189,26 @@ pub async fn auth_middleware(
                             let user_id = Uuid::parse_str(&claims.sub).map_err(|_| {
                                 AuthError::InvalidToken("Invalid user ID in token".to_string())
                             })?;
+                            // A cryptographically valid token must not outlive the
+                            // account: re-check the live record so deactivation,
+                            // deletion and demotion take effect within the flags-cache
+                            // TTL instead of waiting for token expiry. The returned
+                            // role is authoritative — never the frozen JWT claim.
+                            let role = match resolve_live_role(
+                                auth_service.auth_application_service.as_ref(),
+                                user_id,
+                                &claims.role,
+                            )
+                            .await
+                            {
+                                LiveRole::Active(role) => role,
+                                LiveRole::Revoked => return Err(AuthError::AccountInactive),
+                            };
                             let current_user = Arc::new(CurrentUser {
                                 id: user_id,
                                 username: claims.username.clone(),
                                 email: claims.email.clone(),
-                                role: claims.role.clone(),
+                                role,
                             });
                             request.extensions_mut().insert(current_user);
                             tracing::Span::current().record("user_id", user_id.to_string());
@@ -280,16 +303,33 @@ pub async fn auth_middleware(
                         let user_id = Uuid::parse_str(&claims.sub).map_err(|_| {
                             AuthError::InvalidToken("Invalid user ID in token".to_string())
                         })?;
-                        let current_user = Arc::new(CurrentUser {
-                            id: user_id,
-                            username: claims.username.clone(),
-                            email: claims.email.clone(),
-                            role: claims.role.clone(),
-                        });
-                        request.extensions_mut().insert(current_user);
-                        request.extensions_mut().insert(CookieAuthenticated);
-                        tracing::Span::current().record("user_id", user_id.to_string());
-                        return Ok(next.run(request).await);
+                        // Same live-account re-check as the Bearer path. On
+                        // revocation we fall through (rather than erroring) so the
+                        // browser receives the standard 401 and redirects to
+                        // /login, exactly like an invalid or expired cookie.
+                        match resolve_live_role(
+                            auth_service.auth_application_service.as_ref(),
+                            user_id,
+                            &claims.role,
+                        )
+                        .await
+                        {
+                            LiveRole::Active(role) => {
+                                let current_user = Arc::new(CurrentUser {
+                                    id: user_id,
+                                    username: claims.username.clone(),
+                                    email: claims.email.clone(),
+                                    role,
+                                });
+                                request.extensions_mut().insert(current_user);
+                                request.extensions_mut().insert(CookieAuthenticated);
+                                tracing::Span::current().record("user_id", user_id.to_string());
+                                return Ok(next.run(request).await);
+                            }
+                            LiveRole::Revoked => {
+                                // Fall through to the unauthenticated 401 / login redirect.
+                            }
+                        }
                     }
                     Err(e) => {
                         tracing::debug!("Cookie token validation failed: {}", e);
@@ -344,8 +384,11 @@ fn dav_basic_auth_challenge(message: &'static str) -> Response {
 
 /// Middleware to verify that the authenticated user has an admin role.
 ///
-/// Must be applied AFTER auth_middleware, as it depends on
-/// `CurrentUser` being present in the request extensions.
+/// Must be applied AFTER auth_middleware, as it depends on `CurrentUser`
+/// being present in the request extensions. The role carried by
+/// `CurrentUser` is the *live* role resolved by `auth_middleware` (see
+/// [`resolve_live_role`]), not the JWT claim, so a demotion is honoured
+/// here within the flags-cache TTL.
 pub async fn require_admin(request: Request, next: Next) -> Response {
     // Get the CurrentUser inserted by auth_middleware
     if let Some(current_user) = request.extensions().get::<Arc<CurrentUser>>() {
@@ -353,13 +396,21 @@ pub async fn require_admin(request: Request, next: Next) -> Response {
             tracing::debug!("Admin access granted for user: {}", current_user.username);
             return next.run(request).await;
         }
-        tracing::warn!(
-            "Admin access denied for user: {} (role: {})",
-            current_user.username,
-            current_user.role
+        tracing::info!(
+            target: "audit",
+            event = "authz.admin_denied",
+            reason = "not_admin",
+            caller_id = %current_user.id,
+            role = %current_user.role,
+            "👮🏻‍♂️ admin-only route denied for non-admin caller"
         );
     } else {
-        tracing::warn!("Admin check failed: no authenticated user in request");
+        tracing::info!(
+            target: "audit",
+            event = "authz.admin_denied",
+            reason = "unauthenticated",
+            "👮🏻‍♂️ admin-only route reached with no authenticated user"
+        );
     }
 
     // Access denied
@@ -414,5 +465,14 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some(r#"Basic realm="OxiCloud""#),
         );
+    }
+
+    #[test]
+    fn account_inactive_maps_to_401() {
+        // A token that is still cryptographically valid but whose account was
+        // deactivated/deleted must be rejected with 401 (credentials no longer
+        // valid), so browsers redirect to /login rather than seeing a 403.
+        let resp = AuthError::AccountInactive.into_response();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

@@ -14,6 +14,7 @@ use crate::application::ports::auth_ports::TokenServicePort;
 use crate::common::di::AppState;
 use crate::interfaces::api::cookie_auth::{ACCESS_COOKIE, extract_cookie_value};
 use crate::interfaces::errors::AppError;
+use crate::interfaces::middleware::user::{LiveRole, resolve_live_role};
 
 /// Validate the request's JWT (from the `Authorization: Bearer …` header
 /// or the access-token cookie) and require `claims.role == "admin"`.
@@ -43,19 +44,37 @@ pub async fn require_admin(
         .validate_token(&token)
         .map_err(|e| AppError::unauthorized(format!("Invalid token: {}", e)))?;
 
-    if claims.role != "admin" {
-        return Err(AppError::new(
-            StatusCode::FORBIDDEN,
-            "Admin access required",
-            "Forbidden",
-        ));
-    }
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| AppError::internal_error("Invalid user ID in token"))?;
 
-    Ok((
-        Uuid::parse_str(&claims.sub)
-            .map_err(|_| AppError::internal_error("Invalid user ID in token"))?,
-        claims.role.clone(),
-    ))
+    // Gate on the *live* role, not the JWT claim: a demotion or deactivation
+    // must take effect within the flags-cache TTL rather than surviving until
+    // the token expires.
+    match resolve_live_role(
+        auth.auth_application_service.as_ref(),
+        user_id,
+        &claims.role,
+    )
+    .await
+    {
+        LiveRole::Active(role) if role == "admin" => Ok((user_id, role)),
+        LiveRole::Active(role) => {
+            tracing::info!(
+                target: "audit",
+                event = "authz.admin_denied",
+                reason = "not_admin",
+                caller_id = %user_id,
+                role = %role,
+                "👮🏻‍♂️ admin-only endpoint denied for non-admin caller"
+            );
+            Err(AppError::new(
+                StatusCode::FORBIDDEN,
+                "Admin access required",
+                "Forbidden",
+            ))
+        }
+        LiveRole::Revoked => Err(AppError::unauthorized("Account is no longer active")),
+    }
 }
 
 /// Validate the request's JWT (any role) and return `(user_id, role)`.
@@ -84,9 +103,19 @@ pub async fn require_authenticated(
         .validate_token(&token)
         .map_err(|e| AppError::unauthorized(format!("Invalid token: {}", e)))?;
 
-    Ok((
-        Uuid::parse_str(&claims.sub)
-            .map_err(|_| AppError::internal_error("Invalid user ID in token"))?,
-        claims.role.clone(),
-    ))
+    let user_id = Uuid::parse_str(&claims.sub)
+        .map_err(|_| AppError::internal_error("Invalid user ID in token"))?;
+
+    // Reject tokens whose account was deactivated/deleted, and return the
+    // caller's live role rather than the (possibly stale) JWT claim.
+    match resolve_live_role(
+        auth.auth_application_service.as_ref(),
+        user_id,
+        &claims.role,
+    )
+    .await
+    {
+        LiveRole::Active(role) => Ok((user_id, role)),
+        LiveRole::Revoked => Err(AppError::unauthorized("Account is no longer active")),
+    }
 }
