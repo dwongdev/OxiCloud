@@ -30,6 +30,7 @@
 
 <script lang="ts" generics="T">
 	import { onMount } from 'svelte';
+	import { useVirtualWindow } from '$lib/composables/useVirtualWindow.svelte';
 
 	let {
 		items,
@@ -45,58 +46,23 @@
 	let rootEl: HTMLDivElement;
 	/** Measured row pitch in px; 0 until known, then refined from a real row. */
 	let measuredRow = $state(0);
-	let firstRow = $state(0);
-	let lastRow = $state(0);
+	const vw = useVirtualWindow();
 
 	const cols = $derived(Math.max(1, columns));
 	const effRowH = $derived(measuredRow > 0 ? measuredRow : rowHeight);
 	const rowCount = $derived(Math.ceil(items.length / cols));
 	const totalHeight = $derived(rowCount * effRowH);
+
+	// Visible row band, derived from the shared scroll signals + the row pitch.
+	const rh = $derived(effRowH || rowHeight);
+	const firstRow = $derived(Math.max(0, Math.floor(vw.aboveBy / rh) - overscan));
+	const lastRow = $derived(
+		Math.min(rowCount, Math.ceil((vw.aboveBy + vw.viewportH) / rh) + overscan)
+	);
 	const startIndex = $derived(firstRow * cols);
 	const endIndex = $derived(Math.min(items.length, lastRow * cols));
 	const offsetY = $derived(firstRow * effRowH);
 	const visible = $derived(items.slice(startIndex, endIndex));
-
-	let scroller: HTMLElement | null = null;
-
-	/** Nearest scrollable ancestor, or null to mean the window/document. */
-	function findScroller(el: HTMLElement): HTMLElement | null {
-		let node = el.parentElement;
-		while (node) {
-			const oy = getComputedStyle(node).overflowY;
-			if (oy === 'auto' || oy === 'scroll' || oy === 'overlay') return node;
-			node = node.parentElement;
-		}
-		return null;
-	}
-
-	function viewportRect(): { top: number; height: number } {
-		if (scroller) {
-			const r = scroller.getBoundingClientRect();
-			return { top: r.top, height: scroller.clientHeight };
-		}
-		return { top: 0, height: window.innerHeight };
-	}
-
-	function measure(): void {
-		if (!rootEl) return;
-		const { top: vTop, height: vH } = viewportRect();
-		// How far the list's top has scrolled above the viewport top (px).
-		const aboveBy = vTop - rootEl.getBoundingClientRect().top;
-		const rh = effRowH || rowHeight;
-		firstRow = Math.max(0, Math.floor(aboveBy / rh) - overscan);
-		lastRow = Math.min(rowCount, Math.ceil((aboveBy + vH) / rh) + overscan);
-	}
-
-	let ticking = false;
-	function onScroll(): void {
-		if (ticking) return;
-		ticking = true;
-		requestAnimationFrame(() => {
-			ticking = false;
-			measure();
-		});
-	}
 
 	/** Single-column: adopt the real rendered row height once it's known. */
 	function refineRowHeight(): void {
@@ -108,32 +74,12 @@
 	}
 
 	onMount(() => {
-		scroller = findScroller(rootEl);
-		const target: EventTarget = scroller ?? window;
-		target.addEventListener('scroll', onScroll, { passive: true });
-		window.addEventListener('resize', onScroll, { passive: true });
-		const ro = new ResizeObserver(() => onScroll());
-		if (scroller) ro.observe(scroller);
-		ro.observe(rootEl);
-		measure();
+		const stop = vw.observe(rootEl);
 		requestAnimationFrame(() => {
 			refineRowHeight();
-			measure();
+			vw.remeasure();
 		});
-		return () => {
-			target.removeEventListener('scroll', onScroll);
-			window.removeEventListener('resize', onScroll);
-			ro.disconnect();
-		};
-	});
-
-	// Re-window when the dataset size or column count changes (load-more, reload,
-	// viewport breakpoint). `effRowH` is read so a refined height re-runs it too.
-	$effect(() => {
-		void items.length;
-		void cols;
-		void effRowH;
-		measure();
+		return stop;
 	});
 
 	// Refine the measured row height once rows are actually in the DOM.

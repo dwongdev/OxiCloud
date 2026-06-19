@@ -4,6 +4,7 @@
 	import PeopleView from '$lib/components/PeopleView.svelte';
 	import PhotoLightbox from '$lib/components/PhotoLightbox.svelte';
 	import PlacesMap from '$lib/components/PlacesMap.svelte';
+	import VirtualRows from '$lib/components/VirtualRows.svelte';
 	import { useSelection } from '$lib/composables/useSelection.svelte';
 	import { errorToast } from '$lib/utils/errors';
 	import { onMount } from 'svelte';
@@ -137,6 +138,60 @@
 		}
 		return rows;
 	}
+
+	// ── Virtualized row model ────────────────────────────────────────────────
+	// Flatten the groups into a single list of fixed-height rows (a date header
+	// or a strip of sized tiles), so VirtualRows can window the whole timeline —
+	// only the rows near the viewport are mounted, regardless of library size.
+	const SQUARE_GAP = 4; // .25rem, matches the old grid gap
+	const SQUARE_MIN = 144; // 9rem minmax floor
+	const JUSTIFIED_GAP = 8; // .photos-jrow margin-bottom
+	const HEADER_H = 44;
+
+	type PhotoRow =
+		| { kind: 'header'; key: string; height: number; label: string; count: number }
+		| { kind: 'tiles'; key: string; height: number; gap: number; tiles: JustifiedTile[] };
+
+	const photoRows = $derived.by<PhotoRow[]>(() => {
+		const W = gridWidth;
+		if (W <= 0) return [];
+		const rows: PhotoRow[] = [];
+		const cols = Math.max(1, Math.floor((W + SQUARE_GAP) / (SQUARE_MIN + SQUARE_GAP)));
+		const cell = (W - (cols - 1) * SQUARE_GAP) / cols;
+		for (const g of groups) {
+			rows.push({
+				kind: 'header',
+				key: `h:${g.key}`,
+				height: HEADER_H,
+				label: g.label,
+				count: g.photos.length
+			});
+			if (layoutMode === 'justified') {
+				const jrows = justifiedRows(g.photos, W);
+				for (let ri = 0; ri < jrows.length; ri++) {
+					rows.push({
+						kind: 'tiles',
+						key: `${g.key}:j${ri}`,
+						height: jrows[ri].height + JUSTIFIED_GAP,
+						gap: JUSTIFIED_GAP,
+						tiles: jrows[ri].tiles
+					});
+				}
+			} else {
+				for (let i = 0; i < g.photos.length; i += cols) {
+					const tiles = g.photos.slice(i, i + cols).map((file) => ({ file, w: cell, h: cell }));
+					rows.push({
+						kind: 'tiles',
+						key: `${g.key}:s${i}`,
+						height: cell + SQUARE_GAP,
+						gap: SQUARE_GAP,
+						tiles
+					});
+				}
+			}
+		}
+		return rows;
+	});
 
 	async function loadMore() {
 		if (loading || exhausted) return;
@@ -408,31 +463,23 @@
 	{:else}
 		<div class="photos-area">
 			<div class="photos-measure" bind:clientWidth={gridWidth}>
-				{#each groups as group (group.key)}
-					<h2 class="photos-group">
-						{group.label} <span class="photos-group__count">{group.photos.length}</span>
-					</h2>
-					{#if layoutMode === 'justified' && gridWidth > 0}
-						{#each justifiedRows(group.photos, gridWidth) as row, ri (group.key + '-' + ri)}
-							<div class="photos-jrow" style:height="{row.height}px">
-								{#each row.tiles as cell (cell.file.id)}
-									{@render tile(cell.file, `width:${cell.w}px;height:${cell.h}px`)}
-								{/each}
-							</div>
-						{/each}
-					{:else}
-						<ul class="photos">
-							{#each group.photos as photo (photo.id)}
-								<li
-									class="photos__cell photos__cell--square"
-									class:selected={selected.has(photo.id)}
-								>
-									{@render tile(photo)}
-								</li>
-							{/each}
-						</ul>
-					{/if}
-				{/each}
+				{#if photoRows.length}
+					<VirtualRows rows={photoRows} overscan={1000}>
+						{#snippet row(r)}
+							{#if r.kind === 'header'}
+								<div class="photos-group" style:height="{r.height}px">
+									{r.label} <span class="photos-group__count">{r.count}</span>
+								</div>
+							{:else}
+								<div class="photos-strip" style:height="{r.height}px" style:gap="{r.gap}px">
+									{#each r.tiles as cell (cell.file.id)}
+										{@render tile(cell.file, `width:${cell.w}px;height:${cell.h}px`)}
+									{/each}
+								</div>
+							{/if}
+						{/snippet}
+					</VirtualRows>
+				{/if}
 			</div>
 		</div>
 	{/if}
@@ -566,8 +613,13 @@
 		padding: 0 1rem;
 	}
 
+	/* Date header — fixed height (set inline) so the virtualizer's offset table
+	   matches the rendered layout exactly. */
 	.photos-group {
-		margin: var(--space-4) 0 var(--space-2);
+		display: flex;
+		align-items: center;
+		gap: var(--space-2);
+		margin: 0;
 		font-size: 1rem;
 		color: var(--color-text-heading);
 	}
@@ -578,20 +630,11 @@
 		font-weight: var(--weight-normal);
 	}
 
-	.photos {
-		list-style: none;
-		margin: 0;
-		padding: 0;
-		display: grid;
-		grid-template-columns: repeat(auto-fill, minmax(9rem, 1fr));
-		gap: 0.25rem;
-	}
-
-	/* Justified rows: a flex row of aspect-preserving tiles. */
-	.photos-jrow {
+	/* A horizontal strip of explicitly-sized tiles — one virtualized row, used by
+	   both the square and justified layouts (the bottom gap is baked into the
+	   row's declared height). */
+	.photos-strip {
 		display: flex;
-		gap: 8px;
-		margin-bottom: 8px;
 	}
 
 	.photo-tile {
@@ -599,16 +642,6 @@
 		overflow: hidden;
 		border-radius: var(--radius-sm);
 		background: var(--color-bg-muted);
-	}
-
-	.photos__cell--square,
-	.photos__cell--square .photo-tile {
-		aspect-ratio: 1;
-		height: 100%;
-	}
-
-	.photos__cell--square {
-		list-style: none;
 	}
 
 	.photo-tile.selected {
