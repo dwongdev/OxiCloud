@@ -10,10 +10,10 @@
 	import {
 		createGrant,
 		expiryToIso,
+		displayRole,
 		fetchGrantsForResource,
 		notifyGrantRecipient,
 		revokeGrant,
-		roleFromPermissions,
 		updateGrantRole,
 		type Grant,
 		type GrantSubject,
@@ -51,11 +51,11 @@
 	let directoryAvailable = $state(true);
 
 	const ROLES: { v: ShareRole; l: string; icon: string }[] = [
-		{ v: 'admin', l: t('share.role.canManage', 'Can manage'), icon: 'crown' },
+		{ v: 'owner', l: t('share.role.canManage', 'Can manage'), icon: 'crown' },
 		{ v: 'editor', l: t('share.role.canEdit', 'Can edit'), icon: 'pencil-alt' },
 		{ v: 'viewer', l: t('share.role.canView', 'Can view'), icon: 'eye' }
 	];
-	const ROLE_ORDER: ShareRole[] = ['admin', 'editor', 'viewer'];
+	const ROLE_ORDER: ShareRole[] = ['owner', 'editor', 'viewer'];
 	function roleLabel(r: ShareRole): string {
 		return ROLES.find((x) => x.v === r)?.l ?? r;
 	}
@@ -89,13 +89,20 @@
 	function groupGrants(grants: Grant[]): Member[] {
 		const bySubject = new Map<
 			string,
-			{ subject: GrantSubject; perms: string[]; ids: string[]; expiry: string | null }
+			{ subject: GrantSubject; role: ShareRole; ids: string[]; expiry: string | null }
 		>();
 		for (const g of grants) {
 			if (g.subject.type === 'token') continue;
 			const key = `${g.subject.type}:${g.subject.id}`;
-			const entry = bySubject.get(key) ?? { subject: g.subject, perms: [], ids: [], expiry: null };
-			entry.perms.push(g.permission);
+			const entry = bySubject.get(key) ?? {
+				subject: g.subject,
+				role: 'viewer' as ShareRole,
+				ids: [],
+				expiry: null
+			};
+			// Role-grants emit one row per (subject, resource), so the row's role
+			// is the subject's role directly.
+			entry.role = displayRole(g.role);
 			entry.ids.push(g.id);
 			if (g.expires_at && !entry.expiry) entry.expiry = isoToDate(g.expires_at);
 			bySubject.set(key, entry);
@@ -103,7 +110,7 @@
 		return [...bySubject.values()].map((e) => ({
 			subject: e.subject,
 			recipient: resolveRecipient(e.subject.type as 'user' | 'group', e.subject.id),
-			role: roleFromPermissions(e.perms),
+			role: e.role,
 			grantIds: e.ids,
 			notifyGrantId: e.ids[0],
 			expiry: e.expiry,

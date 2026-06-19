@@ -7,7 +7,9 @@ import type { ResourceBody, ResourcePage } from './resources';
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
 export type SubjectType = 'user' | 'group' | 'email' | 'token';
-export type ShareRole = 'viewer' | 'editor' | 'admin';
+/** Roles the share UI exposes. The backend role enum also has `commenter` and
+ * `contributor`, which {@link displayRole} collapses to the nearest of these. */
+export type ShareRole = 'viewer' | 'editor' | 'owner';
 
 export interface GrantSubject {
 	type: SubjectType;
@@ -25,13 +27,17 @@ export type GrantSubjectInput =
 	| { type: 'token'; id: string }
 	| { type: 'email'; email: string };
 
-/** One grant carries a single permission; a subject's role is derived from all of theirs. */
+/**
+ * One role grant for a (subject, resource). Role-keyed since the role-grants
+ * migration: each row carries an explicit `role` (the backend enum, which may
+ * be `owner`/`editor`/`viewer`/`commenter`/`contributor`).
+ */
 export interface Grant {
 	id: string;
 	granted_at?: string;
 	granted_by?: string;
 	subject: GrantSubject;
-	permission: string;
+	role: string;
 	resource: { type: ItemType; id: string };
 	expires_at?: string | null;
 }
@@ -56,10 +62,16 @@ export interface CreateGrantResponse {
 	notification: NotifyOutcomeSet;
 }
 
-export function roleFromPermissions(perms: Iterable<string>): ShareRole {
-	const set = new Set(perms);
-	if (set.has('delete') || set.has('share')) return 'admin';
-	if (set.has('create') || set.has('update')) return 'editor';
+/**
+ * Map a backend role string to the role the UI exposes. The server may emit the
+ * full enum (`owner`/`editor`/`viewer`/`commenter`/`contributor`); the picker
+ * only shows Owner/Editor/Viewer, so collapse the two unexposed roles to their
+ * closest neighbour rather than render an unknown option.
+ */
+export function displayRole(role: string | undefined): ShareRole {
+	if (role === 'owner' || role === 'editor' || role === 'viewer') return role;
+	if (role === 'contributor') return 'editor';
+	if (role === 'commenter') return 'viewer';
 	return 'viewer';
 }
 

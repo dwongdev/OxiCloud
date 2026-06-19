@@ -4,6 +4,7 @@
 	import { goto } from '$app/navigation';
 	import { onMount } from 'svelte';
 	import {
+		displayRole,
 		expiryToIso,
 		fetchMyShares,
 		notifyGrantRecipient,
@@ -33,12 +34,12 @@
 	];
 
 	const ROLES: { v: ShareRole; l: string; icon: string }[] = [
-		{ v: 'admin', l: t('share.role.canManage', 'Can manage'), icon: 'crown' },
+		{ v: 'owner', l: t('share.role.canManage', 'Can manage'), icon: 'crown' },
 		{ v: 'editor', l: t('share.role.canEdit', 'Can edit'), icon: 'pencil-alt' },
 		{ v: 'viewer', l: t('share.role.canView', 'Can view'), icon: 'eye' }
 	];
 	function roleMeta(r: string) {
-		return ROLES.find((x) => x.v === r) ?? ROLES[2];
+		return ROLES.find((x) => x.v === displayRole(r)) ?? ROLES[2];
 	}
 
 	let raw = $state<OutgoingGrantItem[]>([]);
