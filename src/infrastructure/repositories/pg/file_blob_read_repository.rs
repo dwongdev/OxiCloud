@@ -20,6 +20,8 @@ type MediaFileRow = (
     String,         // blob_hash
     Option<Uuid>,   // user_id
     i64,            // sort_date
+    Option<i32>,    // width
+    Option<i32>,    // height
 );
 
 use bytes::Bytes;
@@ -370,7 +372,7 @@ impl FileBlobReadRepository {
         owner_id: Uuid,
         before: Option<i64>,
         limit: i64,
-    ) -> Result<(Vec<File>, Vec<i64>), DomainError> {
+    ) -> Result<(Vec<File>, Vec<i64>, Vec<(Option<i32>, Option<i32>)>), DomainError> {
         let rows: Vec<MediaFileRow> = sqlx::query_as(
             r#"
             SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
@@ -379,9 +381,11 @@ impl FileBlobReadRepository {
                    EXTRACT(EPOCH FROM fi.updated_at)::bigint,
                    fi.blob_hash,
                    fi.user_id,
-                   EXTRACT(EPOCH FROM fi.media_sort_date)::bigint AS sort_date
+                   EXTRACT(EPOCH FROM fi.media_sort_date)::bigint AS sort_date,
+                   fm.width, fm.height
               FROM storage.files fi
               LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
+              LEFT JOIN storage.file_metadata fm ON fm.file_id = fi.id
              WHERE fi.user_id = $1
                AND NOT fi.is_trashed
                AND (fi.mime_type LIKE 'image/%' OR fi.mime_type LIKE 'video/%')
@@ -400,15 +404,17 @@ impl FileBlobReadRepository {
 
         let mut files = Vec::with_capacity(rows.len());
         let mut sort_dates = Vec::with_capacity(rows.len());
+        let mut dims = Vec::with_capacity(rows.len());
 
-        for (id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, sd) in rows {
+        for (id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid, sd, w, h) in rows {
             files.push(Self::row_to_file(
                 id, name, fid, fpath, size, mime, ca, ma, blob_hash, uid,
             )?);
             sort_dates.push(sd);
+            dims.push((w, h));
         }
 
-        Ok((files, sort_dates))
+        Ok((files, sort_dates, dims))
     }
 }
 

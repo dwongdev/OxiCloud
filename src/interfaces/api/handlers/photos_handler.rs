@@ -4,7 +4,7 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{error, info};
 
@@ -19,6 +19,20 @@ pub struct PhotosQueryParams {
     pub before: Option<i64>,
     /// Max items to return (default 200, max 500).
     pub limit: Option<i64>,
+}
+
+/// Photos-timeline item: a `FileDto` plus the image's original pixel
+/// dimensions (from EXIF/metadata), flattened into the same JSON shape so
+/// the gallery can lay tiles out at their true aspect ratio without a
+/// second per-file metadata round-trip.
+#[derive(Serialize)]
+struct PhotoDto {
+    #[serde(flatten)]
+    file: FileDto,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    width: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    height: Option<u32>,
 }
 
 /// Lists all image/video files for the authenticated user, sorted by
@@ -55,17 +69,22 @@ pub async fn list_photos(
         .list_media_files(user_id, params.before, limit)
         .await
     {
-        Ok((files, sort_dates)) => {
+        Ok((files, sort_dates, dims)) => {
             info!("Photos: returned {} media files for user", files.len());
 
-            // Convert to DTOs with sort_date populated
-            let dtos: Vec<FileDto> = files
+            // Convert to DTOs with sort_date + pixel dimensions populated.
+            let dtos: Vec<PhotoDto> = files
                 .into_iter()
                 .zip(sort_dates.iter())
-                .map(|(file, &sd)| {
+                .zip(dims.iter())
+                .map(|((file, &sd), &(w, h))| {
                     let mut dto = FileDto::from(file);
                     dto.sort_date = Some(sd as u64);
-                    dto
+                    PhotoDto {
+                        file: dto,
+                        width: w.map(|v| v.max(0) as u32),
+                        height: h.map(|v| v.max(0) as u32),
+                    }
                 })
                 .collect();
 

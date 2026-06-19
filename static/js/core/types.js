@@ -45,6 +45,8 @@
  * @property {number} size
  * @property {string} size_formatted
  * @property {number} sort_date
+ * @property {number} [width] original pixel width (photos timeline only)
+ * @property {number} [height] original pixel height (photos timeline only)
  * @property {string} etag opaque HTTP ETag, for If-Match / If-None-Match
  * @property {string} content_hash raw BLAKE3 content hash, for dedup checks
  * @property {string} [snippet] plain-text fragment around a content match (search results only)
