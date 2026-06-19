@@ -10,6 +10,7 @@ import { batchToolbar } from '../features/files/batchToolbar.js';
 import { favorites } from '../features/library/favorites.js';
 import { musicView } from '../features/library/music.js';
 import { photosView } from '../features/library/photos.js';
+import { placesView } from '../features/library/places.js';
 import { grants } from '../model/grants.js';
 import { favoritesView } from '../views/favorites/favoritesView.js';
 import { mySharesView } from '../views/myShares/mySharesView.js';
@@ -225,9 +226,10 @@ function setCurrentSection(section) {
     // Reset owner column — sections that need it re-enable it explicitly below.
     ui.setOwnerColumnVisible(false);
 
-    // Hide photosView when switching to any other section
+    // Hide photosView (+ the Places sub-view) when switching to any other section
     if (section !== 'photos' && photosView) {
         photosView.hide();
+        placesView.unmountTabs();
     }
 
     // Hide musicView when switching to any other section
@@ -451,6 +453,7 @@ function switchToPhotosSection() {
     if (photosView) {
         photosView.show();
     }
+    placesView.mountTabs();
     if (batchToolbar) batchToolbar.clear();
 }
 

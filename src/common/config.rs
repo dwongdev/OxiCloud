@@ -895,7 +895,7 @@ impl Default for FeaturesConfig {
             enable_trash: true,        // Enable trash feature
             enable_search: true,       // Enable search feature
             enable_music: true,        // Enable music feature
-            enable_places: false,      // Photo map; off until the map UI ships
+            enable_places: true,       // Photo map (GET /api/photos/geo + Places tab)
             expose_system_users: true, // Expose OxiCloud users as address book by default
         }
     }

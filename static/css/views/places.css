@@ -1,0 +1,90 @@
+/* Photos sub-navigation (Moments | Places) */
+.photos-subnav {
+    display: flex;
+    gap: var(--space-1);
+    padding: var(--space-2) var(--space-2) 0;
+}
+
+.photos-subnav.hidden {
+    display: none;
+}
+
+.photos-subnav-tab {
+    background: none;
+    border: none;
+    padding: var(--space-2) var(--space-3);
+    font-size: var(--text-base);
+    font-weight: var(--weight-medium);
+    color: var(--color-text-faint);
+    cursor: pointer;
+    border-radius: var(--radius-md);
+    border-bottom: 2px solid transparent;
+}
+
+.photos-subnav-tab:hover {
+    color: var(--color-text);
+}
+
+.photos-subnav-tab.active {
+    color: var(--color-accent);
+    border-bottom-color: var(--color-accent);
+}
+
+/* Map view */
+.places-container {
+    display: none;
+}
+
+.places-container.active {
+    display: flex;
+    flex-direction: column;
+    height: calc(100vh - 150px);
+    min-height: 360px;
+    padding: var(--space-2);
+}
+
+.places-map {
+    flex: 1 1 auto;
+    width: 100%;
+    border-radius: var(--radius-2xl);
+    overflow: hidden;
+}
+
+.places-loading,
+.places-error {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: var(--space-2);
+    color: var(--color-text-faint);
+}
+
+.places-loading i {
+    animation: spin 1s linear infinite;
+}
+
+/* Cluster markers — a circular photo thumbnail with a count badge */
+.places-cluster {
+    background-size: cover;
+    background-position: center;
+    background-color: var(--color-bg-muted);
+    border-radius: 50%;
+    border: 2px solid var(--color-bg-surface);
+    box-shadow: 0 2px 8px var(--color-shadow-sm);
+    cursor: pointer;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+}
+
+.places-cluster-count {
+    background: var(--color-accent);
+    color: var(--color-danger-text);
+    font-size: var(--text-2xs);
+    font-weight: var(--weight-bold);
+    line-height: 1;
+    padding: var(--space-0-5) var(--space-1-5);
+    border-radius: var(--radius-full);
+    transform: translateY(35%);
+}

@@ -73,7 +73,11 @@
         "delete_selected_confirm": "Move the selected items to Trash?",
         "delete_one_confirm": "Move \"{{name}}\" to Trash?",
         "layout_square": "Grid",
-        "layout_justified": "Justified"
+        "layout_justified": "Justified",
+        "tab_moments": "Moments",
+        "tab_places": "Places",
+        "map_loading": "Loading map…",
+        "map_error": "Could not load the map"
     },
     "music": {
         "create_playlist": "Create Playlist",
