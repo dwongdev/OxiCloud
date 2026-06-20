@@ -5,6 +5,7 @@
 		createUser,
 		deletePlugin,
 		deleteUser,
+		generateEncryptionKey,
 		getDashboard,
 		getMigration,
 		getOidcSettings,
@@ -16,6 +17,8 @@
 		listPlugins,
 		listUsers,
 		migrationAction,
+		reextractAudioMetadata,
+		reextractPhotoMetadata,
 		resetUserPassword,
 		saveOidc,
 		savePluginRetention,
@@ -30,6 +33,7 @@
 		testStorage,
 		verifyMigration,
 		type AdminDashboard,
+		type GeneratedKey,
 		type MigrationStatus,
 		type MigrationVerifyResult,
 		type OidcSettings,
@@ -37,6 +41,7 @@
 		type PluginInfo,
 		type PluginLogEntry,
 		type PluginRetention,
+		type ReextractResult,
 		type SmtpInfo,
 		type SmtpTestResult,
 		type StorageSettings,
@@ -629,6 +634,51 @@
 		errorToast(e);
 	}
 
+	// ── Maintenance: bulk metadata re-extraction ─────────────────────────────
+	let audioBusy = $state(false);
+	let audioResult = $state<ReextractResult | null>(null);
+	let photoBusy = $state(false);
+	let photoResult = $state<ReextractResult | null>(null);
+
+	async function runAudioReindex() {
+		audioBusy = true;
+		audioResult = null;
+		try {
+			audioResult = await reextractAudioMetadata();
+		} catch (e) {
+			reportError(e);
+		} finally {
+			audioBusy = false;
+		}
+	}
+
+	async function runPhotoReindex() {
+		photoBusy = true;
+		photoResult = null;
+		try {
+			photoResult = await reextractPhotoMetadata();
+		} catch (e) {
+			reportError(e);
+		} finally {
+			photoBusy = false;
+		}
+	}
+
+	// ── Storage: generate an at-rest encryption key ──────────────────────────
+	let keyBusy = $state(false);
+	let generatedKey = $state<GeneratedKey | null>(null);
+
+	async function runGenerateKey() {
+		keyBusy = true;
+		try {
+			generatedKey = await generateEncryptionKey();
+		} catch (e) {
+			reportError(e);
+		} finally {
+			keyBusy = false;
+		}
+	}
+
 	async function copyText(text: string) {
 		try {
 			await navigator.clipboard.writeText(text);
@@ -997,6 +1047,58 @@
 					{/if}
 				</div>
 			{/if}
+
+			<div class="card">
+				<h2>{t('admin.maintenance', 'Maintenance')}</h2>
+				<p class="muted">
+					{t(
+						'admin.maintenance_hint',
+						'Re-scan existing files to backfill metadata. Safe to re-run; processes the whole library and may take a while.'
+					)}
+				</p>
+				<div class="maint-row">
+					<button class="btn btn-secondary" disabled={audioBusy} onclick={runAudioReindex}>
+						<Icon name="music" />
+						{audioBusy
+							? t('admin.running', 'Running…')
+							: t('admin.reextract_audio', 'Re-extract audio metadata')}
+					</button>
+					{#if audioResult}
+						<span class="muted maint-result">
+							{t(
+								'admin.reextract_done',
+								{
+									processed: audioResult.processed,
+									total: audioResult.total,
+									failed: audioResult.failed
+								},
+								'{{processed}}/{{total}} processed · {{failed}} failed'
+							)}
+						</span>
+					{/if}
+				</div>
+				<div class="maint-row">
+					<button class="btn btn-secondary" disabled={photoBusy} onclick={runPhotoReindex}>
+						<Icon name="images" />
+						{photoBusy
+							? t('admin.running', 'Running…')
+							: t('admin.reextract_photos', 'Re-extract photo & video capture dates')}
+					</button>
+					{#if photoResult}
+						<span class="muted maint-result">
+							{t(
+								'admin.reextract_done',
+								{
+									processed: photoResult.processed,
+									total: photoResult.total,
+									failed: photoResult.failed
+								},
+								'{{processed}}/{{total}} processed · {{failed}} failed'
+							)}
+						</span>
+					{/if}
+				</div>
+			</div>
 		{/if}
 	{:else if tab === 'oidc'}
 		<div class="card">
@@ -1375,6 +1477,40 @@
 						{/if}
 					</div>
 				{/if}
+			{/if}
+		</div>
+
+		<div class="card">
+			<h2>{t('admin.encryption', 'Encryption')}</h2>
+			<p class="muted">
+				{t(
+					'admin.encryption_hint',
+					'Generate an AES-256 key for at-rest blob encryption, then set it as OXICLOUD_STORAGE_ENCRYPTION_KEY in your server environment.'
+				)}
+			</p>
+			<button class="btn btn-secondary" disabled={keyBusy} onclick={runGenerateKey}>
+				<Icon name="key" />
+				{keyBusy ? t('admin.running', 'Running…') : t('admin.gen_key', 'Generate key')}
+			</button>
+			{#if generatedKey}
+				<p class="callback-row">
+					<code>{generatedKey.key}</code>
+					<button
+						type="button"
+						class="btn btn-sm btn-secondary"
+						onclick={() => copyText(generatedKey?.key ?? '')}
+					>
+						<Icon name="copy" />
+						{t('common.copy', 'Copy')}
+					</button>
+				</p>
+				<p class="alert alert--warn">
+					<Icon name="exclamation-triangle" />
+					{t(
+						'admin.gen_key_warning',
+						'Store this key securely. If it is lost, the encrypted data is irrecoverably lost.'
+					)}
+				</p>
 			{/if}
 		</div>
 	{:else if tab === 'smtp'}
@@ -1990,7 +2126,7 @@
 	}
 
 	.log-level--error {
-		color: var(--color-danger-text);
+		color: var(--color-error-text);
 	}
 
 	.log-level--warn {
@@ -2067,7 +2203,7 @@
 	}
 
 	.ds-fill--danger {
-		background: var(--color-danger-text);
+		background: var(--color-error-text);
 	}
 
 	.kv {
@@ -2171,8 +2307,8 @@
 	}
 
 	.warn-card--danger {
-		border-color: var(--color-danger-text);
-		color: var(--color-danger-text);
+		border-color: var(--color-error-text);
+		color: var(--color-error-text);
 	}
 
 	/* Per-user storage-usage progress bar in the users table. */
@@ -2200,7 +2336,7 @@
 	}
 
 	.quota-fill--danger {
-		background: var(--color-danger-text);
+		background: var(--color-error-text);
 	}
 
 	.quota-input {
@@ -2232,7 +2368,7 @@
 	}
 
 	.icon-btn--danger {
-		color: var(--color-danger-text);
+		color: var(--color-error-text);
 	}
 
 	.icon-btn--success {
@@ -2282,8 +2418,8 @@
 	}
 
 	.discovery-result--fail {
-		border-color: var(--color-danger-text);
-		color: var(--color-danger-text);
+		border-color: var(--color-error-text);
+		color: var(--color-error-text);
 	}
 
 	.discovery-result .kv {
@@ -2296,6 +2432,18 @@
 		align-items: center;
 		gap: var(--space-2);
 		flex-wrap: wrap;
+	}
+
+	.maint-row {
+		display: flex;
+		align-items: center;
+		gap: var(--space-3);
+		flex-wrap: wrap;
+		margin-top: var(--space-3);
+	}
+
+	.maint-result {
+		font-variant-numeric: tabular-nums;
 	}
 
 	.install-bar {
@@ -2499,7 +2647,7 @@
 	}
 
 	.status--error {
-		color: var(--color-danger-text);
+		color: var(--color-error-text);
 	}
 
 	.link-btn {
@@ -2511,6 +2659,6 @@
 	}
 
 	.link-btn--danger {
-		color: var(--color-danger-text);
+		color: var(--color-error-text);
 	}
 </style>

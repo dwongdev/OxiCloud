@@ -1080,7 +1080,17 @@
     "unchanged": "Leave blank to keep current",
     "user": "User",
     "username": "Username",
-    "users": "Users"
+    "users": "Users",
+    "running": "Running…",
+    "maintenance": "Maintenance",
+    "maintenance_hint": "Re-scan existing files to backfill metadata. Safe to re-run; processes the whole library and may take a while.",
+    "reextract_audio": "Re-extract audio metadata",
+    "reextract_photos": "Re-extract photo & video capture dates",
+    "reextract_done": "{{processed}}/{{total}} processed · {{failed}} failed",
+    "encryption": "Encryption",
+    "encryption_hint": "Generate an AES-256 key for at-rest blob encryption, then set it as OXICLOUD_STORAGE_ENCRYPTION_KEY in your server environment.",
+    "gen_key": "Generate key",
+    "gen_key_warning": "Store this key securely. If it is lost, the encrypted data is irrecoverably lost."
   },
   "profile": {
     "page_title": "Profile",

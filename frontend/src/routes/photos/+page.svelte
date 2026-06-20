@@ -287,6 +287,18 @@
 		}
 	}
 
+	/**
+	 * A tile thumbnail failed to load (no server thumbnail — e.g. SVGs, which the
+	 * backend can't rasterise — or a transient error). Hide the broken <img> so
+	 * the always-present placeholder shows through, and for videos kick off
+	 * client-side frame extraction (which, on success, re-renders the tile from
+	 * `videoThumbs`).
+	 */
+	function onThumbError(e: Event, photo: PhotoItem) {
+		(e.currentTarget as HTMLImageElement).style.display = 'none';
+		if (isVideo(photo)) void generateVideoThumb(photo);
+	}
+
 	// ── Client-side video thumbnail generation ──────────────────────────────
 	// When the server has no thumbnail for a video tile the <img> errors; we
 	// then extract a frame with the browser's native decoder and upload it.
@@ -522,6 +534,10 @@
 {#snippet tile(photo: PhotoItem, sizeStyle?: string)}
 	<div class="photo-tile" class:selected={selected.has(photo.id)} style={sizeStyle}>
 		<button class="photo-tile__open" onclick={() => onTileClick(photo)}>
+			<!-- Always-present placeholder: the thumbnail <img> overlays it and, when
+			     it can't load (no server thumbnail, e.g. SVG), hides itself to reveal
+			     this default rather than the browser's broken-image glyph. -->
+			<span class="photo-tile__placeholder" aria-hidden="true"><Icon name="file-image" /></span>
 			{#if videoThumbs[photo.id]}
 				<img src={videoThumbs[photo.id]} alt={photo.name} loading="lazy" decoding="async" />
 			{:else}
@@ -532,7 +548,7 @@
 					alt={photo.name}
 					loading="lazy"
 					decoding="async"
-					onerror={isVideo(photo) ? () => generateVideoThumb(photo) : undefined}
+					onerror={(e) => onThumbError(e, photo)}
 				/>
 			{/if}
 			{#if isVideo(photo)}
@@ -675,6 +691,7 @@
 	}
 
 	.photo-tile__open {
+		position: relative;
 		display: block;
 		width: 100%;
 		height: 100%;
@@ -684,7 +701,22 @@
 		background: none;
 	}
 
+	/* Default placeholder shown until the thumbnail paints over it (or when the
+	   thumbnail can't load). Both this and the <img> are absolutely positioned so
+	   DOM order — placeholder first, image second — keeps the image on top. */
+	.photo-tile__placeholder {
+		position: absolute;
+		inset: 0;
+		display: grid;
+		place-items: center;
+		font-size: 2rem;
+		color: var(--color-text-faint);
+		pointer-events: none;
+	}
+
 	.photo-tile__open img {
+		position: absolute;
+		inset: 0;
 		width: 100%;
 		height: 100%;
 		object-fit: cover;

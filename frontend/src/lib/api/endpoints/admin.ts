@@ -22,6 +22,53 @@ async function mutate(url: string, method: string, body?: unknown): Promise<void
 	}
 }
 
+/** POST with no request body that returns a JSON payload (throws on non-2xx). */
+async function postJson<T>(url: string): Promise<T> {
+	const res = await apiFetch(url, {
+		method: 'POST',
+		credentials: 'same-origin',
+		headers: { ...JSON_HEADERS, ...getCsrfHeaders() }
+	});
+	if (!res.ok) {
+		const e = (await res.json().catch(() => ({}))) as { message?: string };
+		throw new Error(e.message || `POST ${url} failed: ${res.status}`);
+	}
+	return (await res.json()) as T;
+}
+
+// ── Maintenance ───────────────────────────────────────────────────────────
+
+/** Outcome of a bulk metadata re-extraction run. */
+export interface ReextractResult {
+	message: string;
+	total: number;
+	processed: number;
+	failed: number;
+}
+
+/** Re-scan every audio file and backfill its tag metadata (idempotent). */
+export function reextractAudioMetadata(): Promise<ReextractResult> {
+	return postJson<ReextractResult>('/api/admin/audio/metadata/reextract');
+}
+
+/** Backfill EXIF / container capture dates for all media, re-bucketing the
+ *  Photos timeline by real capture date (idempotent). */
+export function reextractPhotoMetadata(): Promise<ReextractResult> {
+	return postJson<ReextractResult>('/api/admin/photos/metadata/reextract');
+}
+
+/** A freshly generated AES-256 at-rest blob-encryption key (base64) plus a
+ *  data-loss warning authored by the server. */
+export interface GeneratedKey {
+	key: string;
+	warning: string;
+}
+
+/** Generate a random AES-256 key for at-rest blob encryption. */
+export function generateEncryptionKey(): Promise<GeneratedKey> {
+	return postJson<GeneratedKey>('/api/admin/settings/storage/generate-key');
+}
+
 // ── Users ───────────────────────────────────────────────────────────────
 
 export interface AdminUsersPage {

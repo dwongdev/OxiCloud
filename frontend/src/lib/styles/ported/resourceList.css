@@ -338,11 +338,11 @@
 
 /* Expand the grid track as soon as at least one owner cell is visible. */
 .files-list-view:has(.owner-cell:not(.hidden)) {
-    --files-list-columns: 36px minmax(200px, 2fr) 120px 100px 110px 130px 72px;
+    --files-list-columns: 36px minmax(200px, 2fr) 120px 100px 110px 130px 200px;
 }
 
 .files-list-view {
-    --files-list-columns: 36px minmax(200px, 2fr) 100px 110px 130px 72px;
+    --files-list-columns: 36px minmax(200px, 2fr) 100px 110px 130px 200px;
     display: flex;
     flex-direction: column;
     width: 100%;
