@@ -274,7 +274,7 @@
 		<div class="share__center">
 			<Icon name="file" class="share__big-icon" />
 			<h1>{meta?.item_name}</h1>
-			<a class="share__btn" href={shareDownloadUrl(token)} download>
+			<a class="share__btn" href={shareDownloadUrl(token)} download rel="external">
 				{t('share.download', 'Download')}
 			</a>
 		</div>
@@ -307,7 +307,7 @@
 						onclick={() => setViewMode('list')}><Icon name="bars" /></button
 					>
 				</div>
-				<a class="share__btn" href={shareZipUrl(token, folderId)} download>
+				<a class="share__btn" href={shareZipUrl(token, folderId)} download rel="external">
 					<Icon name="file-archive" />
 					{t('share.download_zip', 'Download ZIP')}
 				</a>
@@ -367,7 +367,12 @@
 						</li>
 					{:else}
 						<li>
-							<a class="card" href={shareFileUrl(token, f.id)} target="_blank" rel="noreferrer">
+							<a
+								class="card"
+								href={shareFileUrl(token, f.id)}
+								target="_blank"
+								rel="external noreferrer"
+							>
 								<span class="card__thumb"><Icon name="file" class="card__icon" /></span>
 								<span class="card__name">{f.name}</span>
 							</a>

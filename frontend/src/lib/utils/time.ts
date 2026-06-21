@@ -8,6 +8,30 @@ export interface RelativeTimeOptions {
 	invalidAsString?: boolean;
 }
 
+/** Unit thresholds in seconds, largest first. Hoisted so it isn't rebuilt per call. */
+const RELATIVE_UNITS: Array<[Intl.RelativeTimeFormatUnit, number]> = [
+	['year', 31536000],
+	['month', 2592000],
+	['week', 604800],
+	['day', 86400],
+	['hour', 3600],
+	['minute', 60]
+];
+
+/**
+ * Lazily-built, reused `Intl.RelativeTimeFormat`. Constructing one is ~orders of
+ * magnitude costlier than a `format()` call, and {@link relativeTimeAgo} runs
+ * once per row per render across large lists — so we build it once (browser
+ * default locale, matching the previous `undefined` argument) and reuse it.
+ */
+let relativeFormatter: Intl.RelativeTimeFormat | undefined;
+function getRelativeFormatter(): Intl.RelativeTimeFormat {
+	if (!relativeFormatter) {
+		relativeFormatter = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
+	}
+	return relativeFormatter;
+}
+
 /**
  * Locale-aware relative "time ago" via `Intl.RelativeTimeFormat`.
  *
@@ -27,16 +51,8 @@ export function relativeTimeAgo(
 
 	const diffSec = Math.round((date.getTime() - Date.now()) / 1000);
 	const abs = Math.abs(diffSec);
-	const rtf = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
-	const units: Array<[Intl.RelativeTimeFormatUnit, number]> = [
-		['year', 31536000],
-		['month', 2592000],
-		['week', 604800],
-		['day', 86400],
-		['hour', 3600],
-		['minute', 60]
-	];
-	for (const [unit, secs] of units) {
+	const rtf = getRelativeFormatter();
+	for (const [unit, secs] of RELATIVE_UNITS) {
 		if (abs >= secs) return rtf.format(Math.round(diffSec / secs), unit);
 	}
 	return rtf.format(diffSec, 'second');

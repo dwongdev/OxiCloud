@@ -3,8 +3,10 @@
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import { errorMessage, errorToast } from '$lib/utils/errors';
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { untrack } from 'svelte';
+	import { SvelteSet } from 'svelte/reactivity';
 	import Icon from '$lib/icons/Icon.svelte';
 	import {
 		cacheFolder,
@@ -131,7 +133,7 @@
 	async function toggleFavorite(kind: ItemType, id: string) {
 		const isFav = favoriteIds.has(id);
 		// Optimistic toggle, reverted on failure.
-		const next = new Set(favoriteIds);
+		const next = new SvelteSet(favoriteIds);
 		if (isFav) next.delete(id);
 		else next.add(id);
 		favoriteIds = next;
@@ -140,7 +142,7 @@
 			else await addFavorite(kind, id);
 		} catch (e) {
 			errorToast(e);
-			const reverted = new Set(favoriteIds);
+			const reverted = new SvelteSet(favoriteIds);
 			if (isFav) reverted.add(id);
 			else reverted.delete(id);
 			favoriteIds = reverted;
@@ -181,7 +183,7 @@
 
 		// External users have no home folder; send them to shared-with-me.
 		if (session.isExternalUser && pathSegments.length === 0) {
-			await goto('/shared-with-me', { replaceState: true });
+			await goto(resolve('/shared-with-me'), { replaceState: true });
 			return;
 		}
 		const home = await session.loadHomeFolder();
@@ -195,7 +197,7 @@
 				typeof localStorage !== 'undefined' ? localStorage.getItem('oxi-last-drive-root') : null;
 			const target = last ?? home;
 			if (target) {
-				await goto(`/files/${target}`, { replaceState: true });
+				await goto(resolve(`/files/${target}`), { replaceState: true });
 				return;
 			}
 		}
@@ -267,11 +269,7 @@
 	}
 
 	function openFolder(folder: FolderItem) {
-		goto(`/files/${[...pathSegments, folder.id].join('/')}`);
-	}
-
-	function crumbHref(index: number): string {
-		return `/files/${pathSegments.slice(0, index + 1).join('/')}`;
+		goto(resolve(`/files/${[...pathSegments, folder.id].join('/')}`));
 	}
 
 	async function onNewFolder() {
@@ -674,6 +672,9 @@
 		// reflects the param into viewerOpen/viewerFile.
 		const url = new URL(page.url);
 		url.searchParams.set('file', file.id);
+		// Same-origin URL object built from page.url (already resolved); resolve()
+		// only accepts a route string, so it can't type a dynamic URL instance.
+		// eslint-disable-next-line svelte/no-navigation-without-resolve
 		void goto(url, { keepFocus: true, noScroll: true });
 	}
 
@@ -705,6 +706,8 @@
 		if (!viewerOpen && hasParam) {
 			const url = new URL(page.url);
 			url.searchParams.delete('file');
+			// Same-origin URL object (see note above); resolve() can't type it.
+			// eslint-disable-next-line svelte/no-navigation-without-resolve
 			void goto(url, { keepFocus: true, noScroll: true, replaceState: true });
 		}
 	});
@@ -728,7 +731,7 @@
 	let selectionAnchor = $state<string | null>(null);
 
 	function toggleSelected(id: string) {
-		const next = new Set(selected);
+		const next = new SvelteSet(selected);
 		if (next.has(id)) next.delete(id);
 		else next.add(id);
 		selected = next;
@@ -965,6 +968,9 @@
 		// (DownloadURL can only point at a GET URL); file_ids/folder_ids are CSV.
 		const fileIds = items.filter((i) => i.kind === 'file').map((i) => i.id);
 		const folderIds = items.filter((i) => i.kind === 'folder').map((i) => i.id);
+		// Transient query-string builder for a one-off download URL — not reactive
+		// state, so a plain URLSearchParams is correct here.
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
 		const params = new URLSearchParams();
 		if (fileIds.length) params.set('file_ids', fileIds.join(','));
 		if (folderIds.length) params.set('folder_ids', folderIds.join(','));
@@ -1163,7 +1169,7 @@
 		// The current view already lists files inside their folder; navigate to the
 		// file's own folder id (handles deep-link / search contexts where the file's
 		// folder differs from the current path).
-		goto(`/files/${file.folder_id}`);
+		goto(resolve(`/files/${file.folder_id}`));
 	}
 
 	// ── Download a folder as a zip archive ────────────────────────────────────
@@ -1209,6 +1215,8 @@
 			}
 
 			// Map each relative directory path to its created folder id; '' = current.
+			// Local computation scratch map (discarded after upload) — not reactive state.
+			// eslint-disable-next-line svelte/prefer-svelte-reactivity
 			const dirIds = new Map<string, string | null>([['', currentId]]);
 
 			async function ensureDir(relDir: string): Promise<string | null> {
@@ -1342,6 +1350,10 @@
 	// within each lane. Lanes appear in first-seen order (folders precede files).
 	const groups = $derived.by<ResourceGroup[]>(() => {
 		if (groupBy === '') return [];
+		// Transient grouping map, local to this derivation and discarded once the
+		// array is built — must stay a plain Map (a reactive one created inside a
+		// $derived would be unsafe state).
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
 		const map = new Map<string, ResourceGroup>();
 		const ensure = (key: string): ResourceGroup => {
 			let g = map.get(key);
@@ -1575,7 +1587,7 @@
 					</span>
 				{:else}
 					<a
-						href={crumbHref(i)}
+						href={resolve(`/files/${pathSegments.slice(0, i + 1).join('/')}`)}
 						class="breadcrumb-item breadcrumb-link"
 						class:breadcrumb-home={i === 0}
 						title={i === 0 ? t('breadcrumb.home', 'Home') : undefined}
@@ -1891,6 +1903,7 @@
 			<a
 				class="btn-action"
 				href={fileDownloadUrl(file.id)}
+				rel="external"
 				download
 				title={t('common.download', 'Download')}
 				onclick={(e) => e.stopPropagation()}><Icon name="download" /></a
@@ -1936,7 +1949,7 @@
 <ShareDialog
 	bind:open={shareOpen}
 	item={actionTarget}
-	onshared={(id) => (sharedIds = new Set(sharedIds).add(id))}
+	onshared={(id) => (sharedIds = new SvelteSet(sharedIds).add(id))}
 />
 {#if fileViewer.component}
 	{@const FileViewer = fileViewer.component}
@@ -1967,7 +1980,7 @@
 				onclick={() => {
 					const id = ctxTarget!.id;
 					closeContext();
-					goto(`/files/${[...pathSegments, id].join('/')}`);
+					goto(resolve(`/files/${[...pathSegments, id].join('/')}`));
 				}}><Icon name="folder-open" /> {t('files.open', 'Open')}</button
 			>
 			<button
@@ -2013,6 +2026,7 @@
 				class="ctx-item"
 				role="menuitem"
 				href={fileDownloadUrl(ctxTarget.id)}
+				rel="external"
 				download
 				onclick={closeContext}><Icon name="download" /> {t('common.download', 'Download')}</a
 			>

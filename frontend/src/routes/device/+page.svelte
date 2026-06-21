@@ -1,4 +1,6 @@
 <script lang="ts">
+	// Route-scoped auth styles (this page uses the .auth-* classes).
+	import '$lib/styles/ported/auth.css';
 	import { errorMessage } from '$lib/utils/errors';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';

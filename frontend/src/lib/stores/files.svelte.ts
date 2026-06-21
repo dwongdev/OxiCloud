@@ -4,6 +4,7 @@
  * section, selection). Dialog/context-menu targets stay component-local until a
  * view proves they must be shared.
  */
+import { SvelteSet } from 'svelte/reactivity';
 import type { FolderItem } from '$lib/api/types';
 import { t } from '$lib/i18n/index.svelte';
 
@@ -85,7 +86,8 @@ class FilesStore {
 	viewMode = $state<ViewMode>(readViewMode());
 	section = $state<Section>('files');
 	isSearchMode = $state(false);
-	selection = $state<Set<string>>(new Set());
+	// Reactive set: in-place mutations below drive template/$derived reads.
+	selection = new SvelteSet<string>();
 
 	setViewMode(mode: ViewMode): void {
 		this.viewMode = mode;
@@ -93,7 +95,7 @@ class FilesStore {
 	}
 
 	clearSelection(): void {
-		this.selection = new Set();
+		this.selection.clear();
 	}
 
 	// Soft ceiling so the per-item toggle can't grow the set without bound.
@@ -102,10 +104,8 @@ class FilesStore {
 	static readonly MAX_SELECTION = 10_000;
 
 	toggleSelected(id: string): void {
-		const next = new Set(this.selection);
-		if (next.has(id)) next.delete(id);
-		else if (next.size < FilesStore.MAX_SELECTION) next.add(id);
-		this.selection = next;
+		if (this.selection.has(id)) this.selection.delete(id);
+		else if (this.selection.size < FilesStore.MAX_SELECTION) this.selection.add(id);
 	}
 }
 

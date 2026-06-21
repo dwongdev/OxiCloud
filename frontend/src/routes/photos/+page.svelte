@@ -81,6 +81,8 @@
 
 	const groups = $derived.by(() => {
 		const out: Array<{ key: string; label: string; photos: PhotoItem[] }> = [];
+		// Transient scratch map built inside $derived.by and discarded — not reactive state.
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
 		const index = new Map<string, number>();
 		for (const p of items) {
 			const d = new Date(photoTimestamp(p));

@@ -199,7 +199,7 @@ npm run test:unit      # Vitest                            (just fe-test)
 npm run format         # prettier --write .
 ```
 
-`just dev` runs the backend and the Vite dev server together. CI uses **Node 24**; Node 22+ works locally.
+`just dev` runs the backend and the Vite dev server together. CI uses **Node 26**; Node 24+ works locally.
 
 ## Frontend Architecture (`frontend/src/`)
 

@@ -1,4 +1,6 @@
 <script lang="ts">
+	// Route-scoped auth styles (this page uses the .auth-* classes).
+	import '$lib/styles/ported/auth.css';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { getOidcProviders } from '$lib/api/endpoints/auth';
@@ -86,7 +88,8 @@
 				{#if passwordLoginEnabled}
 					<div class="auth-divider"><span>{t('auth.or', 'or')}</span></div>
 				{/if}
-				<a class="auth-button auth-button-sso" href={`/login/v2/flow/${token}/oidc`}>
+				<!-- Backend Nextcloud Login Flow v2 OIDC handshake (not a SvelteKit route). -->
+				<a class="auth-button auth-button-sso" href={`/login/v2/flow/${token}/oidc`} rel="external">
 					{t('nextcloud.sign_in_with', { provider: oidcProvider }, 'Sign in with {{provider}}')}
 				</a>
 			{/if}

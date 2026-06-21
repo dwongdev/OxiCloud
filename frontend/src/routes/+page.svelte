@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
 	import { session } from '$lib/stores/session.svelte';
 
@@ -12,7 +13,7 @@
 	//     `default_for_user` matches the caller).
 	onMount(() => {
 		const target = session.isExternalUser ? '/shared-with-me' : '/files';
-		void goto(target, { replaceState: true });
+		void goto(resolve(target), { replaceState: true });
 	});
 </script>
 

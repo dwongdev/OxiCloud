@@ -196,7 +196,12 @@
 							{t('files.edit', 'Edit')}
 						</button>
 					{/if}
-					<a class="btn btn-secondary btn-sm" href={fileDownloadUrl(file.id)} download>
+					<a
+						class="btn btn-secondary btn-sm"
+						href={fileDownloadUrl(file.id)}
+						download
+						rel="external"
+					>
 						<Icon name="download" />
 						{t('common.download', 'Download')}
 					</a>
@@ -204,7 +209,7 @@
 						class="btn btn-secondary btn-sm"
 						href={fileInlineUrl(file.id)}
 						target="_blank"
-						rel="noreferrer"
+						rel="external noreferrer"
 					>
 						<Icon name="external-link-alt" />
 					</a>
@@ -381,7 +386,7 @@
 		padding: 1rem;
 		overflow: auto;
 		white-space: pre-wrap;
-		word-break: break-word;
+		overflow-wrap: break-word;
 		font-family: var(--font-mono, monospace);
 		font-size: var(--text-sm);
 		color: var(--color-text);

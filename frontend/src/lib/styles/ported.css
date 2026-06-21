@@ -14,5 +14,6 @@
 @import url('./ported/skeleton.css');
 @import url('./ported/notifications.css');
 @import url('./ported/userMenu.css');
-@import url('./ported/auth.css');
-@import url('./ported/music.css');
+/* auth.css and music.css are route-scoped — imported by their pages
+ * (routes/login, device, nextcloud/login, music) so they stay off the
+ * global critical path. */

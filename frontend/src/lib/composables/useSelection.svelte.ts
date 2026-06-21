@@ -1,15 +1,18 @@
+import { SvelteSet } from 'svelte/reactivity';
+
 /**
  * Reactive multi-select over string ids. Backs the repeated
  * `let selected = $state(new Set()); function toggle(id) { … }` pattern used by
  * the photos grid, music picker and other list views with one source of truth.
  *
- * Mutations swap in a fresh Set so `$derived`/template reads re-run.
+ * Backed by a reactive {@link SvelteSet}, so in-place mutations (`add`/`delete`)
+ * drive `$derived`/template reads without copying the set.
  */
 export class Selection {
-	#ids = $state<Set<string>>(new Set());
+	#ids = new SvelteSet<string>();
 
 	/** The live selection set (read-only intent — mutate via the methods). */
-	get ids(): Set<string> {
+	get ids(): SvelteSet<string> {
 		return this.#ids;
 	}
 
@@ -31,31 +34,26 @@ export class Selection {
 	}
 
 	toggle(id: string): void {
-		const next = new Set(this.#ids);
-		if (next.has(id)) next.delete(id);
-		else next.add(id);
-		this.#ids = next;
+		if (this.#ids.has(id)) this.#ids.delete(id);
+		else this.#ids.add(id);
 	}
 
 	add(id: string): void {
-		if (this.#ids.has(id)) return;
-		this.#ids = new Set(this.#ids).add(id);
+		this.#ids.add(id);
 	}
 
 	delete(id: string): void {
-		if (!this.#ids.has(id)) return;
-		const next = new Set(this.#ids);
-		next.delete(id);
-		this.#ids = next;
+		this.#ids.delete(id);
 	}
 
 	/** Replace the whole selection. */
 	set(ids: Iterable<string>): void {
-		this.#ids = new Set(ids);
+		this.#ids.clear();
+		for (const id of ids) this.#ids.add(id);
 	}
 
 	clear(): void {
-		if (this.#ids.size) this.#ids = new Set();
+		this.#ids.clear();
 	}
 }
 

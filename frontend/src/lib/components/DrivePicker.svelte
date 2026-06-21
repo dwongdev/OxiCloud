@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 
@@ -55,7 +56,7 @@
 		} catch {
 			/* private mode / quota — silently fall back to default */
 		}
-		await goto(`/files/${d.root_folder_id}`);
+		await goto(resolve(`/files/${d.root_folder_id}`));
 	}
 
 	onMount(() => {
@@ -83,7 +84,7 @@
 					<span class="drive-picker__name">{d.name}</span>
 				</button>
 				<a
-					href={`/config/drive/${d.id}`}
+					href={resolve(`/config/drive/${d.id}`)}
 					class="drive-picker__settings"
 					title={t('drive.settings_aria', 'Drive settings')}
 					aria-label={t('drive.settings_aria', 'Drive settings')}

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { errorMessage } from '$lib/utils/errors';
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
 	import { dateBucket, resolveOwnerName, typeLabel } from '$lib/api/endpoints/favorites';
 	import { fetchSharedWithMe, type IncomingGrantItem } from '$lib/api/endpoints/grants';
@@ -114,7 +115,7 @@
 
 	function open(entry: ResourceEntry) {
 		if (entry.kind === 'folder') {
-			goto(`/files/${entry.id}`);
+			goto(resolve(`/files/${entry.id}`));
 			return;
 		}
 		const item = byId.get(entry.id);

@@ -3,7 +3,9 @@
 	import { useOwnerCache } from '$lib/composables/useOwnerCache.svelte';
 	import { errorToast } from '$lib/utils/errors';
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
+	import { SvelteSet } from 'svelte/reactivity';
 	import { clearRecent, fetchRecentPage, type RecentResourceItem } from '$lib/api/endpoints/recent';
 	import {
 		addFavorite,
@@ -143,7 +145,7 @@
 
 	function open(entry: ResourceEntry) {
 		if (entry.kind === 'folder') {
-			goto(`/files/${entry.id}`);
+			goto(resolve(`/files/${entry.id}`));
 			return;
 		}
 		const item = byId.get(entry.id);
@@ -155,7 +157,7 @@
 
 	async function toggleFavorite(entry: ResourceEntry) {
 		const isFav = favoriteIds.has(entry.id);
-		const next = new Set(favoriteIds);
+		const next = new SvelteSet(favoriteIds);
 		if (isFav) next.delete(entry.id);
 		else next.add(entry.id);
 		favoriteIds = next;

@@ -2,6 +2,7 @@
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import { errorMessage, errorToast } from '$lib/utils/errors';
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { onMount } from 'svelte';
 	import {
 		displayRole,
@@ -88,6 +89,8 @@
 
 	const lanes = $derived.by((): Lane[] => {
 		const out: Lane[] = [];
+		// Transient scratch map built inside $derived.by and discarded — not reactive state.
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
 		const byKey = new Map<string, Lane>();
 		const ensure = (key: string, header: Lane['header']): Lane => {
 			let lane = byKey.get(key);
@@ -179,7 +182,7 @@
 	}
 
 	function openResource(item: OutgoingGrantItem) {
-		if (item.resource_type === 'folder') goto(`/files/${item.resource.id}`);
+		if (item.resource_type === 'folder') goto(resolve(`/files/${item.resource.id}`));
 		else window.open(fileInlineUrl(item.resource.id), '_blank', 'noopener');
 	}
 

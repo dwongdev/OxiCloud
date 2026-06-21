@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 
@@ -70,7 +71,7 @@
 			<p class="muted">
 				{t('drive.not_found_body', "This drive doesn't exist or you don't have access to it.")}
 			</p>
-			<a class="link" href="/files">{t('drive.back_to_files', 'Back to Files')}</a>
+			<a class="link" href={resolve('/files')}>{t('drive.back_to_files', 'Back to Files')}</a>
 		</div>
 	{:else}
 		<h1>

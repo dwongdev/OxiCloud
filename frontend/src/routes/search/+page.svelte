@@ -1,7 +1,9 @@
 <script lang="ts">
 	import EmptyState from '$lib/components/EmptyState.svelte';
+	import VirtualList from '$lib/components/VirtualList.svelte';
 	import { errorMessage } from '$lib/utils/errors';
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { searchFiles } from '$lib/api/endpoints/search';
 	import { fileInlineUrl } from '$lib/api/endpoints/files';
@@ -151,7 +153,7 @@
 	}
 
 	function openFolder(folder: FolderItem) {
-		goto(`/files/${folder.id}`);
+		goto(resolve(`/files/${folder.id}`));
 	}
 
 	function openFile(file: FileItem) {
@@ -159,6 +161,18 @@
 	}
 
 	const isEmpty = $derived(!!results && results.files.length === 0 && results.folders.length === 0);
+
+	// Flatten folders + files into one list so the results render through a single
+	// windowed list (only the visible rows hit the DOM, even for 100s of hits).
+	type SearchEntry = { kind: 'folder'; folder: FolderItem } | { kind: 'file'; file: FileItem };
+	const entries = $derived<SearchEntry[]>(
+		results
+			? [
+					...results.folders.map((folder) => ({ kind: 'folder' as const, folder })),
+					...results.files.map((file) => ({ kind: 'file' as const, file }))
+				]
+			: []
+	);
 
 	$effect(() => {
 		// re-run when query, sort, scope, or any filter changes
@@ -256,43 +270,49 @@
 				<div>{t('files.col_modified', 'Modified')}</div>
 			</div>
 
-			{#each results.folders as folder (folder.id)}
-				<div
-					class="file-item"
-					role="button"
-					tabindex="0"
-					onclick={() => openFolder(folder)}
-					onkeydown={(e) => e.key === 'Enter' && openFolder(folder)}
-				>
-					<div class="name-cell">
-						<span class="file-icon file-icon--folder"><Icon name="folder" /></span>
-						<span>{folder.name}</span>
-					</div>
-					<div class="path-cell">{folder.path}</div>
-					<div class="size-cell">—</div>
-					<div class="date-cell">{formatDate(folder.modified_at)}</div>
-				</div>
-			{/each}
-
-			{#each results.files as file (file.id)}
-				<div
-					class="file-item"
-					role="button"
-					tabindex="0"
-					onclick={() => openFile(file)}
-					onkeydown={(e) => e.key === 'Enter' && openFile(file)}
-				>
-					<div class="name-cell">
-						<span class="file-icon {fileIconKindClass(iconNameFromClass(file.icon_class))}"
-							><Icon name={iconNameFromClass(file.icon_class)} /></span
+			<VirtualList
+				items={entries}
+				rowHeight={56}
+				key={(e) => (e.kind === 'folder' ? e.folder.id : e.file.id)}
+			>
+				{#snippet row(e)}
+					{#if e.kind === 'folder'}
+						<div
+							class="file-item"
+							role="button"
+							tabindex="0"
+							onclick={() => openFolder(e.folder)}
+							onkeydown={(ev) => ev.key === 'Enter' && openFolder(e.folder)}
 						>
-						<span>{file.name}</span>
-					</div>
-					<div class="path-cell">{file.path}</div>
-					<div class="size-cell">{file.size != null ? formatBytes(file.size) : ''}</div>
-					<div class="date-cell">{formatDate(file.modified_at)}</div>
-				</div>
-			{/each}
+							<div class="name-cell">
+								<span class="file-icon file-icon--folder"><Icon name="folder" /></span>
+								<span>{e.folder.name}</span>
+							</div>
+							<div class="path-cell">{e.folder.path}</div>
+							<div class="size-cell">—</div>
+							<div class="date-cell">{formatDate(e.folder.modified_at)}</div>
+						</div>
+					{:else}
+						<div
+							class="file-item"
+							role="button"
+							tabindex="0"
+							onclick={() => openFile(e.file)}
+							onkeydown={(ev) => ev.key === 'Enter' && openFile(e.file)}
+						>
+							<div class="name-cell">
+								<span class="file-icon {fileIconKindClass(iconNameFromClass(e.file.icon_class))}"
+									><Icon name={iconNameFromClass(e.file.icon_class)} /></span
+								>
+								<span>{e.file.name}</span>
+							</div>
+							<div class="path-cell">{e.file.path}</div>
+							<div class="size-cell">{e.file.size != null ? formatBytes(e.file.size) : ''}</div>
+							<div class="date-cell">{formatDate(e.file.modified_at)}</div>
+						</div>
+					{/if}
+				{/snippet}
+			</VirtualList>
 		</div>
 	</div>
 {/if}

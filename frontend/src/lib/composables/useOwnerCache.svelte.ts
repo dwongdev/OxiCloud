@@ -31,6 +31,9 @@ export class OwnerCache {
 
 	/** Resolve every not-yet-cached id in parallel; nullish ids are skipped. */
 	async resolve(ids: Iterable<string | null | undefined>): Promise<void> {
+		// Transient scratch Set for dedup only — built, spread to an array, and
+		// discarded in this call; never read reactively, so a plain Set is correct.
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
 		const pending = [...new Set([...ids].filter((id): id is string => !!id))].filter(
 			(id) => !this.#names[id]
 		);

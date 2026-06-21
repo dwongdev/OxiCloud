@@ -1,4 +1,7 @@
 <script lang="ts">
+	// Route-scoped styles: kept off the global critical path (Vite code-splits
+	// this into the /music route chunk, loaded only when this page renders).
+	import '$lib/styles/ported/music.css';
 	import { useSelection } from '$lib/composables/useSelection.svelte';
 	import { errorMessage, errorToast } from '$lib/utils/errors';
 	import { onMount } from 'svelte';

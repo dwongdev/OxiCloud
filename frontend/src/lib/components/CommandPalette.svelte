@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { logout } from '$lib/api/endpoints/auth';
 	import { searchFiles } from '$lib/api/endpoints/search';
 	import { fileInlineUrl } from '$lib/api/endpoints/files';
@@ -56,10 +57,27 @@
 		prevFocus = null;
 	}
 
-	function nav(path: string): Command['run'] {
+	// The routes navigated to from the palette. Kept as an explicit literal union
+	// so `resolve()` type-checks each path against the real route table.
+	type NavPath =
+		| '/files'
+		| '/shared'
+		| '/shared-with-me'
+		| '/recent'
+		| '/favorites'
+		| '/photos'
+		| '/music'
+		| '/groups'
+		| '/trash'
+		| '/profile'
+		| '/admin'
+		| '/login'
+		| `/files/${string}`;
+
+	function nav(path: NavPath): Command['run'] {
 		return () => {
 			close();
-			void goto(path);
+			void goto(resolve(path));
 		};
 	}
 
@@ -70,7 +88,7 @@
 	 */
 	function uploadFiles() {
 		close();
-		void goto('/files').then(() => {
+		void goto(resolve('/files')).then(() => {
 			window.dispatchEvent(new CustomEvent('oxicloud:upload-files'));
 		});
 	}
@@ -153,7 +171,7 @@
 						/* clear locally regardless */
 					}
 					session.reset();
-					await goto('/login');
+					await goto(resolve('/login'));
 				}
 			}
 		);

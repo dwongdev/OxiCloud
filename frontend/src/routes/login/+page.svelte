@@ -1,6 +1,11 @@
 <script lang="ts">
+	// Route-scoped styles: kept off the global critical path (Vite code-splits
+	// this into the /login route chunk, loaded only when this page renders).
+	import '$lib/styles/ported/auth.css';
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
+	import type { Pathname } from '$app/types';
 	import { onMount } from 'svelte';
 	import {
 		exchangeOidcCode,
@@ -65,7 +70,10 @@
 	let oidc = $state<OidcProviders>({ enabled: false });
 	const passwordLoginEnabled = $derived(oidc.password_login_enabled !== false);
 
-	const redirectTarget = $derived(page.url.searchParams.get('redirect') || '/files');
+	// The redirect target is an in-SPA destination (e.g. /files or a deep link a
+	// guard bounced us from). It's user-supplied via the query string so its exact
+	// value isn't a known route literal — cast to Pathname for resolve().
+	const redirectTarget = $derived((page.url.searchParams.get('redirect') || '/files') as Pathname);
 	const matchState = $derived(
 		regConfirm.length === 0 ? '' : regPassword === regConfirm ? 'ok' : 'bad'
 	);
@@ -100,7 +108,7 @@
 				return;
 			}
 			session.user = data.user;
-			await goto(redirectTarget, { replaceState: true });
+			await goto(resolve(redirectTarget), { replaceState: true });
 		} catch (err) {
 			error = err instanceof Error ? err.message : t('auth.login_error', 'Error logging in');
 		} finally {
@@ -196,7 +204,7 @@
 			const user = await exchangeOidcCode(oidcCode);
 			if (user) {
 				session.user = user;
-				await goto(redirectTarget, { replaceState: true });
+				await goto(resolve(redirectTarget), { replaceState: true });
 				return;
 			}
 			// Exchange failed — fall through to the normal login UI.
@@ -207,7 +215,7 @@
 			const me = await fetchMe();
 			if (me) {
 				session.user = me;
-				await goto(redirectTarget, { replaceState: true });
+				await goto(resolve(redirectTarget), { replaceState: true });
 				return;
 			}
 		} catch {
@@ -362,7 +370,8 @@
 					{#if passwordLoginEnabled}
 						<div class="auth-divider"><span>{t('auth.or', 'or')}</span></div>
 					{/if}
-					<a class="auth-button auth-button-oidc" href={oidc.authorize_endpoint}>
+					<!-- Backend OIDC authorize endpoint (not a SvelteKit route). -->
+					<a class="auth-button auth-button-oidc" href={oidc.authorize_endpoint} rel="external">
 						{t(
 							'auth.sso_login_provider',
 							{ provider: oidc.provider_name ?? 'SSO' },

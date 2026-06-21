@@ -8,10 +8,10 @@ function jsonResponse(status: number, body: unknown = {}): Response {
 }
 
 describe('createApiFetch — 401 refresh/retry parity', () => {
-	let onSessionExpired: ReturnType<typeof vi.fn>;
+	let onSessionExpired: ReturnType<typeof vi.fn<() => void>>;
 
 	beforeEach(() => {
-		onSessionExpired = vi.fn();
+		onSessionExpired = vi.fn<() => void>();
 	});
 
 	it('passes through a non-401 response untouched (no refresh)', async () => {

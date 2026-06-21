@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { Snippet } from 'svelte';
 	import { goto } from '$app/navigation';
+	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import { logout } from '$lib/api/endpoints/auth';
 	import { searchFiles } from '$lib/api/endpoints/search';
@@ -25,7 +26,15 @@
 	const palette = lazyComponent(() => import('$lib/components/CommandPalette.svelte'));
 
 	interface NavLink {
-		href: string;
+		href:
+			| '/files'
+			| '/shared'
+			| '/shared-with-me'
+			| '/recent'
+			| '/favorites'
+			| '/photos'
+			| '/music'
+			| '/trash';
 		label: string;
 		icon: string;
 		/** Stable key driving the per-section icon colour (see sidebar.css). */
@@ -126,7 +135,7 @@
 		if (q) {
 			suggestOpen = false;
 			searchActive = false;
-			goto(`/search?q=${encodeURIComponent(q)}`);
+			goto(resolve(`/search?q=${encodeURIComponent(q)}`));
 		}
 	}
 
@@ -169,7 +178,7 @@
 
 	function pickSuggestion(s: Suggestion) {
 		suggestOpen = false;
-		if (s.kind === 'folder') goto(`/files/${s.item.id}`);
+		if (s.kind === 'folder') goto(resolve(`/files/${s.item.id}`));
 		else window.open(fileInlineUrl(s.item.id), '_blank', 'noopener');
 	}
 
@@ -230,7 +239,7 @@
 			/* clear locally regardless */
 		}
 		session.reset();
-		await goto('/login');
+		await goto(resolve('/login'));
 	}
 </script>
 
@@ -259,7 +268,7 @@
 ></div>
 
 <div class="sidebar" class:open={sidebarOpen}>
-	<a href="/files" class="logo-container">
+	<a href={resolve('/files')} class="logo-container">
 		<div class="logo">
 			<svg viewBox="95 67 320 320" aria-hidden="true">
 				<path
@@ -275,7 +284,7 @@
 			<a
 				class="nav-item"
 				class:active={active(link.href)}
-				href={link.href}
+				href={resolve(link.href)}
 				data-section={link.section}
 				onclick={() => (sidebarOpen = false)}
 			>
@@ -546,15 +555,15 @@
 					<div class="user-menu-divider"></div>
 
 					{#if isAdmin}
-						<a class="user-menu-item" href="/admin" onclick={() => (menuOpen = false)}>
+						<a class="user-menu-item" href={resolve('/admin')} onclick={() => (menuOpen = false)}>
 							<Icon name="cogs" /> <span>{t('user_menu.admin_panel', 'Admin panel')}</span>
 						</a>
-						<a class="user-menu-item" href="/groups" onclick={() => (menuOpen = false)}>
+						<a class="user-menu-item" href={resolve('/groups')} onclick={() => (menuOpen = false)}>
 							<Icon name="user-group" />
 							<span>{t('user_menu.manage_groups', 'Manage groups')}</span>
 						</a>
 					{/if}
-					<a class="user-menu-item" href="/profile" onclick={() => (menuOpen = false)}>
+					<a class="user-menu-item" href={resolve('/profile')} onclick={() => (menuOpen = false)}>
 						<Icon name="user-circle" /> <span>{t('user_menu.profile', 'My profile')}</span>
 					</a>
 

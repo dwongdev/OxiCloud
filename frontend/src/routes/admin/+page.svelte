@@ -2134,7 +2134,7 @@
 	}
 
 	.log-msg {
-		word-break: break-word;
+		overflow-wrap: break-word;
 	}
 
 	.logs-pager {

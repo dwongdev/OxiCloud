@@ -840,7 +840,7 @@
 
 	.info-value {
 		font-weight: var(--weight-medium, 500);
-		word-break: break-word;
+		overflow-wrap: break-word;
 	}
 
 	.storage-stats {

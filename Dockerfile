@@ -9,7 +9,7 @@ RUN apk --no-cache upgrade && \
 # ─── Stage 1b: Build the SvelteKit frontend (Vite) ───────────────────────────
 # Produces the SPA in /static-dist. `npm ci` is cached unless the lockfile
 # changes; the Rust build no longer bundles assets (see build.rs).
-FROM node:24-alpine AS frontend
+FROM node:26.3.1-alpine3.24 AS frontend
 WORKDIR /frontend
 COPY frontend/package.json frontend/package-lock.json ./
 RUN npm ci

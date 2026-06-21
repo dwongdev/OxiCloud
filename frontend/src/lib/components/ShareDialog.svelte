@@ -89,6 +89,8 @@
 	}
 
 	function groupGrants(grants: Grant[]): Member[] {
+		// Transient scratch map used to fold grants into Member rows, then discarded.
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
 		const bySubject = new Map<
 			string,
 			{ subject: GrantSubject; role: ShareRole; ids: string[]; expiry: string | null }

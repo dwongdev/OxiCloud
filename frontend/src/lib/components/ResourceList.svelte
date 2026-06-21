@@ -50,6 +50,7 @@
 
 <script lang="ts">
 	import type { Snippet } from 'svelte';
+	import { SvelteSet } from 'svelte/reactivity';
 	import Icon from '$lib/icons/Icon.svelte';
 	import EmptyState from '$lib/components/EmptyState.svelte';
 	import SkeletonList from '$lib/components/SkeletonList.svelte';
@@ -195,6 +196,8 @@
 		const bucketOf = activeGroup?.bucketOf;
 		if (!bucketOf) return [{ key: '', label: '', rows: items }];
 		const order: string[] = [];
+		// Transient bucketing map computed inside $derived.by — not reactive state.
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity
 		const map = new Map<string, ResourceEntry[]>();
 		for (const entry of items) {
 			const k = bucketOf(entry) ?? '∅';
@@ -213,24 +216,24 @@
 	const grouped = $derived(!!activeGroup?.bucketOf);
 
 	// ── Selection ─────────────────────────────────────────────────────────────
-	let selected = $state<Set<string>>(new Set());
+	// SvelteSet is reactive on its own; mutate in place rather than reassigning.
+	const selected = new SvelteSet<string>();
 
 	function toggleSelected(id: string) {
-		const next = new Set(selected);
-		if (next.has(id)) next.delete(id);
-		else next.add(id);
-		selected = next;
-		onselectionchange?.(next);
+		if (selected.has(id)) selected.delete(id);
+		else selected.add(id);
+		onselectionchange?.(selected);
 	}
 	function clearSelection() {
-		selected = new Set();
+		selected.clear();
 		onselectionchange?.(selected);
 	}
 	const allSelected = $derived(items.length > 0 && selected.size === items.length);
 	function toggleSelectAll() {
 		if (allSelected) clearSelection();
 		else {
-			selected = new Set(items.map((i) => i.id));
+			selected.clear();
+			for (const i of items) selected.add(i.id);
 			onselectionchange?.(selected);
 		}
 	}
@@ -240,15 +243,13 @@
 	$effect(() => {
 		const ids = new Set(items.map((i) => i.id));
 		let changed = false;
-		const next = new Set<string>();
 		for (const id of selected) {
-			if (ids.has(id)) next.add(id);
-			else changed = true;
+			if (!ids.has(id)) {
+				selected.delete(id);
+				changed = true;
+			}
 		}
-		if (changed) {
-			selected = next;
-			onselectionchange?.(next);
-		}
+		if (changed) onselectionchange?.(selected);
 	});
 
 	// ── Right-click context menu ──────────────────────────────────────────────
@@ -420,9 +421,17 @@
 				{@render listHeader()}
 				{#each sections as section (section.key)}
 					<div class="rl-swimlane-header" role="rowheader">{section.label}</div>
-					{#each section.rows as entry (entry.id)}
-						{@render row(entry)}
-					{/each}
+					{#if filesStore.viewMode === 'list'}
+						<!-- Window each section's rows so a large grouped list (e.g. a big
+						     trash, grouped by remaining days) doesn't mount every row. The
+						     grid-grouped branch stays un-windowed: `files-grid-view` is itself
+						     the card grid and can't host the windowing spacer wrapper. -->
+						<VirtualList items={section.rows} rowHeight={56} key={(e) => e.id} {row} />
+					{:else}
+						{#each section.rows as entry (entry.id)}
+							{@render row(entry)}
+						{/each}
+					{/if}
 				{/each}
 			</div>
 		{:else if filesStore.viewMode === 'list'}
