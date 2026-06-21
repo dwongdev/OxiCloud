@@ -137,6 +137,7 @@ pub struct AuthApplicationService {
     /// Pending one-time token codes for secure token delivery after OIDC callback.
     /// Auto-expires after 60 seconds via moka TTL; max 10 000 entries for DoS protection.
     pending_oidc_tokens: Cache<String, PendingOidcToken>,
+    completed_oidc_logins: Cache<String, String>,
     /// Magic-link token repository — populated when the magic-link feature
     /// is enabled (PR 8+). `None` means redemption endpoints return 503.
     magic_link_repo: Option<Arc<dyn MagicLinkTokenRepository>>,
@@ -180,6 +181,10 @@ impl AuthApplicationService {
             pending_oidc_tokens: Cache::builder()
                 .max_capacity(10_000)
                 .time_to_live(Duration::from_secs(60))
+                .build(),
+            completed_oidc_logins: Cache::builder()
+                .max_capacity(10_000)
+                .time_to_live(Duration::from_secs(120))
                 .build(),
             magic_link_repo: None,
             user_flags_cache: Cache::builder()
@@ -2020,13 +2025,31 @@ impl AuthApplicationService {
     ) -> Result<OidcCallbackResult, DomainError> {
         // 0. Validate CSRF state and retrieve PKCE verifier + nonce + optional NC token
         //    (entry is auto-expired by moka TTL — remove returns None if expired)
-        let flow = self.pending_oidc_flows.remove(state).ok_or_else(|| {
-            tracing::warn!("OIDC callback with invalid/expired state token");
-            DomainError::new(
-                ErrorKind::AccessDenied, "OIDC",
-                "Invalid or expired OIDC state — possible CSRF attack. Please try logging in again.",
-            )
-        })?;
+        let flow = match self.pending_oidc_flows.remove(state) {
+            Some(flow) => flow,
+            None => {
+                if let Some(exchange_code) = self.completed_oidc_logins.get(state) {
+                    tracing::info!(
+                        target: "audit",
+                        event = "oidc.callback_replayed",
+                        reason = "duplicate_callback",
+                        "👮🏻‍♂️ Replayed a recently-completed OIDC login for a duplicate callback (consumed state)",
+                    );
+                    return Ok(OidcCallbackResult::WebLogin { exchange_code });
+                }
+                tracing::warn!(
+                    target: "audit",
+                    event = "oidc.callback_rejected",
+                    reason = "invalid_or_expired_state",
+                    "👮🏻‍♂️ OIDC callback with invalid/expired state token",
+                );
+                return Err(DomainError::new(
+                    ErrorKind::AccessDenied,
+                    "OIDC",
+                    "Invalid or expired OIDC state — possible CSRF attack. Please try logging in again.",
+                ));
+            }
+        };
         let (pkce_verifier, nonce, nc_flow_token) =
             (flow.pkce_verifier, flow.nonce, flow.nc_flow_token);
 
@@ -2323,6 +2346,9 @@ impl AuthApplicationService {
         // Store auth response (auto-expires after 60 s via moka TTL)
         self.pending_oidc_tokens
             .insert(exchange_code.clone(), PendingOidcToken { auth_response });
+
+        self.completed_oidc_logins
+            .insert(state.to_string(), exchange_code.clone());
 
         tracing::info!("OIDC login successful, one-time exchange code generated");
 

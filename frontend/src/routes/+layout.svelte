@@ -9,6 +9,7 @@
 	import { session } from '$lib/stores/session.svelte';
 	import { ui } from '$lib/stores/ui.svelte';
 	import { hashUrlToPath } from '$lib/utils/hashRedirect';
+	import { killLegacyServiceWorker } from '$lib/utils/killLegacyServiceWorker';
 
 	let { children } = $props();
 
@@ -33,6 +34,8 @@
 	let ready = $state(false);
 
 	onMount(async () => {
+		await killLegacyServiceWorker();
+
 		// The instant HTML boot splash has done its job — the app is mounted, so
 		// the route (login renders immediately; protected routes show their own
 		// loading state) is already in the DOM behind it.
