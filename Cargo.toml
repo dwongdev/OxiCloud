@@ -182,6 +182,14 @@ name = "bench_blob_prefetch"
 path = "examples/bench_blob_prefetch.rs"
 required-features = ["bench"]
 
+# Tokio runtime tuning benchmark — worker over-subscription (throughput + p99
+# under CPU contention) and blocking-pool RSS blast radius, default vs tuned.
+# No Postgres needed; run under `taskset -c 0,1` to model a 2-core quota.
+[[example]]
+name = "bench_tokio_runtime"
+path = "examples/bench_tokio_runtime.rs"
+required-features = ["bench"]
+
 # ACL owner-cache benchmark — owner query vs moka hit (needs the dev Postgres up).
 [[example]]
 name = "bench_owner_cache"
