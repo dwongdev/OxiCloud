@@ -130,12 +130,17 @@ pub trait BlobStorageBackend: Send + Sync + 'static {
     /// How many chunk fetches the CDC reader may run concurrently when
     /// reassembling a file (`read_blob_stream`'s `buffered(N)` read-ahead).
     ///
-    /// The default is **1** — sequential, because for a local disk concurrent
-    /// opens turn one sequential read into several competing random-I/O streams
-    /// over content-addressed (scattered) chunk files, which is neutral on a
-    /// warm page cache and *slower* cold. Remote backends (S3/Azure) override
-    /// this with a higher value: there the dominant cost is per-chunk request
-    /// latency, and overlapping fetches hides it (≈ N× faster reassembly).
+    /// The trait default is a conservative **1** (strictly sequential) — the
+    /// safe fallback for any backend that doesn't know its own I/O profile.
+    /// Concrete backends override it:
+    ///   • Local disk → a small benchmarked depth (default `2`, env-tunable):
+    ///     overlapping the next chunk's `File::open` with the current chunk's
+    ///     drain measured +7–12% on disk-bound reads with no cold regression on
+    ///     SSDs; deeper queues buy little (the data read, not the open, is then
+    ///     the cost) and risk competing random I/O over scattered content-
+    ///     addressed chunk files on seek-bound HDDs. See `LocalBlobBackend`.
+    ///   • Remote (S3/Azure) → `8`: there the dominant cost is per-chunk request
+    ///     latency, and overlapping fetches hides it (≈ N× faster reassembly).
     /// Wrapping backends delegate to the backend that actually serves the bytes.
     fn read_prefetch(&self) -> usize {
         1
