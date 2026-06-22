@@ -44,6 +44,9 @@ impl DrivePgRepository {
 
     /// Map a row carrying both the drive's columns AND a `root_folder_name`
     /// column (sourced via JOIN with `storage.folders`) into the view-model.
+    /// `caller_role` is left `None` — only the listing path (which
+    /// JOINs `role_grants` for accessibility) has it in scope; see
+    /// `row_to_drive_with_name_and_role`.
     fn row_to_drive_with_name(
         row: &sqlx::postgres::PgRow,
     ) -> Result<DriveWithRootName, DriveRepositoryError> {
@@ -63,7 +66,24 @@ impl DrivePgRepository {
         Ok(DriveWithRootName {
             drive,
             root_folder_name: row.get("root_folder_name"),
+            caller_role: None,
         })
+    }
+
+    /// Same as `row_to_drive_with_name` but reads `caller_role` from the
+    /// listing query — `MIN(g.role)::text`. The `storage.grant_role` ENUM
+    /// is declared owner→viewer (strongest→weakest), so `MIN` picks the
+    /// strongest of the caller's grants on the drive (direct +
+    /// group-mediated collapsed by GROUP BY). Used only by
+    /// `list_for_subjects`.
+    fn row_to_drive_with_name_and_role(
+        row: &sqlx::postgres::PgRow,
+    ) -> Result<DriveWithRootName, DriveRepositoryError> {
+        use crate::domain::services::authorization::Role;
+        let mut dwr = Self::row_to_drive_with_name(row)?;
+        let role_str: Option<String> = row.try_get("caller_role").ok();
+        dwr.caller_role = role_str.as_deref().and_then(Role::parse);
+        Ok(dwr)
     }
 }
 
@@ -260,12 +280,20 @@ impl DriveRepository for DrivePgRepository {
         // group-mediated) and sidesteps PostgreSQL's "ORDER BY
         // expression must appear in select list" rule that SELECT
         // DISTINCT imposes.
+        // `MIN(g.role)` picks the caller's strongest role on each drive:
+        // `storage.grant_role` is declared `owner → viewer` (strongest →
+        // weakest), so MIN returns the strongest. Cast `::text` matches
+        // the codebase convention for reading enum columns into Rust
+        // (see `pg_acl_engine.rs`); `Role::parse` handles the trip back.
+        // Collapses direct + group-mediated grants on the same drive
+        // into one row alongside the existing GROUP BY.
         let rows = sqlx::query(
             r#"
             SELECT d.id, d.kind, d.default_for_user, d.root_folder_id,
                    d.quota_bytes, d.used_bytes, d.policies,
                    d.created_at, d.updated_at,
-                   f.name AS root_folder_name
+                   f.name AS root_folder_name,
+                   MIN(g.role)::text AS caller_role
               FROM storage.drives d
               JOIN storage.folders f ON f.id = d.root_folder_id
               JOIN storage.role_grants g
@@ -292,6 +320,8 @@ impl DriveRepository for DrivePgRepository {
         .await
         .map_err(|e| Self::map_sqlx_err("list_for_subjects", e))?;
 
-        rows.iter().map(Self::row_to_drive_with_name).collect()
+        rows.iter()
+            .map(Self::row_to_drive_with_name_and_role)
+            .collect()
     }
 }

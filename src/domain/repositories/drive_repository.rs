@@ -51,6 +51,17 @@ pub struct DriveWithRootName {
     /// The drive's display name. Sourced from `storage.folders.name`
     /// of the root folder via JOIN at read time.
     pub root_folder_name: String,
+    /// Highest role the calling user holds on this drive (direct OR
+    /// group-mediated). Populated by `list_for_subjects` (which already
+    /// JOINs `role_grants` for accessibility, so the role is in scope at
+    /// query time). `None` for repo methods called without a caller
+    /// context (`get_by_id`, `get_by_ids`, `find_default_for_user`,
+    /// `create_personal_drive_atomic`) — the DTO layer omits the field
+    /// via `#[serde(skip_serializing_if = "Option::is_none")]`.
+    ///
+    /// See [[project-caller-role-on-file-folder-dto]] for the pattern
+    /// extension to FileDto/FolderDto with a perf warning.
+    pub caller_role: Option<crate::domain::services::authorization::Role>,
 }
 
 #[async_trait::async_trait]
