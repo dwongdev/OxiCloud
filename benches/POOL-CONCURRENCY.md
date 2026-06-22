@@ -56,15 +56,19 @@ taskset -c 0,1 ./target/release/examples/bench_pool_concurrency   # model a 2-co
    every core". The flat RSS is exactly that: each concurrent decode's transient
    buffer is small, so 16 in flight cost the same resident memory as 1.
 
-3. **So the pool migration is a correctness/consistency change, not a perf win.**
-   It is still worth keeping: it has **no downside** (off-quota `effective ==
-   available`, so no change), it unifies pool sizing with the runtime fix behind
-   one `effective_parallelism()` helper, and it protects the pools this bench did
-   *not* isolate — the transcode rayon pool (thread stacks) and the ffmpeg video
-   fan-out (one OS process per permit), where over-spawning per *host* core under
-   a tight quota is genuinely wasteful. But operators should not expect a
-   throughput jump from it; the real download/runtime wins are in `BLOB-PREFETCH`
-   and `RUNTIME`.
+3. **Decision: NOT migrated (reverted).** Because the only pool this bench could
+   isolate showed zero measured benefit, the `effective_parallelism()` migration
+   of the image pools was reverted — adding code without a measured win isn't
+   worth it. The `effective_parallelism()` helper stays (it has a *measured*
+   benefit in the Tokio runtime — see `RUNTIME`), so a future, deliberately
+   measured case can adopt it per-pool.
+   The one pool with a plausible a-priori argument is the **ffmpeg video
+   fan-out** (one heavyweight OS process per permit — 32 ffmpeg processes for a
+   2-core budget on a many-core host is self-evidently wasteful). That was left
+   on `available_parallelism()` too, to revisit *with* a measurement if a
+   high-host-core / low-quota deployment running video thumbnails ever warrants
+   it. The transcode rayon pool over-sizing only costs parked thread stacks
+   (negligible).
 
 4. **Honest caveat on scale.** This was run at a 2-core quota on a 4-core host
    (K_oversub = 8 ≈ 4×). On a 64-core host under a 2-core quota the host-count

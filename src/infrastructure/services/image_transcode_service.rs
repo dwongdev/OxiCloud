@@ -31,14 +31,13 @@ pub const MAX_TRANSCODE_SIZE: u64 = 5 * 1024 * 1024;
 /// Minimum number of threads in the dedicated transcoding pool
 const MIN_TRANSCODE_THREADS: usize = 2;
 
-/// Compute the number of transcoding threads: half the available CPUs, with a
-/// floor of `MIN_TRANSCODE_THREADS`. Sized by
-/// [`effective_parallelism`](crate::common::runtime::effective_parallelism),
-/// which respects CPU affinity **and** the CFS quota (Docker/K8s `--cpus`) —
-/// unlike bare `available_parallelism()`, which ignores the quota and would
-/// over-size this CPU-bound pool under a container limit.
+/// Compute the number of transcoding threads: half the available CPUs,
+/// with a floor of `MIN_TRANSCODE_THREADS`.  `available_parallelism()`
+/// respects cgroup limits (Docker/K8s) and CPU affinity masks.
 fn transcode_thread_count() -> usize {
-    let cpus = crate::common::runtime::effective_parallelism();
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(MIN_TRANSCODE_THREADS);
     (cpus / 2).max(MIN_TRANSCODE_THREADS)
 }
 

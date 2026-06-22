@@ -107,11 +107,8 @@ const STREAM_TO_TEMP_TIMEOUT: Duration = Duration::from_secs(120);
 /// concurrency was halved to keep peak RAM in check. Decodes are now DCT-shrunk
 /// to the thumbnail size (~18–25 MB regardless of source resolution), so the RAM
 /// ceiling no longer forces throttling and we can saturate every core. Override
-/// with `OXICLOUD_THUMBNAIL_DECODE_CONCURRENCY`. Sized by
-/// [`effective_parallelism`](crate::common::runtime::effective_parallelism),
-/// which respects CPU affinity **and** the CFS quota (`--cpus`) — so under a
-/// container quota we don't over-permit concurrent CPU-heavy decodes onto cores
-/// the scheduler can't give us.
+/// with `OXICLOUD_THUMBNAIL_DECODE_CONCURRENCY`. `available_parallelism()`
+/// respects cgroup limits (Docker/K8s) and CPU affinity masks.
 fn max_concurrent_decodes() -> usize {
     if let Some(n) = std::env::var(DECODE_CONCURRENCY_ENV)
         .ok()
@@ -120,7 +117,10 @@ fn max_concurrent_decodes() -> usize {
     {
         return n;
     }
-    crate::common::runtime::effective_parallelism().max(2)
+    let cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    cpus.max(2)
 }
 
 /// Thumbnail service for generating and caching image thumbnails

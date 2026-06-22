@@ -363,9 +363,9 @@ impl AppServiceFactory {
             if self.config.features.enable_video_thumbnails
                 && FfmpegVideoFrameService::is_available(&ffmpeg_path)
             {
-                // effective_parallelism respects the CFS quota (--cpus), not
-                // just affinity — so ffmpeg fan-out matches the real core budget.
-                let cpus = crate::common::runtime::effective_parallelism();
+                let cpus = std::thread::available_parallelism()
+                    .map(|n| n.get())
+                    .unwrap_or(4);
                 let concurrency = std::env::var("OXICLOUD_VIDEO_THUMBNAIL_CONCURRENCY")
                     .ok()
                     .and_then(|v| v.parse::<usize>().ok())
