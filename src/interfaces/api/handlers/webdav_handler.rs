@@ -1062,20 +1062,67 @@ fn enforce_native_lock(
     if_header: Option<&str>,
     path: &str,
 ) -> Option<Response<Body>> {
-    let entry = lock_store.get_by_path(path)?;
-    if let Some(h) = if_header
-        && extract_if_header_tokens(h)
-            .iter()
-            .any(|t| t == &entry.info.token)
-    {
-        return None;
+    // Check the exact path, then walk up parent collections for depth-infinity
+    // locks (RFC 4918 §6.1: a lock on a collection with Depth: infinity also
+    // covers all descendant members).
+    let entry = lock_store.get_by_path(path).or_else(|| {
+        let mut p = path;
+        loop {
+            let idx = p.rfind('/')?;
+            p = &p[..idx];
+            if p.is_empty() {
+                return None;
+            }
+            if let Some(e) = lock_store.get_by_path(p) {
+                if e.info.depth.eq_ignore_ascii_case("infinity") {
+                    return Some(e);
+                }
+            }
+        }
+    });
+
+    if let Some(entry) = entry {
+        // Resource is locked: caller must supply the matching token in If:.
+        if let Some(h) = if_header
+            && extract_if_header_tokens(h)
+                .iter()
+                .any(|t| t == &entry.info.token)
+        {
+            return None;
+        }
+        return Some(
+            Response::builder()
+                .status(StatusCode::LOCKED)
+                .body(Body::empty())
+                .unwrap(),
+        );
     }
-    Some(
-        Response::builder()
-            .status(StatusCode::LOCKED)
-            .body(Body::empty())
-            .unwrap(),
-    )
+
+    // Resource is not locked. If the If: header references lock tokens (not
+    // resource-tag URLs), every such token must be active somewhere in the
+    // store. A stale or fabricated token (e.g. DAV:no-lock) never matches,
+    // so the If: condition fails → 412 Precondition Failed (RFC 4918 §10.4).
+    if let Some(h) = if_header {
+        let tokens = extract_if_header_tokens(h);
+        let lock_refs: Vec<_> = tokens
+            .iter()
+            .filter(|t| !t.starts_with("http://") && !t.starts_with("https://"))
+            .collect();
+        if !lock_refs.is_empty()
+            && !lock_refs
+                .iter()
+                .any(|t| lock_store.get_by_token(t).is_some())
+        {
+            return Some(
+                Response::builder()
+                    .status(StatusCode::PRECONDITION_FAILED)
+                    .body(Body::empty())
+                    .unwrap(),
+            );
+        }
+    }
+
+    None
 }
 
 /**

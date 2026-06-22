@@ -369,6 +369,32 @@ jobs:
           path: tests/api/storage/
           retention-days: 7
 
+  litmus:
+    name: WebDAV RFC 4918 — litmus (59/59)
+    needs: build
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: oxicloud-release
+          path: target/release/
+
+      - name: Set execute bit on pre-built binary
+        run: chmod +x target/release/oxicloud
+
+      - name: Install litmus and jq
+        run: sudo apt-get update -q && sudo apt-get install -y litmus jq
+
+      - name: Run litmus WebDAV compliance tests
+        run: bash tests/webdav/run-litmus.sh
+        env:
+          BUILD_TARGET: release
+          LITMUS_TESTS: "basic copymove props locks"
+
   front-test:
     name: Frontend end-to-end tests (via Playwright)
     # ensure that api tests are ok before

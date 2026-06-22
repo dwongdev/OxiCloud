@@ -106,15 +106,27 @@ impl WebDavLockStore {
 
     /// Attempt to acquire a lock on `path`.
     ///
-    /// Returns `Ok(LockEntry)` on success, or `Err(existing)` if the resource
-    /// is already exclusively locked by a different token.
+    /// Returns `Ok(LockEntry)` on success, or `Err(existing)` when:
+    /// - The existing lock is exclusive (blocks any new lock), or
+    /// - The new lock is exclusive and any lock already exists (RFC 4918 §7.8).
     #[allow(clippy::result_large_err)]
     pub fn acquire(&self, path: &str, info: LockInfo) -> Result<LockEntry, LockEntry> {
-        // Check for existing conflicting lock
-        if let Some(existing) = self.by_path.get(path)
-            && existing.info.scope == LockScope::Exclusive
-        {
-            return Err(existing);
+        if let Some(existing) = self.by_path.get(path) {
+            // Exclusive existing lock → blocks everything.
+            // New exclusive lock → blocked by any existing lock (shared or exclusive).
+            if existing.info.scope == LockScope::Exclusive || info.scope == LockScope::Exclusive {
+                return Err(existing);
+            }
+            // Both shared: keep the first holder as the enforcement sentinel in
+            // `by_path` so releasing a secondary holder cannot clear the lock.
+            // Register the new token only in the reverse index so UNLOCK works.
+            let entry = LockEntry {
+                info,
+                path: path.to_owned(),
+            };
+            self.by_token
+                .insert(entry.info.token.clone(), path.to_owned());
+            return Ok(entry);
         }
 
         let entry = LockEntry {
