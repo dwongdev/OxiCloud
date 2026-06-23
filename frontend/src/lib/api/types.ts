@@ -199,11 +199,27 @@ export interface SearchResults {
 
 export type DriveKind = 'personal' | 'shared';
 
+/** Role-keyed share strength. Matches `Role` in the backend authz model. */
+export type DriveRole = 'owner' | 'editor' | 'contributor' | 'commenter' | 'viewer';
+
+/** Subject of a grant. Mirrors `SubjectDto`. */
+export type SubjectKind = 'user' | 'group' | 'token';
+export interface DriveMemberSubject {
+	type: SubjectKind;
+	id: string;
+}
+
 /**
  * One row from `GET /api/drives`. Mirrors `DriveDto` in
  * `src/application/dtos/drive_dto.rs`. `default_for_user` is the caller's
  * id when present, `null`/undefined otherwise — used to pick the default
  * personal drive without hard-coding name conventions.
+ *
+ * `caller_role` is the strongest role the calling user holds on this drive
+ * (direct + group-mediated, collapsed). Drives the permission-aware UI
+ * gating on `/config/drive/<id>` and similar pages. `undefined` in
+ * contexts where the caller is the granter rather than a member (e.g.
+ * outgoing-grants listing).
  */
 export interface Drive {
 	id: string;
@@ -216,4 +232,21 @@ export interface Drive {
 	policies: Record<string, unknown>;
 	created_at: string;
 	updated_at: string;
+	caller_role?: DriveRole | null;
+}
+
+/**
+ * One row from `GET /api/drives/{id}/members`. Mirrors `GrantDto` in
+ * `src/application/dtos/grant_dto.rs` — the shape is the same as any
+ * other role-grant; drive membership just constrains `resource.type` to
+ * `"drive"`.
+ */
+export interface DriveMember {
+	id: string;
+	subject: DriveMemberSubject;
+	resource: { type: 'drive'; id: string };
+	role: DriveRole;
+	granted_by: string;
+	granted_at: string;
+	expires_at?: string | null;
 }

@@ -62,13 +62,23 @@
 	onMount(() => {
 		void drivesStore.load();
 	});
+
+	// Dev/test override — set `localStorage.setItem('oxi-show-drive-picker', '1')`
+	// from DevTools to force the picker visible even with a single drive (useful
+	// for testing the UI before D3's shared-drive creation lands). Evaluated once
+	// at component mount; reload after toggling to apply.
+	const forceShowPicker = $derived(
+		typeof localStorage !== 'undefined' && localStorage.getItem('oxi-show-drive-picker') === '1'
+	);
 </script>
 
 <!-- Only show the drive switcher when there's an actual choice to make. With a
      single drive (the default personal one) the picker just repeats "Personal"
      under the Files nav row, so hide it; it reappears the moment a second drive
-     (e.g. a shared one) exists. -->
-{#if drivesStore.loaded && drivesStore.drives.length > 1}
+     (e.g. a shared one) exists.
+
+     `forceShowPicker` is the localStorage-driven dev override (see script). -->
+{#if drivesStore.loaded && (drivesStore.drives.length > 1 || forceShowPicker)}
 	<ul class="drive-picker" aria-label={t('drive.picker', 'Drives')}>
 		{#each sortedDrives as d (d.id)}
 			<li class="drive-picker__row" class:drive-picker__row--active={isActive(d)}>
