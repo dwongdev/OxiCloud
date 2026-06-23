@@ -421,14 +421,17 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
         use crate::interfaces::api::handlers::drive_handler;
 
         let drives_router = Router::new()
-            .route("/", get(drive_handler::list_drives))
+            .route(
+                "/",
+                get(drive_handler::list_drives).post(drive_handler::create_drive),
+            )
             .route(
                 "/{id}/members",
                 get(drive_handler::list_drive_members).post(drive_handler::add_drive_member),
             )
             .route(
                 "/{id}/members/{kind}/{sid}",
-                axum::routing::patch(drive_handler::update_drive_member)
+                patch(drive_handler::update_drive_member)
                     .delete(drive_handler::remove_drive_member),
             )
             .with_state(app_state.clone());

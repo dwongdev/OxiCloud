@@ -196,6 +196,113 @@ impl DriveRepository for DrivePgRepository {
         Self::row_to_drive_with_name(&row)
     }
 
+    async fn create_shared_drive_atomic(
+        &self,
+        name: &str,
+        owner_subject: crate::domain::services::authorization::Subject,
+        quota_bytes: Option<i64>,
+        granted_by: Uuid,
+    ) -> Result<DriveWithRootName, DriveRepositoryError> {
+        // Same four-write transaction shape as `create_personal_drive_atomic`
+        // (see that method for the why-not-CTE explanation). Differences:
+        //   - `kind='shared'`, `default_for_user=NULL`.
+        //   - Root folder name is caller-supplied.
+        //   - Owner grant subject is caller-supplied — either a single
+        //     User (becomes the sole drive Owner) or a Group (transitive
+        //     members inherit Owner via subject expansion).
+        //   - `granted_by` is the OxiCloud admin who provisioned the drive;
+        //     same value goes onto the folder's `created_by`/`updated_by`
+        //     for §14 provenance.
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|e| Self::map_sqlx_err("create_shared_drive_atomic.begin", e))?;
+
+        // 1. Drive row (root_folder_id NULL — populated in step 3).
+        let drive_id: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO storage.drives
+                (kind, default_for_user, quota_bytes, policies)
+            VALUES ('shared', NULL, $1, '{}'::jsonb)
+            RETURNING id
+            "#,
+        )
+        .bind(quota_bytes)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| Self::map_sqlx_err("create_shared_drive_atomic.drive", e))?;
+
+        // 2. Root folder. The folder's `user_id` carries the admin (legacy
+        //    column still NOT NULL during the dual-write window — D7
+        //    drops it once `drive_id` is the canonical ownership signal).
+        let folder_id: Uuid = sqlx::query_scalar(
+            r#"
+            INSERT INTO storage.folders
+                (name, parent_id, user_id, drive_id, created_by, updated_by)
+            VALUES ($1, NULL, $2, $3, $2, $2)
+            RETURNING id
+            "#,
+        )
+        .bind(name)
+        .bind(granted_by)
+        .bind(drive_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| Self::map_sqlx_err("create_shared_drive_atomic.folder", e))?;
+
+        // 3. Close the circular reference (drive ↔ root folder).
+        sqlx::query(r#"UPDATE storage.drives SET root_folder_id = $1 WHERE id = $2"#)
+            .bind(folder_id)
+            .bind(drive_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| Self::map_sqlx_err("create_shared_drive_atomic.wire", e))?;
+
+        // 4. Owner role_grant — subject_type chosen from the caller's input.
+        //    Group subjects expand transitively via `subject_match_set` so
+        //    every member inherits Owner; User subjects are the single
+        //    admin case.
+        sqlx::query(
+            r#"
+            INSERT INTO storage.role_grants
+                (subject_type, subject_id, resource_type, resource_id,
+                 role, granted_by)
+            VALUES ($1, $2, 'drive', $3, 'owner', $4)
+            "#,
+        )
+        .bind(owner_subject.type_str())
+        .bind(owner_subject.id())
+        .bind(drive_id)
+        .bind(granted_by)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| Self::map_sqlx_err("create_shared_drive_atomic.grant", e))?;
+
+        // Fetch final state so the caller sees DB-computed defaults.
+        let row = sqlx::query(
+            r#"
+            SELECT d.id, d.kind, d.default_for_user, d.root_folder_id,
+                   d.quota_bytes, d.used_bytes, d.policies,
+                   d.created_at, d.updated_at,
+                   f.name AS root_folder_name
+              FROM storage.drives d
+              JOIN storage.folders f ON f.id = d.root_folder_id
+             WHERE d.id = $1
+            "#,
+        )
+        .bind(drive_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|e| Self::map_sqlx_err("create_shared_drive_atomic.read", e))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| Self::map_sqlx_err("create_shared_drive_atomic.commit", e))?;
+
+        Self::row_to_drive_with_name(&row)
+    }
+
     async fn get_by_id(&self, id: Uuid) -> Result<DriveWithRootName, DriveRepositoryError> {
         let row = sqlx::query(
             r#"

@@ -25,18 +25,134 @@ use uuid::Uuid;
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::common::errors::DomainError;
 use crate::domain::repositories::drive_repository::DriveRepository;
+use crate::domain::repositories::subject_group_repository::SubjectGroupRepository;
 use crate::domain::services::authorization::{Grant, Permission, Resource, Role, Subject};
 use crate::infrastructure::repositories::pg::DrivePgRepository;
+use crate::infrastructure::repositories::pg::SubjectGroupPgRepository;
 use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
 
 pub struct DriveManagementService {
     drive_repo: Arc<DrivePgRepository>,
     authz: Arc<PgAclEngine>,
+    /// Needed to validate that a Group owner subject is non-empty at
+    /// create-drive time — refusing creation with an empty group avoids
+    /// constructing an orphan-owned drive (the "drive must always have
+    /// ≥1 effective Owner-user" invariant from day one).
+    group_repo: Arc<SubjectGroupPgRepository>,
 }
 
 impl DriveManagementService {
-    pub fn new(drive_repo: Arc<DrivePgRepository>, authz: Arc<PgAclEngine>) -> Self {
-        Self { drive_repo, authz }
+    pub fn new(
+        drive_repo: Arc<DrivePgRepository>,
+        authz: Arc<PgAclEngine>,
+        group_repo: Arc<SubjectGroupPgRepository>,
+    ) -> Self {
+        Self {
+            drive_repo,
+            authz,
+            group_repo,
+        }
+    }
+
+    /// `POST /api/drives` — create a shared drive owned by a group.
+    ///
+    /// **AuthZ (D3a)**: OxiCloud-admin only. The plan (`drive.md §6`)
+    /// reads "admin or group owner triggers" — D3a starts with the
+    /// admin-only path; group-owner triggering can extend the gate
+    /// later without changing the wire shape or the service method
+    /// signature. `caller_is_admin` is resolved by the HTTP handler
+    /// from `CurrentUser.role` and passed in; the service trusts it
+    /// (defense-in-depth check stays at the route layer).
+    ///
+    /// Audit log: `drive.created` with the drive id, the owner group,
+    /// and the granted_by (the admin caller).
+    pub async fn create_shared_drive(
+        &self,
+        caller_id: Uuid,
+        caller_is_admin: bool,
+        name: &str,
+        owner_subject: Subject,
+        quota_bytes: Option<i64>,
+    ) -> Result<crate::domain::repositories::drive_repository::DriveWithRootName, DomainError> {
+        if !caller_is_admin {
+            tracing::info!(
+                target: "audit",
+                event = "drive_create.rejected",
+                reason = "not_admin",
+                caller_id = %caller_id,
+                owner_type = owner_subject.type_str(),
+                owner_id = %owner_subject.id(),
+                "👮🏻‍♂️ refused shared-drive create: caller is not an OxiCloud admin",
+            );
+            return Err(DomainError::access_denied(
+                "Drive",
+                "Only OxiCloud administrators can create shared drives.",
+            ));
+        }
+
+        // Token subjects are share-link identities, not entities that can
+        // own things. Refuse at the service edge.
+        if matches!(owner_subject, Subject::Token(_)) {
+            tracing::info!(
+                target: "audit",
+                event = "drive_create.rejected",
+                reason = "invalid_owner_kind",
+                caller_id = %caller_id,
+                owner_type = "token",
+                "👮🏻‍♂️ refused shared-drive create: owner cannot be a Token subject",
+            );
+            return Err(DomainError::validation_error(
+                "Drive owner must be a user or a group, not a token.",
+            ));
+        }
+
+        // Group owners must be non-empty — otherwise the drive is created
+        // with no transitive Owner-user from day one. Per Ed's invariant:
+        // "a drive must always remain with at least one Owner-user". User
+        // owners trivially satisfy this.
+        if let Subject::Group(gid) = owner_subject {
+            let n = self.group_repo.count_members(gid).await.map_err(|e| {
+                DomainError::internal_error("Drive", format!("group lookup failed: {e:?}"))
+            })?;
+            if n < 1 {
+                tracing::info!(
+                    target: "audit",
+                    event = "drive_create.rejected",
+                    reason = "owner_group_empty",
+                    caller_id = %caller_id,
+                    owner_group_id = %gid,
+                    "👮🏻‍♂️ refused shared-drive create: owner group has no members",
+                );
+                return Err(DomainError::validation_error(
+                    "Owner group has no members — the drive would have no effective Owner.",
+                ));
+            }
+        }
+
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(DomainError::validation_error("Drive name is required."));
+        }
+
+        let drive = self
+            .drive_repo
+            .create_shared_drive_atomic(trimmed, owner_subject, quota_bytes, caller_id)
+            .await
+            .map_err(|e| DomainError::internal_error("Drive", format!("create failed: {e:?}")))?;
+
+        tracing::info!(
+            target: "audit",
+            event = "drive.created",
+            kind = "shared",
+            drive_id = %drive.drive.id,
+            owner_type = owner_subject.type_str(),
+            owner_id = %owner_subject.id(),
+            granted_by = %caller_id,
+            "🆕 shared drive created '{}' owned by {} {}",
+            trimmed, owner_subject.type_str(), owner_subject.id(),
+        );
+
+        Ok(drive)
     }
 
     /// `GET /api/drives/{id}/members` — every role grant on the drive.

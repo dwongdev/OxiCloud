@@ -85,6 +85,36 @@ pub trait DriveRepository: Send + Sync + 'static {
         quota_bytes: Option<i64>,
     ) -> Result<DriveWithRootName, DriveRepositoryError>;
 
+    /// Atomically create a **shared** drive together with its root folder
+    /// and the initial Owner-role grant. Mirrors
+    /// `create_personal_drive_atomic` but with three differences:
+    ///   - `kind='shared'`, `default_for_user=NULL`
+    ///   - root folder name is caller-supplied (validated upstream)
+    ///   - Owner role_grant subject is caller-supplied — either a
+    ///     single `User` (becomes the sole drive Owner) or a `Group`
+    ///     (the group's transitive user members all gain the Owner
+    ///     role via subject expansion). Token subjects are refused at
+    ///     the service edge.
+    ///
+    /// `granted_by` is recorded on the role_grant row + on the root
+    /// folder's `created_by` / `updated_by` columns for audit
+    /// traceability — the OxiCloud admin who provisioned the drive.
+    ///
+    /// **AuthZ contract**: this method performs no authorization. The
+    /// service layer MUST verify the caller has the OxiCloud `admin`
+    /// system role (D3a). If `owner_subject` is `Group`, the service
+    /// MUST also have verified the group has ≥1 user member —
+    /// otherwise the drive is created with no effective Owner-user
+    /// and would breach the "drive must always have ≥1 effective
+    /// Owner" invariant from day one.
+    async fn create_shared_drive_atomic(
+        &self,
+        name: &str,
+        owner_subject: crate::domain::services::authorization::Subject,
+        quota_bytes: Option<i64>,
+        granted_by: Uuid,
+    ) -> Result<DriveWithRootName, DriveRepositoryError>;
+
     /// Fetch a drive by id together with its display name. `NotFound`
     /// when no row matches.
     async fn get_by_id(&self, id: Uuid) -> Result<DriveWithRootName, DriveRepositoryError>;

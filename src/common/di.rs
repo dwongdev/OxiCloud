@@ -1475,6 +1475,7 @@ impl AppServiceFactory {
                 crate::application::services::drive_management_service::DriveManagementService::new(
                     drive_repo.clone(),
                     authorization.clone(),
+                    subject_group_repo.clone(),
                 ),
             ),
             subject_group_service: Some(Arc::new(
@@ -1486,6 +1487,7 @@ impl AppServiceFactory {
                             pool.clone(),
                         ),
                     ),
+                    authorization.clone(),
                 ),
             )),
             email_sender: None,                   // populated below

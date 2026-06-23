@@ -155,6 +155,13 @@ impl PgAclEngine {
                 .time_to_live(OWNER_CACHE_TTL)
                 .build(),
             drive_role_cache: Cache::builder()
+                // `invalidate_entries_if` is the cleanup hook used by
+                // `invalidate_drive_role_cache_for_drive`. moka returns
+                // `Err(InvalidationClosuresDisabled)` from that call unless
+                // this opt-in is set on the builder, so without it the
+                // bulk invalidation silently no-ops and a freshly-promoted
+                // member keeps their stale role for the full TTL.
+                .support_invalidation_closures()
                 .max_capacity(DRIVE_ROLE_CACHE_CAPACITY)
                 .time_to_live(DRIVE_ROLE_CACHE_TTL)
                 .build(),
@@ -214,6 +221,7 @@ impl PgAclEngine {
                 .time_to_live(Duration::from_secs(1))
                 .build(),
             drive_role_cache: Cache::builder()
+                .support_invalidation_closures()
                 .max_capacity(1)
                 .time_to_live(Duration::from_secs(1))
                 .build(),
@@ -238,14 +246,35 @@ impl PgAclEngine {
     ///
     /// Uses moka's predicate-based eviction — entries are marked for
     /// removal asynchronously by the maintenance task; subsequent `get`
-    /// calls observe the eviction immediately.
+    /// calls observe the eviction. Requires
+    /// `support_invalidation_closures()` on the cache builder (see the
+    /// `drive_role_cache` initialiser above), otherwise moka returns
+    /// `InvalidationClosuresDisabled` and the mutation silently leaves
+    /// stale role rows in cache for the full TTL.
     pub async fn invalidate_drive_role_cache_for_drive(&self, drive_id: Uuid) {
         // `invalidate_entries_if` rejects predicates returning errors —
         // simple Fn(K, V) -> bool. We capture `drive_id` by value (Copy)
         // and match against the second tuple component.
-        let _ = self
+        //
+        // The result is `Err` only when the cache was built without
+        // `support_invalidation_closures()` — a wiring bug, not a runtime
+        // condition the caller can recover from. We log+continue rather
+        // than panic because the consequence is a 30 s staleness window
+        // on cached role entries, not a correctness bug at write time.
+        if let Err(err) = self
             .drive_role_cache
-            .invalidate_entries_if(move |key, _v| key.1 == drive_id);
+            .invalidate_entries_if(move |key, _v| key.1 == drive_id)
+        {
+            tracing::error!(
+                target: "oxicloud::authz",
+                event = "authz.cache_invalidation_failed",
+                cache = "drive_role_cache",
+                drive_id = %drive_id,
+                error = %err,
+                "drive_role_cache cannot be bulk-invalidated — \
+                 cache builder is missing support_invalidation_closures()",
+            );
+        }
     }
 
     /// Expand a user subject into the set of subject UUIDs that should match
