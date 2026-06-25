@@ -39,13 +39,22 @@ impl StorageUsageService {
     /// (was three: user lookup + SUM + UPDATE). NOT called on the request
     /// path — only by the per-upload background update and the sweep.
     pub async fn update_user_storage_usage(&self, user_id: Uuid) -> Result<i64, DomainError> {
+        // User envelope = SUM of `drives.used_bytes` across personal
+        // drives owned by the user (see `docs/plan/drive.md` §7). Shared
+        // drives don't count. Ownership is canonical via `role_grants`.
         let total_usage: Option<i64> = sqlx::query_scalar(
             r#"
             UPDATE auth.users u
                SET storage_used_bytes = COALESCE((
-                       SELECT SUM(f.size)::bigint
-                         FROM storage.files f
-                        WHERE f.user_id = u.id AND NOT f.is_trashed), 0)
+                       SELECT SUM(d.used_bytes)::bigint
+                         FROM storage.drives      d
+                         JOIN storage.role_grants g
+                           ON g.resource_type = 'drive'
+                          AND g.resource_id   = d.id
+                          AND g.role          = 'owner'
+                          AND g.subject_type  = 'user'
+                          AND g.subject_id    = u.id
+                        WHERE d.kind = 'personal'), 0)
              WHERE u.id = $1
             RETURNING u.storage_used_bytes
             "#,
@@ -77,9 +86,15 @@ impl StorageUsageService {
             r#"
             UPDATE auth.users u
                SET storage_used_bytes = COALESCE((
-                       SELECT SUM(f.size)::bigint
-                         FROM storage.files f
-                        WHERE f.user_id = u.id AND NOT f.is_trashed), 0)
+                       SELECT SUM(d.used_bytes)::bigint
+                         FROM storage.drives      d
+                         JOIN storage.role_grants g
+                           ON g.resource_type = 'drive'
+                          AND g.resource_id   = d.id
+                          AND g.role          = 'owner'
+                          AND g.subject_type  = 'user'
+                          AND g.subject_id    = u.id
+                        WHERE d.kind = 'personal'), 0)
              WHERE u.username = $1
             RETURNING u.storage_used_bytes
             "#,
@@ -125,6 +140,50 @@ impl StorageUsageService {
         .execute(self.pool.as_ref())
         .await
         .map_err(|e| DomainError::internal_error("StorageUsage", format!("usage delta: {e}")))?;
+        Ok(())
+    }
+
+    /// Conditional user-side delta: only fires when the target folder's
+    /// drive is `kind='personal'`. See `docs/plan/drive.md` §7.
+    ///
+    /// The new quota model: `auth.users.storage_quota_bytes` is the cap on
+    /// the SUM of `used_bytes` across the user's personal drives. Shared
+    /// drives never count against any user envelope. The upload hot path
+    /// reads `drives.kind` from the same JOIN that already runs for the
+    /// drive cap check; firing this conditional delta instead of the
+    /// unconditional [`Self::add_user_storage_usage_delta`] keeps the
+    /// counter aligned with that envelope semantics. Idempotent + clamped
+    /// at zero, same as the unconditional sibling.
+    ///
+    /// Implementation note: the EXISTS subquery is two indexed PK probes
+    /// (folder by id, drive by id) so the personal/shared discrimination
+    /// adds no real cost vs. the unconditional update.
+    pub async fn add_user_storage_usage_delta_if_personal(
+        &self,
+        user_id: Uuid,
+        folder_id: Uuid,
+        delta: i64,
+    ) -> Result<(), DomainError> {
+        sqlx::query(
+            "UPDATE auth.users u
+                SET storage_used_bytes = GREATEST(0, u.storage_used_bytes + $2)
+              WHERE u.id = $1
+                AND EXISTS (
+                    SELECT 1
+                      FROM storage.folders f
+                      JOIN storage.drives  d ON d.id = f.drive_id
+                     WHERE f.id = $3
+                       AND d.kind = 'personal'
+                )",
+        )
+        .bind(user_id)
+        .bind(delta)
+        .bind(folder_id)
+        .execute(self.pool.as_ref())
+        .await
+        .map_err(|e| {
+            DomainError::internal_error("StorageUsage", format!("usage delta if personal: {e}"))
+        })?;
         Ok(())
     }
 
@@ -312,14 +371,16 @@ impl StorageUsageService {
             loop {
                 ticker.tick().await;
                 debug!("Running scheduled storage-usage reconciliation");
-                if let Err(e) = service.update_all_users_storage_usage().await {
-                    error!("Scheduled user storage-usage reconciliation failed: {}", e);
-                }
-                // Drive sweep runs alongside the user sweep — same
-                // cadence, same maintenance pool. Failure is logged
-                // but doesn't skip the next tick.
+                // Drive sweep runs FIRST: the user-side sweep below
+                // reads `drives.used_bytes` (the per-drive sum) to
+                // compute its own counter, so the drive counter must
+                // be honest first. Failure of one is logged but
+                // doesn't skip the other or the next tick.
                 if let Err(e) = service.update_all_drives_storage_usage().await {
                     error!("Scheduled drive storage-usage reconciliation failed: {}", e);
+                }
+                if let Err(e) = service.update_all_users_storage_usage().await {
+                    error!("Scheduled user storage-usage reconciliation failed: {}", e);
                 }
             }
         });
@@ -358,16 +419,33 @@ impl StorageUsagePort for StorageUsageService {
     async fn update_all_users_storage_usage(&self) -> Result<(), DomainError> {
         debug!("Starting storage-usage reconciliation sweep");
 
+        // User envelope = SUM of `drives.used_bytes` across the user's
+        // personal drives. Shared drives don't count against any user
+        // (`docs/plan/drive.md` §7). The drive-side sweep runs FIRST
+        // (`start_reconciliation_job`) so `drives.used_bytes` is
+        // already honest by the time we read it here.
+        //
+        // Ownership lookup uses `role_grants` (canonical per §1) so
+        // both the user's default personal AND any secondary
+        // personals owned via Owner grants are summed. Secondaries
+        // aren't user-creatable today, but a backfill or admin path
+        // can produce them — covering that surface from day one.
         let result = sqlx::query(
             r#"
             UPDATE auth.users u
                SET storage_used_bytes = COALESCE(t.total, 0)
               FROM auth.users u2
               LEFT JOIN (
-                    SELECT user_id, SUM(size)::bigint AS total
-                      FROM storage.files
-                     WHERE NOT is_trashed
-                     GROUP BY user_id
+                    SELECT g.subject_id      AS user_id,
+                           SUM(d.used_bytes)::bigint AS total
+                      FROM storage.drives      d
+                      JOIN storage.role_grants g
+                        ON g.resource_type = 'drive'
+                       AND g.resource_id   = d.id
+                       AND g.role          = 'owner'
+                       AND g.subject_type  = 'user'
+                     WHERE d.kind = 'personal'
+                     GROUP BY g.subject_id
                    ) t ON t.user_id = u2.id
              WHERE u.id = u2.id
                AND NOT u2.is_external

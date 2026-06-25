@@ -471,11 +471,16 @@ pub async fn get_current_user(
 
     // Storage usage is served from the cached `storage_used_bytes` column —
     // it is NOT recomputed here. Recomputing on this hot endpoint meant an
-    // O(N) `SUM(size)` over all the user's files plus an `UPDATE` of
-    // `auth.users` on every single call (one of the most frequent endpoints).
-    // The cached value is kept current by the per-upload update and a periodic
-    // background reconciliation sweep
+    // O(N) `SUM(size)` plus an `UPDATE` of `auth.users` on every single call
+    // (one of the most frequent endpoints). The cached value is kept current
+    // by the per-upload update and a periodic background reconciliation sweep
     // (see `StorageUsageService::start_reconciliation_job`).
+    //
+    // Semantics (`docs/plan/drive.md` §7): `storage_used_bytes` is the SUM
+    // of `used_bytes` across the user's personal drives only. Shared drives
+    // never count against this envelope — collaborating in a team drive
+    // costs no personal bytes. The matching cap is
+    // `storage_quota_bytes` (admin-only mutation).
     let user = auth_service
         .auth_application_service
         .get_user_by_id(user_id)

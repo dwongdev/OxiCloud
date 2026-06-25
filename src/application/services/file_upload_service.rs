@@ -15,7 +15,7 @@ use crate::infrastructure::repositories::pg::FileBlobWriteRepository;
 use crate::infrastructure::services::dedup_service::DedupService;
 use crate::infrastructure::services::file_content_cache::FileContentCache;
 use crate::infrastructure::services::pg_acl_engine::PgAclEngine;
-use tracing::{info, warn};
+use tracing::{Instrument, info, warn};
 
 /// Service for file upload operations.
 ///
@@ -326,21 +326,39 @@ impl FileUploadService {
         };
         let delta = file.size as i64;
 
-        // Per-user delta — unchanged from `b5b80549` / `fbbae541`.
-        if let Some(owner) = file
+        let owner = file
             .owner_id
             .as_deref()
-            .and_then(|s| Uuid::parse_str(s).ok())
-        {
+            .and_then(|s| Uuid::parse_str(s).ok());
+        let folder = file
+            .folder_id
+            .as_deref()
+            .and_then(|s| Uuid::parse_str(s).ok());
+
+        // Per-user delta — only when the target drive is `kind='personal'`.
+        // The user envelope (`auth.users.storage_quota_bytes`) caps the SUM
+        // of `used_bytes` across the user's personal drives; shared-drive
+        // uploads do NOT count against any user. See
+        // `docs/plan/drive.md` §7.
+        //
+        // The discrimination happens in one SQL statement via an EXISTS
+        // subquery on the folder's drive kind — no extra round-trip vs
+        // the unconditional delta. Without a folder id (root-level
+        // upload — folder service refuses these) the user-side delta is
+        // simply skipped; the sweep reconciles regardless.
+        if let (Some(owner), Some(folder)) = (owner, folder) {
             let service_clone = Arc::clone(storage_service);
-            tokio::spawn(async move {
-                if let Err(e) = service_clone
-                    .add_user_storage_usage_delta(owner, delta)
-                    .await
-                {
-                    warn!("Failed to bump storage usage for {owner}: {e}");
+            tokio::spawn(
+                async move {
+                    if let Err(e) = service_clone
+                        .add_user_storage_usage_delta_if_personal(owner, folder, delta)
+                        .await
+                    {
+                        warn!("Failed to bump user storage for {owner} (folder {folder}): {e}");
+                    }
                 }
-            });
+                .in_current_span(),
+            );
         }
 
         // Per-drive delta (D4) — same fire-and-forget shape, resolves
@@ -349,20 +367,19 @@ impl FileUploadService {
         // quota check and the picker quota bar read; drift from
         // deletes / trash is reconciled by the same sweep that handles
         // user-side drift.
-        if let Some(folder) = file
-            .folder_id
-            .as_deref()
-            .and_then(|s| Uuid::parse_str(s).ok())
-        {
+        if let Some(folder) = folder {
             let service_clone = Arc::clone(storage_service);
-            tokio::spawn(async move {
-                if let Err(e) = service_clone
-                    .add_drive_storage_usage_delta_by_folder(folder, delta)
-                    .await
-                {
-                    warn!("Failed to bump drive usage for folder {folder}: {e}");
+            tokio::spawn(
+                async move {
+                    if let Err(e) = service_clone
+                        .add_drive_storage_usage_delta_by_folder(folder, delta)
+                        .await
+                    {
+                        warn!("Failed to bump drive usage for folder {folder}: {e}");
+                    }
                 }
-            });
+                .in_current_span(),
+            );
         }
     }
 }

@@ -2072,15 +2072,21 @@ pub async fn internal_trigger_sweep(
                 .into_response();
         }
     };
-    if let Err(e) = svc.update_all_users_storage_usage().await {
-        return AppError::internal_error(format!("user sweep failed: {e}")).into_response();
-    }
+    // Order matches the periodic ticker (`start_reconciliation_job`):
+    // drive sweep first because the user sweep reads `drives.used_bytes`
+    // (sum-of-personal-drives — `docs/plan/drive.md` §7). Running them
+    // in the other order makes the user counter freeze on the previous
+    // tick's drive numbers — invisible in steady state but breaks any
+    // Hurl that trashes + sweeps within one call.
     if let Err(e) = svc.update_all_drives_storage_usage().await {
         return AppError::internal_error(format!("drive sweep failed: {e}")).into_response();
     }
+    if let Err(e) = svc.update_all_users_storage_usage().await {
+        return AppError::internal_error(format!("user sweep failed: {e}")).into_response();
+    }
     (
         StatusCode::OK,
-        Json(serde_json::json!({ "ok": true, "ran": ["users", "drives"] })),
+        Json(serde_json::json!({ "ok": true, "ran": ["drives", "users"] })),
     )
         .into_response()
 }

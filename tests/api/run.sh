@@ -162,7 +162,8 @@ hurl --variables-file "$API_DIR/test.env" --file-root "$REPO_ROOT/tests" --test 
   "$API_DIR/nc_auth_failures.hurl" \
   "$API_DIR/dedup_create.hurl" \
   "$API_DIR/trash_per_drive.hurl" \
-  "$API_DIR/drive_quota.hurl"
+  "$API_DIR/drive_quota.hurl" \
+  "$API_DIR/user_envelope_quota.hurl"
 
 #bash "$API_DIR/dedup_bulk_upload.sh"
 
