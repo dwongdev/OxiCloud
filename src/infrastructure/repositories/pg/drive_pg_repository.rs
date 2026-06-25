@@ -533,4 +533,81 @@ impl DriveRepository for DrivePgRepository {
 
         rows.iter().map(Self::row_to_drive_with_name).collect()
     }
+
+    async fn get_policies_for_file(
+        &self,
+        file_id: Uuid,
+    ) -> Result<crate::domain::entities::drive::DrivePolicies, DriveRepositoryError> {
+        let row: Option<(serde_json::Value,)> = sqlx::query_as(
+            "SELECT d.policies \
+               FROM storage.drives d \
+               JOIN storage.files  f ON f.drive_id = d.id \
+              WHERE f.id = $1",
+        )
+        .bind(file_id)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| Self::map_sqlx_err("get_policies_for_file", e))?;
+        let raw = row
+            .ok_or_else(|| DriveRepositoryError::NotFound(file_id.to_string()))?
+            .0;
+        Ok(crate::domain::entities::drive::DrivePolicies::from_value(
+            &raw,
+        ))
+    }
+
+    async fn get_policies_for_folder(
+        &self,
+        folder_id: Uuid,
+    ) -> Result<crate::domain::entities::drive::DrivePolicies, DriveRepositoryError> {
+        let row: Option<(serde_json::Value,)> = sqlx::query_as(
+            "SELECT d.policies \
+               FROM storage.drives  d \
+               JOIN storage.folders fo ON fo.drive_id = d.id \
+              WHERE fo.id = $1",
+        )
+        .bind(folder_id)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| Self::map_sqlx_err("get_policies_for_folder", e))?;
+        let raw = row
+            .ok_or_else(|| DriveRepositoryError::NotFound(folder_id.to_string()))?
+            .0;
+        Ok(crate::domain::entities::drive::DrivePolicies::from_value(
+            &raw,
+        ))
+    }
+
+    async fn update_policies(
+        &self,
+        drive_id: Uuid,
+        partial: &crate::domain::entities::drive::DrivePolicies,
+    ) -> Result<crate::domain::entities::drive::DrivePolicies, DriveRepositoryError> {
+        // JSONB-level merge (`||`) keeps unknown keys already on disk —
+        // the column remains the canonical bag (see
+        // `DrivePolicies::from_value` — typed read is lenient, untyped
+        // write is preserving). RETURNING surfaces the post-merge bag so
+        // the audit log shows what the row actually carries afterwards.
+        let partial_json = serde_json::to_value(partial).map_err(|e| {
+            DriveRepositoryError::StorageError(format!("serialise partial policies: {e}"))
+        })?;
+        let row: Option<(serde_json::Value,)> = sqlx::query_as(
+            "UPDATE storage.drives \
+                SET policies   = policies || $2, \
+                    updated_at = now() \
+              WHERE id = $1 \
+              RETURNING policies",
+        )
+        .bind(drive_id)
+        .bind(&partial_json)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| Self::map_sqlx_err("update_policies", e))?;
+        let raw = row
+            .ok_or_else(|| DriveRepositoryError::NotFound(drive_id.to_string()))?
+            .0;
+        Ok(crate::domain::entities::drive::DrivePolicies::from_value(
+            &raw,
+        ))
+    }
 }

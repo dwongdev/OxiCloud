@@ -133,4 +133,50 @@ impl Drive {
     pub fn is_personal(&self) -> bool {
         matches!(self.kind, DriveKind::Personal)
     }
+
+    /// Typed view of `policies` for enforcement code. Lenient deserialise:
+    /// unknown keys are preserved on disk (the column stays the canonical
+    /// JSONB bag) but ignored here, missing keys default to `false`.
+    /// See `docs/plan/drive.md` §8.
+    pub fn typed_policies(&self) -> DrivePolicies {
+        DrivePolicies::from_value(&self.policies)
+    }
+}
+
+/// Typed mirror of the `policies` JSONB. Five known keys; the JSONB column
+/// remains the source of truth and may carry unknown keys verbatim — this
+/// struct is a read view for enforcement and a write view for the policy
+/// PATCH endpoint. Every field defaults to `false` (everything allowed)
+/// so a freshly-created drive doesn't need a populated policy bag.
+///
+/// See `docs/plan/drive.md` §8 for the enforcement matrix
+/// (which callsite each key is checked at).
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DrivePolicies {
+    /// Disables per-resource grants on resources in this drive. Drive-level
+    /// membership (Owner/Editor/Viewer) still works. Enforced at
+    /// `grant_handler::create_grant`.
+    pub forbid_sharing: bool,
+    /// Blocks grants whose subject has `users.is_external = true`. Enforced
+    /// at `magic_link_invite_service::resolve_or_create_recipient` and
+    /// `grant_handler::create_grant`.
+    pub forbid_external_sharing: bool,
+    /// Blocks anonymous-link (token-share) creation on resources in this
+    /// drive. Enforced at `share_service::create_shared_link`.
+    pub forbid_public_links: bool,
+    /// Blocks MOVE when `src.drive_id != dst.drive_id`. Enforced at the
+    /// move endpoints. Lands paired with D6's cross-drive move work.
+    pub forbid_cross_drive_move: bool,
+}
+
+impl DrivePolicies {
+    /// Parse from the raw JSONB. Lenient — unknown keys are dropped from
+    /// the typed view but remain in the source `serde_json::Value`. A
+    /// malformed bag (e.g. wrong type) falls back to the all-false default
+    /// rather than refusing the read; enforcement code never panics on
+    /// existing data.
+    pub fn from_value(value: &serde_json::Value) -> Self {
+        serde_json::from_value(value.clone()).unwrap_or_default()
+    }
 }

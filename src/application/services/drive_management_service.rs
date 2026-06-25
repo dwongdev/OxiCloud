@@ -24,7 +24,7 @@ use uuid::Uuid;
 
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::common::errors::DomainError;
-use crate::domain::repositories::drive_repository::DriveRepository;
+use crate::domain::repositories::drive_repository::{DriveRepository, DriveRepositoryError};
 use crate::domain::repositories::subject_group_repository::SubjectGroupRepository;
 use crate::domain::services::authorization::{Grant, Permission, Resource, Role, Subject};
 use crate::infrastructure::repositories::pg::DrivePgRepository;
@@ -371,6 +371,62 @@ impl DriveManagementService {
             "🗑 drive deleted",
         );
         Ok(())
+    }
+
+    /// `PATCH /api/drives/{id}/policies`. Owner-only mutation of the
+    /// drive's `policies` JSONB bag (§5 — "edit policies" is in the
+    /// drive owner bundle, applies to personal AND shared drives).
+    /// JSONB-level merge preserves unknown keys; only the partial
+    /// supplied is overwritten. Returns the post-merge typed view.
+    ///
+    /// `caller_is_admin` mirrors the membership endpoints — skips the
+    /// per-drive Manage check. Audit emits `drive.policy_changed` with
+    /// the post-merge bag for steady-state observability; ops can grep
+    /// for the specific keys that flipped against the prior values.
+    pub async fn update_policies(
+        &self,
+        caller_id: Uuid,
+        caller_is_admin: bool,
+        drive_id: Uuid,
+        partial: crate::domain::entities::drive::DrivePolicies,
+    ) -> Result<crate::domain::entities::drive::DrivePolicies, DomainError> {
+        let resource = Resource::Drive(drive_id);
+        if !caller_is_admin {
+            self.authz
+                .require(Subject::User(caller_id), Permission::Manage, resource)
+                .await?;
+        }
+
+        let merged = self
+            .drive_repo
+            .update_policies(drive_id, &partial)
+            .await
+            .map_err(|e| match e {
+                DriveRepositoryError::NotFound(_) => {
+                    DomainError::not_found("Drive", drive_id.to_string())
+                }
+                other => DomainError::internal_error(
+                    "Drive",
+                    format!("update_policies failed: {other:?}"),
+                ),
+            })?;
+
+        tracing::info!(
+            target: "audit",
+            event = if caller_is_admin {
+                "drive.policy_changed_via_admin"
+            } else {
+                "drive.policy_changed"
+            },
+            drive_id = %drive_id,
+            by = %caller_id,
+            forbid_sharing = merged.forbid_sharing,
+            forbid_external_sharing = merged.forbid_external_sharing,
+            forbid_public_links = merged.forbid_public_links,
+            forbid_cross_drive_move = merged.forbid_cross_drive_move,
+            "📜 drive policies updated",
+        );
+        Ok(merged)
     }
 
     // ── Business rules ──────────────────────────────────────────────────────

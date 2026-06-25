@@ -4,8 +4,10 @@ use thiserror::Error;
 use tokio::sync::Semaphore;
 use uuid::Uuid;
 
+use crate::domain::repositories::drive_repository::DriveRepository;
 use crate::domain::repositories::folder_repository::FolderRepository;
 use crate::domain::services::authorization::{Resource, Role, Subject};
+use crate::infrastructure::repositories::pg::DrivePgRepository;
 use crate::infrastructure::repositories::pg::SharePgRepository;
 use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
 use crate::infrastructure::repositories::pg::folder_db_repository::FolderDbRepository;
@@ -80,6 +82,10 @@ pub struct ShareService {
     share_repository: Arc<SharePgRepository>,
     file_repository: Arc<FileBlobReadRepository>,
     folder_repository: Arc<FolderDbRepository>,
+    /// Drive repository — D5 enforcement reads the drive's `policies`
+    /// JSONB before any per-resource action that a policy can gate
+    /// (e.g. `forbid_public_links` for token-share creation).
+    drive_repository: Arc<DrivePgRepository>,
     password_hasher: Arc<Argon2PasswordHasher>,
     /// ReBAC engine — used to create/revoke token grants that mirror public
     /// share links so that `GET /api/grants/outgoing` reflects them.
@@ -90,11 +96,13 @@ pub struct ShareService {
 }
 
 impl ShareService {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: Arc<AppConfig>,
         share_repository: Arc<SharePgRepository>,
         file_repository: Arc<FileBlobReadRepository>,
         folder_repository: Arc<FolderDbRepository>,
+        drive_repository: Arc<DrivePgRepository>,
         password_hasher: Arc<Argon2PasswordHasher>,
         authorization: Arc<PgAclEngine>,
     ) -> Self {
@@ -103,6 +111,7 @@ impl ShareService {
             share_repository,
             file_repository,
             folder_repository,
+            drive_repository,
             password_hasher,
             authorization,
             hash_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_HASHES)),
@@ -233,6 +242,40 @@ impl ShareUseCase for ShareService {
             .map_err(|e| ShareServiceError::InvalidItemType(e.to_string()))?;
 
         self.verify_item_exists(&dto.item_id, &item_type).await?;
+
+        // D5: `forbid_public_links` policy gate. The drive owner can
+        // disable anonymous-link creation on every resource in their
+        // drive without per-resource intervention. Lookup is one JOIN
+        // (`get_policies_for_file` / `_for_folder` — single round-trip);
+        // a denial returns `OperationNotSupported` with an audit log
+        // mirroring the per-drive membership refusal shape used in
+        // `drive_management_service::refuse_if_personal`.
+        let item_uuid = Uuid::parse_str(&dto.item_id)
+            .map_err(|_| ShareServiceError::Validation("Invalid item UUID".to_string()))?;
+        let policies = match item_type {
+            ShareItemType::File => self.drive_repository.get_policies_for_file(item_uuid).await,
+            ShareItemType::Folder => {
+                self.drive_repository
+                    .get_policies_for_folder(item_uuid)
+                    .await
+            }
+        }
+        .map_err(|e| ShareServiceError::Repository(e.to_string()))?;
+        if policies.forbid_public_links {
+            tracing::info!(
+                target: "audit",
+                event = "share.rejected",
+                reason = "forbid_public_links",
+                caller_id = %user_id,
+                item_id = %dto.item_id,
+                item_type = %dto.item_type,
+                "👮🏻‍♂️ public-link creation refused: drive policy forbid_public_links",
+            );
+            return Err(DomainError::operation_not_supported(
+                "Share",
+                "This drive does not allow public links.",
+            ));
+        }
 
         let password_hash = match dto.password {
             Some(p) => Some(self.hash_password_async(&p).await?),

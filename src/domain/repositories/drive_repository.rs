@@ -204,6 +204,41 @@ pub trait DriveRepository: Send + Sync + 'static {
     /// necessarily a member, so the per-drive role would be misleading
     /// here.
     async fn list_all(&self) -> Result<Vec<DriveWithRootName>, DriveRepositoryError>;
+
+    /// Resolve a file's owning drive policies in one round-trip. Used by
+    /// D5 enforcement points (`forbid_public_links`, `forbid_sharing`, …)
+    /// to gate per-resource actions without a separate file-lookup +
+    /// drive-lookup pair.
+    ///
+    /// Returns `NotFound` when the file id is gone or its `drive_id`
+    /// doesn't resolve to a drive row (a state the no-orphan triggers
+    /// prevent in production, but the caller should still propagate the
+    /// 404 cleanly).
+    async fn get_policies_for_file(
+        &self,
+        file_id: Uuid,
+    ) -> Result<crate::domain::entities::drive::DrivePolicies, DriveRepositoryError>;
+
+    /// Resolve a folder's owning drive policies in one round-trip. Same
+    /// shape as [`Self::get_policies_for_file`].
+    async fn get_policies_for_folder(
+        &self,
+        folder_id: Uuid,
+    ) -> Result<crate::domain::entities::drive::DrivePolicies, DriveRepositoryError>;
+
+    /// Merge the given partial policy bag into the drive's existing
+    /// `policies` JSONB, returning the updated bag. JSONB-level merge
+    /// preserves unknown keys already present on disk (the column stays
+    /// the canonical bag — see `DrivePolicies::from_value`). `caller_id`
+    /// is recorded for the audit log emitted at the service layer.
+    ///
+    /// Caller is responsible for the `Manage` permission check; this
+    /// method does not re-verify.
+    async fn update_policies(
+        &self,
+        drive_id: Uuid,
+        partial: &crate::domain::entities::drive::DrivePolicies,
+    ) -> Result<crate::domain::entities::drive::DrivePolicies, DriveRepositoryError>;
 }
 
 /// Convenience: convert the canonical kind discriminator from its SQL
