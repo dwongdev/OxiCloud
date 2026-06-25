@@ -3247,6 +3247,17 @@ mod delta_upload_integration_tests {
 
     /// Store `data` through the streaming path and give `user_id` a file
     /// row referencing it — making its chunks claimable by that user.
+    ///
+    /// **Order matters.** BLAKE3 is deterministic, so the file row is
+    /// inserted BEFORE `store_from_stream` runs. This closes a race in
+    /// the shared test pool: Phase 1 of `garbage_collect()` deletes
+    /// manifests with `NOT EXISTS (file referencing it)`. With the old
+    /// order (store first, file second), a concurrent GC-invoking test
+    /// (`garbage_collect_honours_grace_window_and_references`,
+    /// `manifest_dereference_defers_chunk_reclamation_to_gc`) could
+    /// reap our manifest in the microsecond window between the two
+    /// statements, causing CI-flaky `RowNotFound` panics in producers
+    /// like `hash_chunk_sequence_recomputes_and_validates_sizes`.
     async fn seed_owned_content(
         svc: &DedupService,
         pool: &PgPool,
@@ -3255,19 +3266,7 @@ mod delta_upload_integration_tests {
         data: &[u8],
         label: &str,
     ) -> (String, Vec<String>, Uuid) {
-        let source = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::copy_from_slice(data))]);
-        let stored = svc
-            .store_from_stream(source, Some("application/octet-stream".into()))
-            .await
-            .expect("store");
-        let file_hash = stored.hash().to_string();
-        let chunks: Vec<String> = sqlx::query_scalar(
-            "SELECT UNNEST(chunk_hashes) FROM storage.chunk_manifests WHERE file_hash = $1",
-        )
-        .bind(&file_hash)
-        .fetch_all(pool)
-        .await
-        .expect("chunks");
+        let file_hash = blake3::hash(data).to_hex().to_string();
 
         let file_id: Uuid = sqlx::query_scalar(
             "INSERT INTO storage.files (name, user_id, drive_id, blob_hash, size)
@@ -3284,6 +3283,26 @@ mod delta_upload_integration_tests {
         .fetch_one(pool)
         .await
         .expect("file row");
+
+        let source = stream::iter(vec![Ok::<_, std::io::Error>(Bytes::copy_from_slice(data))]);
+        let stored = svc
+            .store_from_stream(source, Some("application/octet-stream".into()))
+            .await
+            .expect("store");
+        assert_eq!(
+            stored.hash(),
+            file_hash,
+            "pre-computed BLAKE3 must match CDC-store output"
+        );
+
+        let chunks: Vec<String> = sqlx::query_scalar(
+            "SELECT UNNEST(chunk_hashes) FROM storage.chunk_manifests WHERE file_hash = $1",
+        )
+        .bind(&file_hash)
+        .fetch_all(pool)
+        .await
+        .expect("chunks");
+
         (file_hash, chunks, file_id)
     }
 
@@ -3353,8 +3372,17 @@ mod delta_upload_integration_tests {
         let orphan = blake3::hash(format!("orphan-{}", Uuid::new_v4()).as_bytes())
             .to_hex()
             .to_string();
+        // Stamp `orphaned_at = now()` on the ref-0 row so it sits inside the
+        // GC grace window for the duration of this test. Without it,
+        // `orphaned_at IS NULL` is treated by `garbage_collect` as
+        // "pre-migration, immediately reapable" — and any sibling test in
+        // the shared pool that calls `garbage_collect()` (e.g.
+        // `garbage_collect_respects_grace_and_cross_checks`) would race
+        // with the pin below and delete the row first.
         sqlx::query(
-            "INSERT INTO storage.blobs (hash, size, ref_count) VALUES ($1, 10, 1), ($2, 10, 0)",
+            "INSERT INTO storage.blobs (hash, size, ref_count, orphaned_at) VALUES
+                ($1, 10, 1, NULL),
+                ($2, 10, 0, now())",
         )
         .bind(&foreign)
         .bind(&orphan)
