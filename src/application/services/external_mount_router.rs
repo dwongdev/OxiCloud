@@ -78,6 +78,17 @@ impl MountRouter {
             ResolvedId::MountRoot { .. } | ResolvedId::MountChild { .. }
         )
     }
+
+    /// Path-based lookup for the protocol surfaces (WebDAV / NextCloud): does
+    /// `internal_path` descend into a mount within `drive_id`? Returns the mount
+    /// config plus the remainder relpath (empty when the path IS the mount root).
+    pub fn find_path(
+        &self,
+        drive_id: uuid::Uuid,
+        internal_path: &str,
+    ) -> Option<(Arc<MountConfig>, String)> {
+        self.registry.find_mount_for_path(drive_id, internal_path)
+    }
 }
 
 #[cfg(test)]

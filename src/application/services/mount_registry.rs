@@ -90,6 +90,11 @@ impl MountRegistry {
         internal_path: &str,
     ) -> Option<(Arc<MountConfig>, String)> {
         let index = self.inner.load();
+        // Normalize away a leading slash: materialized folder paths arrive both
+        // as `Personal/Media` (raw `folders.path`) and `/Personal/Media`
+        // (FolderDto / WebDAV internal paths). The index keys are stored without
+        // a leading slash (see `reload`).
+        let internal_path = internal_path.trim_start_matches('/');
         // Walk ancestor paths from the full path up to the root, longest first,
         // so the deepest matching mount wins.
         let mut candidate = internal_path;
@@ -144,7 +149,15 @@ impl MountRegistry {
                     continue;
                 }
             };
-            by_path.insert((rec.drive_id, rec.mount_path.clone()), rec.mount_folder_id);
+            // Store the path key without a leading slash so lookups normalize
+            // consistently (see `find_mount_for_path`).
+            by_path.insert(
+                (
+                    rec.drive_id,
+                    rec.mount_path.trim_start_matches('/').to_string(),
+                ),
+                rec.mount_folder_id,
+            );
             by_folder.insert(
                 rec.mount_folder_id,
                 Arc::new(MountConfig {

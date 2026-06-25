@@ -8,7 +8,7 @@ use crate::application::ports::external_mount_ports::MountEntry;
 use crate::application::ports::folder_ports::FolderUseCase;
 use crate::application::services::external_mount_router::{MountRouter, ResolvedId};
 use crate::application::services::mount_dto::{
-    audit_mount_write, mount_folder_dto, mount_parent_id,
+    audit_mount_write, mount_entry_folder_dto, mount_folder_dto, mount_parent_id,
 };
 use crate::application::services::mount_registry::MountConfig;
 use crate::common::errors::{DomainError, ErrorKind};
@@ -65,6 +65,16 @@ impl FolderService {
                 Resource::Folder(cfg.mount_id),
             )
             .await
+    }
+
+    /// If `id` addresses a mount directory (root or `ext:` child), return the
+    /// mount config and the node id of that directory. `None` for native ids.
+    fn mount_node_for(&self, id: &str) -> Option<(Arc<MountConfig>, NodeId)> {
+        match self.mount_router.classify(id) {
+            ResolvedId::Regular => None,
+            ResolvedId::MountRoot { cfg } => Some((cfg, NodeId::default())),
+            ResolvedId::MountChild { cfg, node_id } => Some((cfg, node_id)),
+        }
     }
 
     /// Resolve a move destination within the SAME mount as `cfg`, returning the
@@ -353,6 +363,21 @@ impl FolderUseCase for FolderService {
         path: &str,
         drive_id: Uuid,
     ) -> Result<FolderDto, DomainError> {
+        // External mount: a path that descends past a mount root (non-empty
+        // remainder) resolves on the provider. The mount root itself is a real
+        // folder row, so the empty-remainder case falls through to the DB.
+        if let Some((cfg, remainder)) = self.mount_router.find_path(drive_id, path)
+            && !remainder.is_empty()
+        {
+            let node = cfg.provider.resolve_path(&remainder);
+            let stat = cfg.provider.stat(&node).await?;
+            if !stat.is_dir {
+                return Err(DomainError::not_found("Folder", path));
+            }
+            let parent = mount_parent_id(&cfg, stat.node_id.as_str());
+            return Ok(mount_folder_dto(&cfg, &parent, &stat));
+        }
+
         let storage_path = StoragePath::from_string(path);
 
         let folder = self
@@ -471,6 +496,32 @@ impl FolderUseCase for FolderService {
     ) -> Result<crate::application::dtos::pagination::PaginatedResponseDto<FolderDto>, DomainError>
     {
         let pagination = pagination.validate_and_adjust();
+
+        // External mount: list subdirectories from the provider (used by the
+        // WebDAV/NextCloud PROPFIND Depth:1 folder loop).
+        if let Some(pid) = parent_id
+            && let Some((cfg, node)) = self.mount_node_for(pid)
+        {
+            self.require_mount_perm(&cfg, Permission::Read, owner_id)
+                .await?;
+            let entries = cfg.provider.list_dir(&node).await?;
+            let mut dirs: Vec<FolderDto> = entries
+                .iter()
+                .filter(|e| e.is_dir)
+                .map(|e| mount_entry_folder_dto(&cfg, pid, e))
+                .collect();
+            let total = dirs.len();
+            let (offset, limit) = (pagination.offset(), pagination.limit());
+            let page: Vec<FolderDto> = dirs.drain(..).skip(offset).take(limit).collect();
+            return Ok(
+                crate::application::dtos::pagination::PaginatedResponseDto::new(
+                    page,
+                    pagination.page,
+                    pagination.page_size,
+                    total,
+                ),
+            );
+        }
 
         if let Some(parent_id_unwrapped) = parent_id {
             self.authz
@@ -1528,6 +1579,107 @@ mod mount_authz_integration {
                 .is_err()
         );
         assert!(!host.path().join("evil.txt").exists());
+    }
+
+    /// P3: the WebDAV/NextCloud-facing path + listing methods resolve mount
+    /// paths and enumerate provider children (PROPFIND Depth:1), and content
+    /// streams from the provider.
+    #[tokio::test]
+    async fn webdav_path_resolution_and_listing() {
+        use crate::application::dtos::pagination::PaginationRequestDto;
+        use crate::application::ports::file_ports::FileRetrievalUseCase;
+        use crate::application::services::file_retrieval_service::FileRetrievalService;
+        use futures::TryStreamExt;
+
+        let (_c, pool) = fresh_db().await;
+        let host = tempfile::tempdir().unwrap();
+        std::fs::create_dir(host.path().join("sub")).unwrap();
+        std::fs::write(host.path().join("a.txt"), b"top").unwrap();
+        std::fs::write(host.path().join("sub/b.txt"), b"nested!").unwrap();
+
+        let p = provision_folder(&pool, "owner", "Media").await;
+        insert_mount(&pool, &p, host.path().to_str().unwrap()).await;
+        let registry = Arc::new(MountRegistry::empty());
+        registry
+            .reload(
+                &ExternalMountPgRepository::new(pool.clone()),
+                &DefaultMountProviderFactory::new(),
+            )
+            .await;
+        let router = Arc::new(MountRouter::new(registry));
+        let folder_service = FolderService::new(
+            Arc::new(FolderDbRepository::new(pool.clone())),
+            acl(&pool),
+            router.clone(),
+        );
+        let retrieval = FileRetrievalService::new_with_authz_for_test(
+            Arc::new(FileBlobReadRepository::new_stub()),
+            acl(&pool),
+        )
+        .with_mount_router(router.clone());
+
+        // The mount root's materialized path; descend into it.
+        let root = folder_service
+            .get_folder(&p.mount_folder_id.to_string())
+            .await
+            .unwrap();
+
+        // get_folder_by_path resolves a mount subdirectory → synthetic ext: id.
+        let sub = folder_service
+            .get_folder_by_path(&format!("{}/sub", root.path), p.drive_id)
+            .await
+            .expect("resolve sub dir by path");
+        assert!(sub.id.starts_with("ext:"));
+        assert_eq!(sub.name, "sub");
+
+        // get_file_by_path resolves a mount file.
+        let file = retrieval
+            .get_file_by_path(&format!("{}/a.txt", root.path), p.drive_id)
+            .await
+            .expect("resolve file by path");
+        assert!(file.id.starts_with("ext:"));
+        assert_eq!(file.size, 3);
+
+        // PROPFIND Depth:1 folder loop: list subdirectories of the mount root.
+        let dirs = folder_service
+            .list_folders_paginated_with_perms(
+                Some(&p.mount_folder_id.to_string()),
+                p.owner_id,
+                &PaginationRequestDto::default(),
+            )
+            .await
+            .expect("list mount subdirs");
+        assert_eq!(
+            dirs.items
+                .iter()
+                .map(|d| d.name.as_str())
+                .collect::<Vec<_>>(),
+            ["sub"]
+        );
+
+        // PROPFIND Depth:1 file loop: list files of the mount root.
+        let files = retrieval
+            .list_files_batch_with_perms(Some(&p.mount_folder_id.to_string()), p.owner_id, 0, 100)
+            .await
+            .expect("list mount files");
+        assert_eq!(
+            files.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+            ["a.txt"]
+        );
+
+        // Content streams from the provider (WebDAV GET) — resolve the nested
+        // file by path, then stream it by its ext: id.
+        let nested = retrieval
+            .get_file_by_path(&format!("{}/sub/b.txt", root.path), p.drive_id)
+            .await
+            .expect("nested file");
+        use futures::TryStreamExt as _;
+        let content: Vec<u8> = Box::into_pin(retrieval.get_file_stream(&nested.id).await.unwrap())
+            .map_ok(|b| b.to_vec())
+            .try_concat()
+            .await
+            .unwrap();
+        assert_eq!(content, b"nested!");
     }
 
     /// P2: a move that would cross the mount boundary is forbidden.

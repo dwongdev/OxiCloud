@@ -531,12 +531,15 @@ impl AppServiceFactory {
         // bridge (which looks file metadata up by id) can be wired into the
         // dispatcher they receive. It depends only on repos + core, never on
         // the upload service, so the reorder is safe.
-        let file_retrieval_service = Arc::new(FileRetrievalService::new_with_cache(
-            repos.file_read_repository.clone(),
-            core.file_content_cache.clone(),
-            core.image_transcode_service.clone(),
-            authz.clone(),
-        ));
+        let file_retrieval_service = Arc::new(
+            FileRetrievalService::new_with_cache(
+                repos.file_read_repository.clone(),
+                core.file_content_cache.clone(),
+                core.image_transcode_service.clone(),
+                authz.clone(),
+            )
+            .with_mount_router(mount_router.clone()),
+        );
 
         // Effective lifecycle dispatcher: the core hooks (thumbnails, metadata)
         // plus, when the plugins feature is enabled, the WASM plugin bridge.

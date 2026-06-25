@@ -37,6 +37,9 @@ pub struct FileRetrievalService {
     content_cache: Option<Arc<FileContentCache>>,
     transcode: Option<Arc<ImageTranscodeService>>,
     authz: Option<Arc<PgAclEngine>>,
+    /// External-mount classifier for path-based resolution (WebDAV/NextCloud).
+    /// `None` in the simple/test constructor → no mount support.
+    mount_router: Option<Arc<crate::application::services::external_mount_router::MountRouter>>,
 }
 
 impl FileRetrievalService {
@@ -49,6 +52,7 @@ impl FileRetrievalService {
             content_cache: None,
             transcode: None,
             authz: None,
+            mount_router: None,
         }
     }
 
@@ -65,7 +69,18 @@ impl FileRetrievalService {
             content_cache: Some(content_cache),
             transcode: Some(transcode),
             authz: Some(authz),
+            mount_router: None,
         }
+    }
+
+    /// Injects the external-mount classifier so path-based lookups
+    /// (`get_file_by_path`) can resolve mount paths to the provider.
+    pub fn with_mount_router(
+        mut self,
+        router: Arc<crate::application::services::external_mount_router::MountRouter>,
+    ) -> Self {
+        self.mount_router = Some(router);
+        self
     }
 
     /// Test-only constructor: authorization engine without the cache/transcode
@@ -81,6 +96,7 @@ impl FileRetrievalService {
             content_cache: None,
             transcode: None,
             authz: Some(authz),
+            mount_router: None,
         }
     }
 
@@ -184,6 +200,22 @@ impl FileRetrievalService {
             )
             .await?;
         cfg.provider.open_read_stream(node_id, range).await
+    }
+
+    /// If `id` is an `ext:` mount FILE id, return the mount config + node id.
+    /// `None` for native ids, mount roots, or when no router is wired.
+    fn mount_file_node(
+        &self,
+        id: &str,
+    ) -> Option<(
+        Arc<crate::application::services::mount_registry::MountConfig>,
+        NodeId,
+    )> {
+        use crate::application::services::external_mount_router::ResolvedId;
+        match self.mount_router.as_ref()?.classify(id) {
+            ResolvedId::MountChild { cfg, node_id } => Some((cfg, node_id)),
+            _ => None,
+        }
     }
 
     /// Try to transcode image content to WebP and return transcoded variant.
@@ -349,6 +381,26 @@ impl FileRetrievalUseCase for FileRetrievalService {
         // `drive_id` scope axis prevents cross-drive resolution — without
         // it, `find_file_by_path` would return a non-deterministic row
         // when the same path exists in multiple drives.
+        // External mount: a path descending past a mount root resolves on the
+        // provider (stat). The mount root itself has no file at its path.
+        if let Some(router) = &self.mount_router
+            && let Some((cfg, remainder)) = router.find_path(drive_id, path)
+            && !remainder.is_empty()
+        {
+            let node = cfg.provider.resolve_path(&remainder);
+            let stat = cfg.provider.stat(&node).await?;
+            if stat.is_dir {
+                return Err(DomainError::not_found("File", path));
+            }
+            let parent = crate::application::services::mount_dto::mount_parent_id(
+                &cfg,
+                stat.node_id.as_str(),
+            );
+            return Ok(crate::application::services::mount_dto::mount_file_dto(
+                &cfg, &parent, &stat,
+            ));
+        }
+
         if let Some(file) = self.file_read.find_file_by_path(path, drive_id).await? {
             return Ok(FileDto::from(file));
         }
@@ -388,6 +440,11 @@ impl FileRetrievalUseCase for FileRetrievalService {
         &self,
         id: &str,
     ) -> Result<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>, DomainError> {
+        if let Some((cfg, node)) = self.mount_file_node(id) {
+            let s = cfg.provider.open_read_stream(&node, None).await?;
+            // `Pin<Box<dyn Stream>>` is itself a `Stream`, so re-box it.
+            return Ok(Box::new(s));
+        }
         self.file_read.get_file_stream(id).await
     }
 
@@ -446,6 +503,13 @@ impl FileRetrievalUseCase for FileRetrievalService {
         start: u64,
         end: Option<u64>,
     ) -> Result<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>, DomainError> {
+        if let Some((cfg, node)) = self.mount_file_node(id) {
+            // The native range convention is exclusive-end; the provider wants
+            // an inclusive end.
+            let range = Some((start, end.map(|e| e.saturating_sub(1))));
+            let s = cfg.provider.open_read_stream(&node, range).await?;
+            return Ok(Box::new(s));
+        }
         self.file_read.get_file_range_stream(id, start, end).await
     }
 
@@ -490,6 +554,44 @@ impl FileRetrievalUseCase for FileRetrievalService {
         offset: i64,
         limit: i64,
     ) -> Result<Vec<FileDto>, DomainError> {
+        // External mount: list files from the provider (WebDAV/NextCloud
+        // PROPFIND Depth:1 file loop). Authz collapses on the mount root.
+        if let Some(fid) = folder_id
+            && let Some(router) = &self.mount_router
+        {
+            use crate::application::services::external_mount_router::ResolvedId;
+            let resolved = match router.classify(fid) {
+                ResolvedId::Regular => None,
+                ResolvedId::MountRoot { cfg } => Some((
+                    cfg,
+                    crate::domain::services::external_mount_id::NodeId::default(),
+                )),
+                ResolvedId::MountChild { cfg, node_id } => Some((cfg, node_id)),
+            };
+            if let Some((cfg, node)) = resolved {
+                if let Some(authz) = &self.authz {
+                    authz
+                        .require(
+                            Subject::User(owner_id),
+                            Permission::Read,
+                            Resource::Folder(cfg.mount_id),
+                        )
+                        .await?;
+                }
+                let entries = cfg.provider.list_dir(&node).await?;
+                let files: Vec<FileDto> = entries
+                    .iter()
+                    .filter(|e| !e.is_dir)
+                    .skip(offset.max(0) as usize)
+                    .take(limit.max(0) as usize)
+                    .map(|e| {
+                        crate::application::services::mount_dto::mount_entry_file_dto(&cfg, fid, e)
+                    })
+                    .collect();
+                return Ok(files);
+            }
+        }
+
         if folder_id.is_some() {
             // folder id is defined, check permissions
             self.require_target_folder_perm(folder_id, Permission::Read, owner_id)

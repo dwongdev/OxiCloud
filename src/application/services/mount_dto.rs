@@ -14,7 +14,7 @@ use crate::application::dtos::display_helpers::{
 };
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
-use crate::application::ports::external_mount_ports::MountStat;
+use crate::application::ports::external_mount_ports::{MountEntry, MountStat};
 use crate::application::services::mount_registry::MountConfig;
 use crate::domain::services::external_mount_id::{
     encode_child_id, virtual_file_etag, virtual_folder_etag,
@@ -66,6 +66,56 @@ pub fn mount_folder_dto(cfg: &MountConfig, parent_id: &str, stat: &MountStat) ->
         icon_class: Arc::from("fas fa-folder"),
         icon_special_class: Arc::from("folder-icon"),
         category: Arc::from("Folder"),
+        created_by: None,
+        updated_by: None,
+    }
+}
+
+/// Build a `FolderDto` from a directory listing entry. `parent_id` is the
+/// id-string of the directory being listed.
+pub fn mount_entry_folder_dto(cfg: &MountConfig, parent_id: &str, entry: &MountEntry) -> FolderDto {
+    FolderDto {
+        etag: virtual_folder_etag(entry.modified_at),
+        id: encode_child_id(cfg.mount_id, entry.node_id.clone()),
+        name: entry.name.clone(),
+        path: String::new(),
+        parent_id: Some(parent_id.to_owned()),
+        owner_id: Some(cfg.owner_id.to_string()),
+        drive_id: cfg.drive_id,
+        created_at: entry.created_at,
+        modified_at: entry.modified_at,
+        is_root: false,
+        icon_class: Arc::from("fas fa-folder"),
+        icon_special_class: Arc::from("folder-icon"),
+        category: Arc::from("Folder"),
+        created_by: None,
+        updated_by: None,
+    }
+}
+
+/// Build a `FileDto` from a directory listing entry (mime sniffed from name).
+pub fn mount_entry_file_dto(cfg: &MountConfig, parent_id: &str, entry: &MountEntry) -> FileDto {
+    let name = entry.name.as_str();
+    let mime = mime_guess::from_path(name)
+        .first_or_octet_stream()
+        .to_string();
+    FileDto {
+        id: encode_child_id(cfg.mount_id, entry.node_id.clone()),
+        name: name.to_owned(),
+        path: String::new(),
+        size: entry.size,
+        mime_type: Arc::from(mime.as_str()),
+        folder_id: Some(parent_id.to_owned()),
+        created_at: entry.created_at,
+        modified_at: entry.modified_at,
+        icon_class: Arc::from(icon_class_for(name, &mime)),
+        icon_special_class: Arc::from(icon_special_class_for(name, &mime)),
+        category: Arc::from(category_for(name, &mime)),
+        size_formatted: format_file_size(entry.size),
+        owner_id: Some(cfg.owner_id.to_string()),
+        sort_date: None,
+        content_hash: String::new(),
+        etag: virtual_file_etag(entry.size, entry.modified_at),
         created_by: None,
         updated_by: None,
     }
