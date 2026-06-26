@@ -632,6 +632,21 @@ impl TrashUseCase for TrashService {
                         // Permanently delete the folder
                         let folder_id = item.original_id().to_string();
 
+                        // Snapshot the cascade's file ids BEFORE the bulk
+                        // DELETE so `on_file_deleted` fires per cascaded
+                        // file (same shape as the bulk `clear_trash_in`
+                        // path at line ~804). Skipped when no hook is
+                        // registered — the enumeration is a SQL round-trip
+                        // we don't want to pay for nothing.
+                        let cascaded_file_ids: Vec<String> = if self.file_deleted_hook.is_some() {
+                            self.folder_storage_port
+                                .list_file_ids_in_subtree(&folder_id)
+                                .await
+                                .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
+
                         info!("Permanently deleting folder: {}", folder_id);
                         match self
                             .folder_storage_port
@@ -664,6 +679,12 @@ impl TrashUseCase for TrashService {
                                         ),
                                     ));
                                 }
+                            }
+                        }
+
+                        if let Some(hook) = &self.file_deleted_hook {
+                            for file_id in &cascaded_file_ids {
+                                hook.on_file_deleted(file_id);
                             }
                         }
                     }

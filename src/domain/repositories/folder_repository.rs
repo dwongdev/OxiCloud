@@ -136,6 +136,21 @@ pub trait FolderRepository: Send + Sync + 'static {
     /// Permanently deletes a folder (used by the trash)
     async fn delete_folder_permanently(&self, folder_id: &str) -> Result<(), DomainError>;
 
+    /// File ids in the subtree rooted at `folder_id` (inclusive).
+    ///
+    /// Single GiST scan on `storage.folders.lpath`. Service-layer paths
+    /// that delete a folder via bulk SQL (the PG cascade reaps descendant
+    /// files transparently) call this BEFORE the delete so they can fire
+    /// `on_file_deleted` per-file. Without it, file-id-keyed lifecycle
+    /// data (e.g. `ext-{file_id}.jpg` video thumbnails) leaks past the
+    /// cascade. See [[bug-folder-cascade-hooks-missing]].
+    ///
+    /// Default: returns an empty vec (stubs / mocks).
+    async fn list_file_ids_in_subtree(&self, folder_id: &str) -> Result<Vec<String>, DomainError> {
+        let _ = folder_id;
+        Ok(Vec::new())
+    }
+
     /// Lists every folder in a subtree rooted at `folder_id` (inclusive).
     ///
     /// Uses ltree `<@` for a single GiST-indexed scan.  The result is

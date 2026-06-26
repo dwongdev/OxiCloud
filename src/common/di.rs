@@ -526,6 +526,10 @@ impl AppServiceFactory {
         let folder_service = Arc::new(FolderService::new(
             repos.folder_repository.clone(),
             authz.clone(),
+            // Same dispatcher TrashService uses, so the cascade hook in
+            // `delete_folder_with_perms` fans out to the same handlers
+            // (thumbnails, metadata, …) as a single-file delete.
+            core.file_lifecycle.clone(),
         ));
 
         // Built before the upload/management services so the plugin lifecycle

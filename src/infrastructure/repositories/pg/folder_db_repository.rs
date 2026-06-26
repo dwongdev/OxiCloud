@@ -914,6 +914,25 @@ impl FolderRepository for FolderDbRepository {
         Ok(())
     }
 
+    async fn list_file_ids_in_subtree(&self, folder_id: &str) -> Result<Vec<String>, DomainError> {
+        // Same GiST subtree predicate the bulk DELETEs in `delete_folder` /
+        // `delete_folder_permanently` use — single index scan on
+        // `storage.folders.lpath`. Returns the file ids the cascade is
+        // about to reap so the caller can fire `on_file_deleted` per id.
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT f.id::text FROM storage.files f \
+              WHERE f.folder_id IN ( \
+                  SELECT id FROM storage.folders \
+                   WHERE lpath <@ (SELECT lpath FROM storage.folders WHERE id = $1::uuid) \
+              )",
+        )
+        .bind(folder_id)
+        .fetch_all(self.pool())
+        .await
+        .map_err(|e| DomainError::internal_error("FolderDb", format!("list subtree files: {e}")))?;
+        Ok(rows)
+    }
+
     async fn delete_folder_permanently(&self, folder_id: &str) -> Result<(), DomainError> {
         // Delete all files whose folder is anywhere in the subtree
         // (GiST ltree index, same pattern as delete_folder — both

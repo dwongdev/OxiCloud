@@ -4,7 +4,9 @@ use crate::application::dtos::folder_dto::{
     MoveFolderDto, RenameFolderDto,
 };
 use crate::application::ports::authorization_ports::AuthorizationEngine;
+use crate::application::ports::file_lifecycle::FileLifecycleHook;
 use crate::application::ports::folder_ports::FolderUseCase;
+use crate::application::services::file_lifecycle_service::FileLifecycleService;
 use crate::common::errors::{DomainError, ErrorKind};
 use crate::domain::repositories::folder_repository::FolderRepository;
 use crate::domain::services::authorization::{Permission, Resource, Subject};
@@ -18,14 +20,24 @@ use uuid::Uuid;
 pub struct FolderService {
     folder_storage: Arc<FolderDbRepository>,
     authz: Arc<PgAclEngine>,
+    /// File lifecycle dispatcher. Carried so `delete_folder_with_perms`
+    /// can fire `on_file_deleted` for every file the PG cascade is about
+    /// to reap. Always present — the dispatcher itself is a no-op when
+    /// no hooks are registered, so callers don't need an Option branch.
+    file_lifecycle: Arc<FileLifecycleService>,
 }
 
 impl FolderService {
     /// Creates a new folder service
-    pub fn new(folder_storage: Arc<FolderDbRepository>, authz: Arc<PgAclEngine>) -> Self {
+    pub fn new(
+        folder_storage: Arc<FolderDbRepository>,
+        authz: Arc<PgAclEngine>,
+        file_lifecycle: Arc<FileLifecycleService>,
+    ) -> Self {
         Self {
             folder_storage,
             authz,
+            file_lifecycle,
         }
     }
 
@@ -545,6 +557,12 @@ impl FolderUseCase for FolderService {
     /// Deletes a folder after verifying the caller has `Delete` permission.
     /// The DB trigger `trg_cleanup_grants_folder` cleans up `access_grants`
     /// rows targeting the deleted folder automatically.
+    ///
+    /// Enumerates the subtree's file ids BEFORE the bulk DELETE so
+    /// `on_file_deleted` fires per file the PG cascade is about to reap —
+    /// without this, file-id-keyed lifecycle data (e.g. `ext-{file_id}.jpg`
+    /// video thumbnails, moka cache entries) leaks past the cascade.
+    /// Same shape `clear_trash_in` uses (`trash_service.rs:804-846`).
     async fn delete_folder_with_perms(&self, id: &str, caller_id: Uuid) -> Result<(), DomainError> {
         self.authz
             .require(
@@ -554,12 +572,28 @@ impl FolderUseCase for FolderService {
             )
             .await?;
 
+        // Snapshot the file ids BEFORE the bulk DELETE — the rows are gone
+        // afterward. Failure to enumerate is non-fatal (logged in the repo
+        // method); the delete proceeds and only file-id-keyed cleanup is
+        // skipped (blob-keyed thumbnails still get reaped by GC).
+        let cascaded_file_ids = self
+            .folder_storage
+            .list_file_ids_in_subtree(id)
+            .await
+            .unwrap_or_default();
+
         self.folder_storage.delete_folder(id).await.map_err(|e| {
             DomainError::internal_error(
                 "FolderStorage",
                 format!("Failed to delete folder with ID: {}: {}", id, e),
             )
-        })
+        })?;
+
+        for file_id in &cascaded_file_ids {
+            self.file_lifecycle.on_file_deleted(file_id);
+        }
+
+        Ok(())
     }
 }
 
@@ -840,5 +874,221 @@ impl UserLifecycleHook for PersonalDriveLifecycleHook {
             "Personal drive (and tree) will be removed via FK CASCADE on user delete"
         );
         Ok(())
+    }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Integration test — verifies the folder-cascade hook fix lands `on_file_deleted`
+// for every file the PG cascade reaps when a folder is permanently deleted.
+//
+// Background: `delete_folder_with_perms` issues a bulk SQL DELETE that the PG
+// `ON DELETE CASCADE` fans out to descendant folders + files. Without
+// service-layer enumeration, file-id-keyed lifecycle data (thumbnails keyed
+// on `ext-{file_id}.jpg`, moka cache entries, future per-file metadata)
+// silently leaks. See [[bug-folder-cascade-hooks-missing]] in agent memory.
+//
+// How to run:
+//   bash tests/common/spawn-db.sh
+//   RUSTFLAGS='--cfg integration_tests' cargo test \
+//       -p oxicloud --lib folder_service::cascade_hook_integration_tests
+// ────────────────────────────────────────────────────────────────────────────
+#[cfg(integration_tests)]
+#[allow(dead_code)]
+mod cascade_hook_integration_tests {
+    use super::*;
+    use crate::application::ports::blob_storage_ports::BlobStorageBackend;
+    use crate::application::ports::file_lifecycle::FileLifecycleHook;
+    use crate::infrastructure::repositories::pg::SubjectGroupPgRepository;
+    use crate::infrastructure::repositories::pg::file_blob_read_repository::FileBlobReadRepository;
+    use crate::infrastructure::services::dedup_service::DedupService;
+    use crate::infrastructure::services::local_blob_backend::LocalBlobBackend;
+    use crate::integration_test_support::{ensure_clean_test_db, test_db_url};
+    use sqlx::Row;
+    use sqlx::postgres::PgPoolOptions;
+    use std::sync::Mutex;
+    use tempfile::TempDir;
+
+    /// Records every `on_file_deleted` call so the test can assert the
+    /// exact set of file ids the cascade fired hooks for. Other lifecycle
+    /// methods are no-ops — this fix only touches the deletion path.
+    #[derive(Default)]
+    struct RecordingHook {
+        deleted: Mutex<Vec<String>>,
+    }
+
+    impl FileLifecycleHook for RecordingHook {
+        fn on_file_created(
+            &self,
+            _file_id: &str,
+            _blob_hash: &str,
+            _content_type: &str,
+            _is_new_blob: bool,
+        ) {
+        }
+        fn on_file_copied(
+            &self,
+            _file_id: &str,
+            _blob_hash: &str,
+            _content_type: &str,
+            _source_file_id: &str,
+        ) {
+        }
+        fn on_file_updated(&self, _file_id: &str, _blob_hash: &str, _content_type: &str) {}
+        fn on_file_deleted(&self, file_id: &str) {
+            self.deleted.lock().unwrap().push(file_id.to_string());
+        }
+    }
+
+    async fn test_pool() -> Arc<sqlx::PgPool> {
+        let pool = PgPoolOptions::new()
+            .max_connections(4)
+            .connect(&test_db_url())
+            .await
+            .expect("connect to test DB — run tests/common/spawn-db.sh first");
+        ensure_clean_test_db(&pool).await;
+        Arc::new(pool)
+    }
+
+    /// Returns `(user_id, drive_id, drive_root_folder_id)` — same default
+    /// Personal drive every internal user gets post-D0 (provisioned by
+    /// `PersonalDriveLifecycleHook`).
+    async fn seed_user(pool: &sqlx::PgPool) -> (Uuid, Uuid, Uuid) {
+        sqlx::query(
+            "SELECT u.id AS user_id, d.id AS drive_id, d.root_folder_id
+               FROM auth.users u
+               JOIN storage.drives d ON d.default_for_user = u.id
+              LIMIT 1",
+        )
+        .fetch_one(pool)
+        .await
+        .map(|r| {
+            (
+                r.get::<Uuid, _>("user_id"),
+                r.get::<Uuid, _>("drive_id"),
+                r.get::<Uuid, _>("root_folder_id"),
+            )
+        })
+        .expect("auth.users + storage.drives must be seeded (init-test-schema.sh)")
+    }
+
+    /// Build a real `PgAclEngine` against the test pool so
+    /// `delete_folder_with_perms` can actually evaluate Owner — the user
+    /// from `seed_user` owns the default drive, so `Permission::Delete`
+    /// on its descendants resolves through the Owner short-circuit.
+    async fn build_authz(
+        pool: Arc<sqlx::PgPool>,
+        dir: &TempDir,
+        folder_repo: Arc<FolderDbRepository>,
+    ) -> Arc<PgAclEngine> {
+        let backend = Arc::new(LocalBlobBackend::new(&dir.path().join("blobs")));
+        backend.initialize().await.expect("init backend");
+        let dedup = Arc::new(DedupService::new(backend, pool.clone(), pool.clone()));
+        let file_repo = Arc::new(FileBlobReadRepository::new(
+            pool.clone(),
+            dedup,
+            folder_repo.clone(),
+        ));
+        let group_repo = Arc::new(SubjectGroupPgRepository::new(pool.clone()));
+        Arc::new(PgAclEngine::new(pool, folder_repo, file_repo, group_repo))
+    }
+
+    /// Seed a file row under `folder_id`. `blob_hash` is just a string —
+    /// `storage.files.blob_hash` is VARCHAR(64) without a FK, so no blob
+    /// row is required. The cascade decrement trigger no-ops when the
+    /// hash is unknown.
+    async fn seed_file_under(
+        pool: &sqlx::PgPool,
+        user_id: Uuid,
+        drive_id: Uuid,
+        folder_id: Uuid,
+        label: &str,
+    ) -> Uuid {
+        let blob_hash = blake3::hash(format!("cascade-{label}-{}", Uuid::new_v4()).as_bytes())
+            .to_hex()
+            .to_string();
+        sqlx::query_scalar(
+            "INSERT INTO storage.files
+                 (name, user_id, drive_id, folder_id, blob_hash, size, created_by, updated_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
+             RETURNING id",
+        )
+        .bind(format!(
+            "rust-test-cascade-{label}-{}",
+            &Uuid::new_v4().to_string()[..8]
+        ))
+        .bind(user_id)
+        .bind(drive_id)
+        .bind(folder_id)
+        .bind(&blob_hash)
+        .bind(42i64)
+        .bind(user_id)
+        .fetch_one(pool)
+        .await
+        .expect("seed file row")
+    }
+
+    #[tokio::test]
+    async fn delete_folder_with_perms_fires_hook_for_cascaded_files() {
+        let pool = test_pool().await;
+        let dir = TempDir::new().unwrap();
+        let (user_id, drive_id, drive_root) = seed_user(&pool).await;
+
+        let folder_repo = Arc::new(FolderDbRepository::new(pool.clone()));
+        let authz = build_authz(pool.clone(), &dir, folder_repo.clone()).await;
+        let recorder: Arc<RecordingHook> = Arc::new(RecordingHook::default());
+        let fls = Arc::new(
+            crate::application::services::file_lifecycle_service::FileLifecycleService::new()
+                .with_hook(recorder.clone() as Arc<dyn FileLifecycleHook>),
+        );
+        let service = FolderService::new(folder_repo.clone(), authz, fls);
+
+        // Build parent/child via the production create path — it stamps
+        // provenance and computes paths the same way as live uploads.
+        let parent = folder_repo
+            .create_folder(
+                format!(
+                    "rust-test-cascade-parent-{}",
+                    &Uuid::new_v4().to_string()[..8]
+                ),
+                Some(drive_root.to_string()),
+                user_id,
+            )
+            .await
+            .expect("create parent");
+        let child = folder_repo
+            .create_folder(
+                format!(
+                    "rust-test-cascade-child-{}",
+                    &Uuid::new_v4().to_string()[..8]
+                ),
+                Some(parent.id().to_string()),
+                user_id,
+            )
+            .await
+            .expect("create child");
+        let child_uuid = Uuid::parse_str(child.id()).expect("child uuid");
+
+        // Two files: one directly under the parent, one nested under
+        // child. The cascade should reap both; the hook must fire for both.
+        let parent_uuid = Uuid::parse_str(parent.id()).expect("parent uuid");
+        let direct_file = seed_file_under(&pool, user_id, drive_id, parent_uuid, "direct").await;
+        let nested_file = seed_file_under(&pool, user_id, drive_id, child_uuid, "nested").await;
+
+        // Act — the production code path under test.
+        service
+            .delete_folder_with_perms(parent.id(), user_id)
+            .await
+            .expect("delete_folder_with_perms");
+
+        // Assert — every cascaded file id appears in the hook record.
+        let captured = recorder.deleted.lock().unwrap().clone();
+        assert!(
+            captured.contains(&direct_file.to_string()),
+            "expected on_file_deleted for direct-child file {direct_file}, got {captured:?}"
+        );
+        assert!(
+            captured.contains(&nested_file.to_string()),
+            "expected on_file_deleted for nested file {nested_file}, got {captured:?}"
+        );
     }
 }
