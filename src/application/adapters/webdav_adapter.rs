@@ -96,6 +96,13 @@ pub struct PropValue {
     pub value: Option<String>,
 }
 
+/// A single PROPPATCH operation (preserves document order per RFC 4918 §9.2).
+#[derive(Debug, Clone)]
+pub enum PropPatchOp {
+    Set(PropValue),
+    Remove(QualifiedName),
+}
+
 /// WebDAV lock information
 #[derive(Debug, Clone)]
 pub struct LockInfo {
@@ -188,11 +195,34 @@ impl WebDavAdapter {
     ) {
         for attr in e.attributes().flatten() {
             let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
-            if let Some(prefix) = key.strip_prefix("xmlns:") {
-                let uri = attr.unescape_value().unwrap_or_default().to_string();
-                ns_map.insert(prefix.to_string(), uri);
+            let prefix = key
+                .strip_prefix("xmlns:")
+                .map(str::to_owned)
+                .or_else(|| (key == "xmlns").then(String::new));
+            if let Some(prefix) = prefix {
+                ns_map.insert(
+                    prefix,
+                    attr.unescape_value().unwrap_or_default().to_string(),
+                );
             }
         }
+    }
+
+    /// Reject `xmlns:prefix=""` declarations — binding a prefix to an empty URI
+    /// is forbidden by the XML Namespaces 1.0 spec (RFC 4918 §8.1 requires 400).
+    fn check_ns_decls_valid(e: &BytesStart) -> Result<()> {
+        for attr in e.attributes().flatten() {
+            let key = std::str::from_utf8(attr.key.as_ref()).unwrap_or("");
+            if key.starts_with("xmlns:") {
+                let uri = attr.unescape_value().unwrap_or_default();
+                if uri.is_empty() {
+                    return Err(WebDavError::ParseError(
+                        "Invalid namespace declaration: prefix bound to empty URI".to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Resolve a prefixed element name (e.g. `D:resourcetype`) to a
@@ -208,6 +238,11 @@ impl WebDavAdapter {
                 return QualifiedName::new(uri.clone(), local.to_string());
             }
         }
+        // No prefix: check for a default namespace (xmlns="...").
+        // An empty string means xmlns="" — null namespace override, which is valid.
+        if let Some(default_ns) = ns_map.get("") {
+            return QualifiedName::new(default_ns.clone(), name_str.to_string());
+        }
         // Fallback: no prefix or unknown prefix → use legacy extraction
         QualifiedName::new(
             Self::extract_namespace(name_str),
@@ -222,6 +257,7 @@ impl WebDavAdapter {
 
         let mut buffer = Vec::new();
         let mut in_propfind = false;
+        let mut saw_propfind_close = false;
         let mut in_prop = false;
         let mut in_allprop = false;
         let mut in_propname = false;
@@ -232,6 +268,7 @@ impl WebDavAdapter {
             match xml_reader.read_event_into(&mut buffer) {
                 Ok(Event::Start(ref e)) => {
                     Self::collect_ns_decls(e, &mut ns_map);
+                    Self::check_ns_decls_valid(e)?;
                     let name = e.name();
                     let name_str = std::str::from_utf8(name.as_ref()).unwrap_or("");
 
@@ -258,6 +295,7 @@ impl WebDavAdapter {
 
                     if name_str == "propfind" || name_str.ends_with(":propfind") {
                         in_propfind = false;
+                        saw_propfind_close = true;
                     } else if name_str == "prop" || name_str.ends_with(":prop") {
                         in_prop = false;
                     } else if name_str == "allprop" || name_str.ends_with(":allprop") {
@@ -268,6 +306,7 @@ impl WebDavAdapter {
                 }
                 Ok(Event::Empty(ref e)) => {
                     Self::collect_ns_decls(e, &mut ns_map);
+                    Self::check_ns_decls_valid(e)?;
                     let name = e.name();
                     let name_str = std::str::from_utf8(name.as_ref()).unwrap_or("");
 
@@ -290,6 +329,16 @@ impl WebDavAdapter {
             buffer.clear();
         }
 
+        // RFC 4918 §8.1: non-well-formed XML MUST produce 400. quick-xml is
+        // lenient about EOF-inside-element (no XmlError on unclosed tags), so
+        // check explicitly: body must contain a complete <propfind>…</propfind>.
+        if !saw_propfind_close {
+            return Err(WebDavError::ParseError(
+                "PROPFIND body is not well-formed XML: missing or unclosed <propfind> element"
+                    .to_string(),
+            ));
+        }
+
         let prop_find_type = if in_allprop {
             PropFindType::AllProp
         } else if in_propname {
@@ -301,7 +350,7 @@ impl WebDavAdapter {
         Ok(PropFindRequest { prop_find_type })
     }
 
-    fn folder_prop_is_known(prop: &QualifiedName) -> bool {
+    fn prop_is_known(prop: &QualifiedName) -> bool {
         prop.namespace == "DAV:"
             && matches!(
                 prop.name.as_str(),
@@ -315,18 +364,22 @@ impl WebDavAdapter {
             )
     }
 
-    fn file_prop_is_known(prop: &QualifiedName) -> bool {
-        prop.namespace == "DAV:"
-            && matches!(
-                prop.name.as_str(),
-                "resourcetype"
-                    | "displayname"
-                    | "getcontenttype"
-                    | "getcontentlength"
-                    | "creationdate"
-                    | "getlastmodified"
-                    | "getetag"
-            )
+    /// Write a single qualified name as an empty XML element with proper namespace declaration.
+    ///
+    /// DAV: props use the `D:` prefix (already declared on the root element).
+    /// All other namespaces get a local `xmlns:X` declaration on the element itself.
+    fn write_qname_empty<W: Write>(xml_writer: &mut Writer<W>, prop: &QualifiedName) -> Result<()> {
+        if prop.namespace.is_empty() {
+            xml_writer.write_event(Event::Empty(BytesStart::new(prop.name.as_str())))?;
+        } else if prop.namespace == "DAV:" {
+            xml_writer.write_event(Event::Empty(BytesStart::new(format!("D:{}", prop.name))))?;
+        } else {
+            let tag = format!("X:{}", prop.name);
+            let mut start = BytesStart::new(tag.as_str());
+            start.push_attribute(("xmlns:X", prop.namespace.as_str()));
+            xml_writer.write_event(Event::Empty(start))?;
+        }
+        Ok(())
     }
 
     /// Write a 404 propstat block for unknown properties (RFC 4918 §9.2).
@@ -340,19 +393,53 @@ impl WebDavAdapter {
         xml_writer.write_event(Event::Start(BytesStart::new("D:propstat")))?;
         xml_writer.write_event(Event::Start(BytesStart::new("D:prop")))?;
         for prop in unknown {
-            if prop.namespace == "DAV:" {
-                xml_writer
-                    .write_event(Event::Empty(BytesStart::new(format!("D:{}", prop.name))))?;
-            } else {
-                xml_writer.write_event(Event::Empty(BytesStart::new(format!(
-                    "{}:{}",
-                    prop.namespace, prop.name
-                ))))?;
-            }
+            Self::write_qname_empty(xml_writer, prop)?;
         }
         xml_writer.write_event(Event::End(BytesEnd::new("D:prop")))?;
         xml_writer.write_event(Event::Start(BytesStart::new("D:status")))?;
         xml_writer.write_event(Event::Text(BytesText::new("HTTP/1.1 404 Not Found")))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("D:status")))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("D:propstat")))?;
+        Ok(())
+    }
+
+    /// Write a dead-property propstat block (RFC 4918 §4.2).
+    ///
+    /// Written AFTER the live-property propstats inside a `<D:response>`.
+    /// Only emitted when `dead_props` is non-empty.
+    fn write_dead_props_propstat<W: Write>(
+        xml_writer: &mut Writer<W>,
+        dead_props: &[(QualifiedName, Option<String>)],
+    ) -> Result<()> {
+        if dead_props.is_empty() {
+            return Ok(());
+        }
+        xml_writer.write_event(Event::Start(BytesStart::new("D:propstat")))?;
+        xml_writer.write_event(Event::Start(BytesStart::new("D:prop")))?;
+        for (name, value) in dead_props {
+            let tag = if name.namespace.is_empty() {
+                name.name.clone()
+            } else {
+                format!("X:{}", name.name)
+            };
+            let mut start = BytesStart::new(tag.as_str());
+            if !name.namespace.is_empty() {
+                start.push_attribute(("xmlns:X", name.namespace.as_str()));
+            }
+            match value {
+                Some(v) if !v.is_empty() => {
+                    xml_writer.write_event(Event::Start(start))?;
+                    xml_writer.write_event(Event::Text(BytesText::new(v)))?;
+                    xml_writer.write_event(Event::End(BytesEnd::new(tag.as_str())))?;
+                }
+                _ => {
+                    xml_writer.write_event(Event::Empty(start))?;
+                }
+            }
+        }
+        xml_writer.write_event(Event::End(BytesEnd::new("D:prop")))?;
+        xml_writer.write_event(Event::Start(BytesStart::new("D:status")))?;
+        xml_writer.write_event(Event::Text(BytesText::new("HTTP/1.1 200 OK")))?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:status")))?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:propstat")))?;
         Ok(())
@@ -365,17 +452,46 @@ impl WebDavAdapter {
         request: &PropFindRequest,
         href: &str,
     ) -> Result<()> {
+        Self::write_folder_response_with_dead_props(xml_writer, folder, request, href, &[])
+    }
+
+    fn write_folder_response_with_dead_props<W: Write>(
+        xml_writer: &mut Writer<W>,
+        folder: &FolderDto,
+        request: &PropFindRequest,
+        href: &str,
+        dead_props: &[(QualifiedName, Option<String>)],
+    ) -> Result<()> {
         xml_writer.write_event(Event::Start(BytesStart::new("D:response")))?;
 
         xml_writer.write_event(Event::Start(BytesStart::new("D:href")))?;
         xml_writer.write_event(Event::Text(BytesText::new(href)))?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:href")))?;
 
+        // Compute dead props first so we can exclude them from the 404 propstat.
+        let relevant_dead: Vec<_> = match &request.prop_find_type {
+            PropFindType::Prop(requested) => dead_props
+                .iter()
+                .filter(|(name, _)| requested.iter().any(|r| r == name))
+                .cloned()
+                .collect(),
+            PropFindType::AllProp => dead_props.to_vec(),
+            PropFindType::PropName => vec![],
+        };
+        let dead_name_set: std::collections::HashSet<&QualifiedName> =
+            relevant_dead.iter().map(|(n, _)| n).collect();
+
         match &request.prop_find_type {
             PropFindType::Prop(props) => {
                 // RFC 4918 §9.2: known props → 200 propstat; unknown → 404 propstat.
+                // Props found in the dead store are returned in the dead 200 propstat,
+                // so exclude them from the 404 propstat to avoid duplicate reporting.
                 let (known, unknown): (Vec<_>, Vec<_>) =
-                    props.iter().partition(|p| Self::folder_prop_is_known(p));
+                    props.iter().partition(|p| Self::prop_is_known(p));
+                let truly_unknown: Vec<_> = unknown
+                    .into_iter()
+                    .filter(|p| !dead_name_set.contains(*p))
+                    .collect();
 
                 xml_writer.write_event(Event::Start(BytesStart::new("D:propstat")))?;
                 xml_writer.write_event(Event::Start(BytesStart::new("D:prop")))?;
@@ -386,7 +502,7 @@ impl WebDavAdapter {
                 xml_writer.write_event(Event::End(BytesEnd::new("D:status")))?;
                 xml_writer.write_event(Event::End(BytesEnd::new("D:propstat")))?;
 
-                Self::write_unknown_props_404(xml_writer, &unknown)?;
+                Self::write_unknown_props_404(xml_writer, &truly_unknown)?;
             }
             other => {
                 xml_writer.write_event(Event::Start(BytesStart::new("D:propstat")))?;
@@ -408,6 +524,9 @@ impl WebDavAdapter {
             }
         }
 
+        // Dead properties — written as a separate 200 propstat (RFC 4918 §4.2).
+        Self::write_dead_props_propstat(xml_writer, &relevant_dead)?;
+
         xml_writer.write_event(Event::End(BytesEnd::new("D:response")))?;
         Ok(())
     }
@@ -419,17 +538,46 @@ impl WebDavAdapter {
         request: &PropFindRequest,
         href: &str,
     ) -> Result<()> {
+        Self::write_file_response_with_dead_props(xml_writer, file, request, href, &[])
+    }
+
+    fn write_file_response_with_dead_props<W: Write>(
+        xml_writer: &mut Writer<W>,
+        file: &FileDto,
+        request: &PropFindRequest,
+        href: &str,
+        dead_props: &[(QualifiedName, Option<String>)],
+    ) -> Result<()> {
         xml_writer.write_event(Event::Start(BytesStart::new("D:response")))?;
 
         xml_writer.write_event(Event::Start(BytesStart::new("D:href")))?;
         xml_writer.write_event(Event::Text(BytesText::new(href)))?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:href")))?;
 
+        // Compute dead props first so we can exclude them from the 404 propstat.
+        let relevant_dead: Vec<_> = match &request.prop_find_type {
+            PropFindType::Prop(requested) => dead_props
+                .iter()
+                .filter(|(name, _)| requested.iter().any(|r| r == name))
+                .cloned()
+                .collect(),
+            PropFindType::AllProp => dead_props.to_vec(),
+            PropFindType::PropName => vec![],
+        };
+        let dead_name_set: std::collections::HashSet<&QualifiedName> =
+            relevant_dead.iter().map(|(n, _)| n).collect();
+
         match &request.prop_find_type {
             PropFindType::Prop(props) => {
                 // RFC 4918 §9.2: known props → 200 propstat; unknown → 404 propstat.
+                // Props found in the dead store are returned in the dead 200 propstat,
+                // so exclude them from the 404 propstat to avoid duplicate reporting.
                 let (known, unknown): (Vec<_>, Vec<_>) =
-                    props.iter().partition(|p| Self::file_prop_is_known(p));
+                    props.iter().partition(|p| Self::prop_is_known(p));
+                let truly_unknown: Vec<_> = unknown
+                    .into_iter()
+                    .filter(|p| !dead_name_set.contains(*p))
+                    .collect();
 
                 xml_writer.write_event(Event::Start(BytesStart::new("D:propstat")))?;
                 xml_writer.write_event(Event::Start(BytesStart::new("D:prop")))?;
@@ -440,7 +588,7 @@ impl WebDavAdapter {
                 xml_writer.write_event(Event::End(BytesEnd::new("D:status")))?;
                 xml_writer.write_event(Event::End(BytesEnd::new("D:propstat")))?;
 
-                Self::write_unknown_props_404(xml_writer, &unknown)?;
+                Self::write_unknown_props_404(xml_writer, &truly_unknown)?;
             }
             other => {
                 xml_writer.write_event(Event::Start(BytesStart::new("D:propstat")))?;
@@ -461,6 +609,9 @@ impl WebDavAdapter {
                 xml_writer.write_event(Event::End(BytesEnd::new("D:propstat")))?;
             }
         }
+
+        // Dead properties (RFC 4918 §4.2).
+        Self::write_dead_props_propstat(xml_writer, &relevant_dead)?;
 
         xml_writer.write_event(Event::End(BytesEnd::new("D:response")))?;
         Ok(())
@@ -606,7 +757,7 @@ impl WebDavAdapter {
     fn write_folder_requested_props<W: Write>(
         xml_writer: &mut Writer<W>,
         folder: &FolderDto,
-        props: &[QualifiedName],
+        props: &[&QualifiedName],
     ) -> Result<()> {
         for prop in props {
             if prop.namespace == "DAV:" {
@@ -682,7 +833,7 @@ impl WebDavAdapter {
     fn write_file_requested_props<W: Write>(
         xml_writer: &mut Writer<W>,
         file: &FileDto,
-        props: &[QualifiedName],
+        props: &[&QualifiedName],
     ) -> Result<()> {
         for prop in props {
             if prop.namespace == "DAV:" {
@@ -752,8 +903,11 @@ impl WebDavAdapter {
         Ok(())
     }
 
-    /// Parse a PROPPATCH XML request
-    pub fn parse_proppatch<R: Read>(reader: R) -> Result<(Vec<PropValue>, Vec<QualifiedName>)> {
+    /// Parse a PROPPATCH XML request.
+    ///
+    /// Returns operations in document order (RFC 4918 §9.2 requires document-order
+    /// processing so that remove-then-set and set-then-remove yield different results).
+    pub fn parse_proppatch<R: Read>(reader: R) -> Result<Vec<PropPatchOp>> {
         let mut xml_reader = Reader::from_reader(BufReader::new(reader));
         xml_reader.config_mut().trim_text(true);
 
@@ -763,8 +917,7 @@ impl WebDavAdapter {
         let mut in_remove = false;
         let mut in_prop = false;
         let mut current_prop: Option<QualifiedName> = None;
-        let mut props_to_set = Vec::new();
-        let mut props_to_remove = Vec::new();
+        let mut ops: Vec<PropPatchOp> = Vec::new();
         let mut current_text = String::new();
         let mut ns_map = std::collections::HashMap::<String, String>::new();
 
@@ -796,7 +949,30 @@ impl WebDavAdapter {
                     }
                 }
                 Ok(Event::Text(e)) if current_prop.is_some() => {
-                    current_text.push_str(&e.decode().unwrap_or_default());
+                    let raw = e.decode().unwrap_or_default();
+                    let unescaped =
+                        quick_xml::escape::unescape(&raw).unwrap_or_else(|_| raw.clone());
+                    current_text.push_str(&unescaped);
+                }
+                Ok(Event::GeneralRef(ref e)) if current_prop.is_some() => {
+                    // quick-xml 0.39 emits GeneralRef for character references like &#65536;
+                    // and named entity references like &amp;. Resolve them to actual chars.
+                    match e.resolve_char_ref() {
+                        Ok(Some(ch)) => current_text.push(ch),
+                        Ok(None) => {
+                            if let Ok(name) = e.decode() {
+                                match name.as_ref() {
+                                    "amp" => current_text.push('&'),
+                                    "lt" => current_text.push('<'),
+                                    "gt" => current_text.push('>'),
+                                    "apos" => current_text.push('\''),
+                                    "quot" => current_text.push('"'),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        Err(_) => {}
+                    }
                 }
                 Ok(Event::End(ref e)) => {
                     let name = e.name();
@@ -810,19 +986,18 @@ impl WebDavAdapter {
                         s if s == "remove" || s.ends_with(":remove") => in_remove = false,
                         s if s == "prop" || s.ends_with(":prop") => in_prop = false,
                         _ if in_prop => {
-                            // End of property element
                             if let Some(prop_name) = current_prop.take() {
                                 if in_set {
-                                    props_to_set.push(PropValue {
+                                    ops.push(PropPatchOp::Set(PropValue {
                                         name: prop_name,
                                         value: if current_text.is_empty() {
                                             None
                                         } else {
                                             Some(current_text.clone())
                                         },
-                                    });
+                                    }));
                                 } else if in_remove {
-                                    props_to_remove.push(prop_name);
+                                    ops.push(PropPatchOp::Remove(prop_name));
                                 }
                             }
                             current_text.clear();
@@ -839,12 +1014,12 @@ impl WebDavAdapter {
                         let qname = Self::resolve_name(name_str, &ns_map);
 
                         if in_set {
-                            props_to_set.push(PropValue {
+                            ops.push(PropPatchOp::Set(PropValue {
                                 name: qname,
                                 value: None,
-                            });
+                            }));
                         } else if in_remove {
-                            props_to_remove.push(qname);
+                            ops.push(PropPatchOp::Remove(qname));
                         }
                     }
                 }
@@ -856,7 +1031,7 @@ impl WebDavAdapter {
             buffer.clear();
         }
 
-        Ok((props_to_set, props_to_remove))
+        Ok(ops)
     }
 
     /// Generate a PROPPATCH response
@@ -901,12 +1076,7 @@ impl WebDavAdapter {
 
             // Write property names
             for prop in success_props {
-                let prop_name = if prop.namespace == "DAV:" {
-                    format!("D:{}", prop.name)
-                } else {
-                    format!("{}:{}", prop.namespace, prop.name)
-                };
-                xml_writer.write_event(Event::Empty(BytesStart::new(&prop_name)))?;
+                Self::write_qname_empty(&mut xml_writer, prop)?;
             }
 
             // End prop
@@ -930,12 +1100,7 @@ impl WebDavAdapter {
 
             // Write property names
             for prop in failed_props {
-                let prop_name = if prop.namespace == "DAV:" {
-                    format!("D:{}", prop.name)
-                } else {
-                    format!("{}:{}", prop.namespace, prop.name)
-                };
-                xml_writer.write_event(Event::Empty(BytesStart::new(&prop_name)))?;
+                Self::write_qname_empty(&mut xml_writer, prop)?;
             }
 
             // End prop
@@ -1182,7 +1347,7 @@ impl WebDavAdapter {
         Self::write_folder_response(writer, folder, request, href)
     }
 
-    /// Writes a single `<D:response>` element for a file.
+    /// Writes a single `<D:response>` element for a file, including dead properties.
     pub fn write_file_entry<W: Write>(
         writer: &mut Writer<W>,
         file: &FileDto,
@@ -1190,5 +1355,27 @@ impl WebDavAdapter {
         href: &str,
     ) -> Result<()> {
         Self::write_file_response(writer, file, request, href)
+    }
+
+    /// Writes a folder entry including dead (custom) properties.
+    pub fn write_folder_entry_with_dead_props<W: Write>(
+        writer: &mut Writer<W>,
+        folder: &FolderDto,
+        request: &PropFindRequest,
+        href: &str,
+        dead_props: &[(QualifiedName, Option<String>)],
+    ) -> Result<()> {
+        Self::write_folder_response_with_dead_props(writer, folder, request, href, dead_props)
+    }
+
+    /// Writes a file entry including dead (custom) properties.
+    pub fn write_file_entry_with_dead_props<W: Write>(
+        writer: &mut Writer<W>,
+        file: &FileDto,
+        request: &PropFindRequest,
+        href: &str,
+        dead_props: &[(QualifiedName, Option<String>)],
+    ) -> Result<()> {
+        Self::write_file_response_with_dead_props(writer, file, request, href, dead_props)
     }
 }

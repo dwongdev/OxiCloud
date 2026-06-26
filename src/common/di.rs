@@ -1542,6 +1542,8 @@ impl AppServiceFactory {
             path_resolver: None,
             webdav_lock_store:
                 crate::infrastructure::services::webdav_lock_service::create_webdav_lock_store(),
+            webdav_dead_props:
+                crate::infrastructure::services::webdav_dead_property_store::create_dead_property_store(pool.clone()),
             authorization: authorization.clone(),
             drive_repo: drive_repo.clone(),
             drive_management_service: Arc::new(
@@ -2010,6 +2012,8 @@ pub struct AppState {
         Option<Arc<crate::infrastructure::services::path_resolver_service::PathResolverService>>,
     pub webdav_lock_store:
         Arc<crate::infrastructure::services::webdav_lock_service::WebDavLockStore>,
+    pub webdav_dead_props:
+        Arc<crate::infrastructure::services::webdav_dead_property_store::DeadPropertyStore>,
     /// ReBAC authorization engine — all service-layer permission checks go
     /// through this. Concrete type today is `PgAclEngine`; the
     /// `AuthorizationEngine` trait describes the contract. When alternate

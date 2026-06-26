@@ -42,6 +42,7 @@ pub mod thumbnail_service;
 mod thumbnail_service_test;
 pub mod trash_cleanup_service;
 pub mod tree_etag_flush_service;
+pub mod webdav_dead_property_store;
 pub mod webdav_lock_service;
 pub mod wopi_discovery_service;
 pub mod zip_service;

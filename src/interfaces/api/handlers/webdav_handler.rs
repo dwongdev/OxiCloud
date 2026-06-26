@@ -17,7 +17,9 @@ use chrono::Utc;
 use quick_xml::Writer;
 use uuid::Uuid;
 
-use crate::application::adapters::webdav_adapter::{LockInfo, PropFindRequest, WebDavAdapter};
+use crate::application::adapters::webdav_adapter::{
+    LockInfo, PropFindRequest, PropPatchOp, QualifiedName, WebDavAdapter,
+};
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
 use crate::application::ports::file_ports::FileRetrievalUseCase;
@@ -391,6 +393,12 @@ async fn handle_propfind(
     // ── 2. Authenticate ──────────────────────────────────────────
     let user = extract_user(&req)?;
 
+    // Client-facing path for href construction — must be extracted before
+    // req.into_body() consumes the request. The `path` parameter already has
+    // the home-folder prefix prepended (e.g. `admin/docs`) so it's correct for
+    // DB lookups but wrong for WebDAV hrefs (clients see `/webdav/docs`).
+    let client_path = extract_webdav_path(req.uri());
+
     // ── 3. Parse PROPFIND XML body ───────────────────────────────
     let body_bytes = {
         let body = req.into_body();
@@ -413,10 +421,11 @@ async fn handle_propfind(
     let folder_service = state.applications.folder_service.clone();
     let file_retrieval_service = state.applications.file_retrieval_service.clone();
 
-    let base_href = if path.is_empty() || path == "/" {
+    // Use client-facing path for hrefs so responses match the request URL.
+    let base_href = if client_path.is_empty() || client_path == "/" {
         "/webdav/".to_string()
     } else {
-        format!("/webdav/{}/", encode_uri_path(&path))
+        format!("/webdav/{}/", encode_uri_path(&client_path))
     };
 
     // ── 5. Determine target resource ─────────────────────────────
@@ -452,6 +461,8 @@ async fn handle_propfind(
             folder_service,
             file_retrieval_service,
             user.id,
+            state.webdav_dead_props.clone(),
+            path.clone(),
         )
         .await;
     }
@@ -470,20 +481,29 @@ async fn handle_propfind(
                     folder_service,
                     file_retrieval_service,
                     user.id,
+                    state.webdav_dead_props.clone(),
+                    path.clone(),
                 )
                 .await;
             }
             Ok(ResolvedResource::File(file)) => {
+                let dead_props = state
+                    .webdav_dead_props
+                    .get_all(&path, user.id)
+                    .await
+                    .unwrap_or_default();
+                let file_href = webdav_href(&client_path);
                 let mut buf = Vec::with_capacity(1024);
                 {
                     let mut xml_writer = Writer::new(&mut buf);
                     WebDavAdapter::write_multistatus_start(&mut xml_writer)
                         .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
-                    WebDavAdapter::write_file_entry(
+                    WebDavAdapter::write_file_entry_with_dead_props(
                         &mut xml_writer,
                         &file,
                         &propfind_request,
-                        &base_href,
+                        &file_href,
+                        &dead_props,
                     )
                     .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
                     WebDavAdapter::write_multistatus_end(&mut xml_writer)
@@ -514,6 +534,8 @@ async fn handle_propfind(
                 folder_service,
                 file_retrieval_service,
                 user.id,
+                state.webdav_dead_props.clone(),
+                path.clone(),
             )
             .await;
         }
@@ -522,16 +544,23 @@ async fn handle_propfind(
             .await
         {
             assert_owner(file.owner_id.as_deref(), &user.id.to_string(), &path)?;
+            let dead_props = state
+                .webdav_dead_props
+                .get_all(&path, user.id)
+                .await
+                .unwrap_or_default();
+            let file_href = webdav_href(&client_path);
             let mut buf = Vec::with_capacity(1024);
             {
                 let mut xml_writer = Writer::new(&mut buf);
                 WebDavAdapter::write_multistatus_start(&mut xml_writer)
                     .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
-                WebDavAdapter::write_file_entry(
+                WebDavAdapter::write_file_entry_with_dead_props(
                     &mut xml_writer,
                     &file,
                     &propfind_request,
-                    &base_href,
+                    &file_href,
+                    &dead_props,
                 )
                 .map_err(|e| AppError::internal_error(format!("XML write error: {}", e)))?;
                 WebDavAdapter::write_multistatus_end(&mut xml_writer)
@@ -564,6 +593,10 @@ async fn build_streaming_propfind_response(
     folder_service: std::sync::Arc<FolderService>,
     file_retrieval_service: std::sync::Arc<FileRetrievalService>,
     user_id: Uuid,
+    dead_props_store: Arc<
+        crate::infrastructure::services::webdav_dead_property_store::DeadPropertyStore,
+    >,
+    folder_internal_path: String,
 ) -> Result<Response<Body>, AppError> {
     let depth = depth.to_string();
     let base_href = base_href.to_string();
@@ -574,9 +607,11 @@ async fn build_streaming_propfind_response(
         let mut buf = Vec::with_capacity(4096);
         {
             let mut w = Writer::new(&mut buf);
+            let folder_dead = dead_props_store.get_all(&folder_internal_path, user_id).await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
             WebDavAdapter::write_multistatus_start(&mut w)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
-            WebDavAdapter::write_folder_entry(&mut w, &folder, &propfind_request, &base_href)
+            WebDavAdapter::write_folder_entry_with_dead_props(&mut w, &folder, &propfind_request, &base_href, &folder_dead)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
         }
         yield Bytes::from(buf);
@@ -610,7 +645,10 @@ async fn build_streaming_propfind_response(
                     let mut w = Writer::new(&mut chunk);
                     for subfolder in &result.items {
                         let href = format!("{}{}/", base_href, encode_path_segment(&subfolder.name));
-                        WebDavAdapter::write_folder_entry(&mut w, subfolder, &propfind_request, &href)
+                        let child_path = format!("{}/{}", folder_internal_path, subfolder.name);
+                        let child_dead = dead_props_store.get_all(&child_path, user_id).await
+                            .map_err(|e| std::io::Error::other(e.to_string()))?;
+                        WebDavAdapter::write_folder_entry_with_dead_props(&mut w, subfolder, &propfind_request, &href, &child_dead)
                             .map_err(|e| std::io::Error::other(e.to_string()))?;
                     }
                 }
@@ -641,7 +679,10 @@ async fn build_streaming_propfind_response(
                     let mut w = Writer::new(&mut chunk);
                     for file in &batch {
                         let href = format!("{}{}", base_href, encode_path_segment(&file.name));
-                        WebDavAdapter::write_file_entry(&mut w, file, &propfind_request, &href)
+                        let child_path = format!("{}/{}", folder_internal_path, file.name);
+                        let child_dead = dead_props_store.get_all(&child_path, user_id).await
+                            .map_err(|e| std::io::Error::other(e.to_string()))?;
+                        WebDavAdapter::write_file_entry_with_dead_props(&mut w, file, &propfind_request, &href, &child_dead)
                             .map_err(|e| std::io::Error::other(e.to_string()))?;
                     }
                 }
@@ -693,6 +734,8 @@ async fn handle_proppatch(
     path: String,
 ) -> Result<Response<Body>, AppError> {
     let user = extract_user(&req)?;
+    // Client-facing path for href construction (without home folder prefix).
+    let client_path = extract_webdav_path(req.uri());
 
     // Active-lock guard (RFC 4918 §9.10.4): PROPPATCH writes properties,
     // so a lock on the target must release them via `If:`. Captured
@@ -739,30 +782,37 @@ async fn handle_proppatch(
         .map_err(|e| {
             AppError::payload_too_large(format!("PROPPATCH body too large or unreadable: {}", e))
         })?;
-    let (props_to_set, props_to_remove) = WebDavAdapter::parse_proppatch(body_bytes.reader())
+    let ops = WebDavAdapter::parse_proppatch(body_bytes.reader())
         .map_err(|e| AppError::bad_request(format!("Failed to parse PROPPATCH request: {}", e)))?;
 
-    // For now, we don't actually persist custom properties, but we respond as if we did
-    // In a full implementation, we would store these properties in a database
-
-    // Generate response - we'll pretend all operations succeeded
-    let mut results = Vec::new();
-
-    // For each property to set, indicate success
-    for prop in &props_to_set {
-        results.push((&prop.name, true));
+    // Apply operations in document order (RFC 4918 §9.2).
+    let dead_props = &state.webdav_dead_props;
+    let mut results: Vec<(&QualifiedName, bool)> = Vec::new();
+    for op in &ops {
+        match op {
+            PropPatchOp::Set(pv) => {
+                dead_props
+                    .set(&path, user.id, pv.name.clone(), pv.value.clone())
+                    .await
+                    .map_err(|e| {
+                        AppError::internal_error(format!("Failed to store dead property: {e}"))
+                    })?;
+                results.push((&pv.name, true));
+            }
+            PropPatchOp::Remove(name) => {
+                dead_props.remove(&path, user.id, name).await.map_err(|e| {
+                    AppError::internal_error(format!("Failed to remove dead property: {e}"))
+                })?;
+                results.push((name, true));
+            }
+        }
     }
 
-    // For each property to remove, indicate success
-    for prop in &props_to_remove {
-        results.push((prop, true));
-    }
-
-    // Generate response — collection vs file href chosen above.
+    // Generate response — use client-facing path so href matches the request URL.
     let href = if is_collection {
-        webdav_collection_href(&path)
+        webdav_collection_href(&client_path)
     } else {
-        webdav_href(&path)
+        webdav_href(&client_path)
     };
     let mut response_body = Vec::new();
     WebDavAdapter::generate_proppatch_response(&mut response_body, &href, &results).map_err(
@@ -1073,10 +1123,10 @@ fn enforce_native_lock(
             if p.is_empty() {
                 return None;
             }
-            if let Some(e) = lock_store.get_by_path(p) {
-                if e.info.depth.eq_ignore_ascii_case("infinity") {
-                    return Some(e);
-                }
+            if let Some(e) = lock_store.get_by_path(p)
+                && e.info.depth.eq_ignore_ascii_case("infinity")
+            {
+                return Some(e);
             }
         }
     });
@@ -1216,10 +1266,7 @@ async fn handle_put(
                         .resolve_path_for_user(parent_path, user.id)
                         .await
                         .map_err(|_| {
-                            AppError::conflict(format!(
-                                "Parent folder not found: {}",
-                                parent_path
-                            ))
+                            AppError::conflict(format!("Parent folder not found: {}", parent_path))
                         })?;
                 }
             }
@@ -1410,7 +1457,11 @@ async fn handle_mkcol(
                 "AlreadyExists",
             ));
         }
-    } else if folder_service.get_folder_by_path(&path, drive_id).await.is_ok() {
+    } else if folder_service
+        .get_folder_by_path(&path, drive_id)
+        .await
+        .is_ok()
+    {
         return Err(AppError::new(
             StatusCode::METHOD_NOT_ALLOWED,
             "Collection already exists",
@@ -1446,7 +1497,10 @@ async fn handle_mkcol(
                 }
             }
         } else {
-            match folder_service.get_folder_by_path(&parent_path, drive_id).await {
+            match folder_service
+                .get_folder_by_path(&parent_path, drive_id)
+                .await
+            {
                 Ok(f) => Some(f.id),
                 Err(_) => {
                     return Err(AppError::conflict(format!(
@@ -1788,6 +1842,13 @@ async fn handle_move(
             }
         }
     }
+
+    // Migrate dead properties to the new path (RFC 4918 §9.9 — MOVE preserves properties).
+    state
+        .webdav_dead_props
+        .rename_resource(&source_path, user.id, &destination_path)
+        .await
+        .map_err(|e| AppError::internal_error(format!("Failed to migrate dead properties: {e}")))?;
 
     // RFC 4918 §9.9.5: 201 Created when destination is new, 204 when overwritten.
     let status = if dest_existed {
