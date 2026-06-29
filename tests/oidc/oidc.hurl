@@ -109,24 +109,23 @@ header "Location" contains "redirect_uri="
 #          {frontend_url}/login?oidc_code=…
 #
 #          With `location: true` Hurl follows the whole chain and
-#          lands on the SPA login URL. The test server config
-#          (server-with-oidc.env) points `OXICLOUD_STATIC_PATH`
-#          at ./static — which is the legacy vanilla frontend, NOT
-#          static-dist/ — so /login returns 404. That 404 is the
-#          test signal: it proves we landed AT /login (i.e. the
-#          d1bbe8ba contract held). The URL we end at is the
-#          actual assertion.
+#          lands on the SPA login URL. The SvelteKit SPA serves
+#          `/login` from `static-dist/login.html` with 200 — this
+#          is the production contract. The runner (`tests/oidc/run.sh`)
+#          builds `static-dist/` before launching the server so
+#          local and CI both see the production behaviour. Without
+#          that build the route would 404 via the ServeDir fallback.
 #
 #          A pre-d1bbe8ba server would have redirected to
-#          `http://localhost:8087/?oidc_code=…` instead — same
-#          404, but the `landed_at` assertion would catch it.
+#          `http://localhost:8087/?oidc_code=…` instead — the
+#          `landed_at` regex below catches that regardless.
 # ─────────────────────────────────────────────────────────────
 GET {{idp_url}}
 [Options]
 location: true
 location-trusted: true
 
-HTTP 404
+HTTP 200
 [Captures]
 landed_at: url
 oidc_code: url regex "oidc_code=([a-f0-9]+)"
@@ -289,7 +288,9 @@ GET {{relogin_idp_url}}
 location: true
 location-trusted: true
 
-HTTP 404
+# Same contract as Step 4 — the SPA serves /login with 200 (the
+# runner ensures static-dist/ is built before the server starts).
+HTTP 200
 [Captures]
 relogin_oidc_code: url regex "oidc_code=([a-f0-9]+)"
 [Asserts]

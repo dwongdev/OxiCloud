@@ -143,6 +143,21 @@ set +a
 source "$COMMON/wipe-storage.sh"
 wipe_storage "$OXICLOUD_STORAGE_PATH"
 
+# ── 3.5. Ensure the SPA is built (static-dist/) ────────────────────────────
+# The OIDC suite's Step 4 + Step 9 walk the full redirect chain and assert
+# they land on `/login?oidc_code=…` with HTTP 200 — the production contract,
+# where the container ships `static-dist/login.html`. Without that bundle
+# `resolve_static_path` falls back to `OXICLOUD_STATIC_PATH=./static`, which
+# was removed in commit 54639d46 — so ServeDir 404s the route and Step 4
+# fails. Build here so local + CI both exercise the production layout.
+DIST_DIR="$REPO_ROOT/static-dist"
+if [[ ! -f "$DIST_DIR/login.html" ]]; then
+  log "Building SvelteKit SPA (static-dist/login.html missing)..."
+  (cd "$REPO_ROOT/frontend" \
+    && npm ci --silent --no-audit --no-fund \
+    && npm run build) || die "Frontend build failed; static-dist/ is required for the OIDC tests"
+fi
+
 # ── 4. Start OxiCloud server with OIDC enabled ─────────────────────────────
 BUILD_TARGET="${BUILD_TARGET:-debug}"
 OXICLOUD_BIN="$REPO_ROOT/target/$BUILD_TARGET/oxicloud"
