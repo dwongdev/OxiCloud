@@ -14,7 +14,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::application::adapters::webdav_adapter::{
-    PropFindRequest, PropPatchOp, QualifiedName, WebDavAdapter,
+    PropFindRequest, PropPatchOp, QualifiedName, WebDavAdapter, is_protected_property,
 };
 use crate::application::dtos::pagination::PaginationRequestDto;
 use crate::application::ports::favorites_ports::FavoritesUseCase;
@@ -555,6 +555,12 @@ async fn handle_proppatch(
                         })?;
                 }
                 results.push((name, true));
+            }
+            PropPatchOp::Set(pv) if is_protected_property(&pv.name) => {
+                results.push((&pv.name, false));
+            }
+            PropPatchOp::Remove(name) if is_protected_property(name) => {
+                results.push((name, false));
             }
             PropPatchOp::Set(pv) => {
                 dead_props

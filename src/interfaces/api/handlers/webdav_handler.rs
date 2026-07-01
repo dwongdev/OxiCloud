@@ -18,7 +18,7 @@ use quick_xml::Writer;
 use uuid::Uuid;
 
 use crate::application::adapters::webdav_adapter::{
-    LockInfo, PropFindRequest, PropPatchOp, QualifiedName, WebDavAdapter,
+    LockInfo, PropFindRequest, PropPatchOp, QualifiedName, WebDavAdapter, is_protected_property,
 };
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
@@ -807,6 +807,12 @@ async fn handle_proppatch(
     let mut results: Vec<(&QualifiedName, bool)> = Vec::new();
     for op in &ops {
         match op {
+            PropPatchOp::Set(pv) if is_protected_property(&pv.name) => {
+                results.push((&pv.name, false));
+            }
+            PropPatchOp::Remove(name) if is_protected_property(name) => {
+                results.push((name, false));
+            }
             PropPatchOp::Set(pv) => {
                 dead_props
                     .set(resource_ref, pv.name.clone(), pv.value.clone())
