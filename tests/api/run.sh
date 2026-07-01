@@ -169,6 +169,7 @@ hurl --variables-file "$API_DIR/test.env" --file-root "$REPO_ROOT/tests" --test 
   "$API_DIR/cross_drive_copy.hurl" \
   "$API_DIR/webdav_dead_properties.hurl" \
   "$API_DIR/nc_webdav_dead_properties.hurl" \
+  "$API_DIR/webdav_protected_properties.hurl" \
   "$API_DIR/webdav_nested_move_cascade.hurl"
 
 #bash "$API_DIR/dedup_bulk_upload.sh"
