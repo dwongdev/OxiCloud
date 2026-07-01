@@ -4,13 +4,35 @@
 //! server without interpreting their value. Properties are persisted to
 //! `storage.webdav_dead_properties` and survive server restarts.
 //!
-//! Queries here use `sqlx::query()` (runtime-bound) rather than the
-//! compile-time-checked `sqlx::query!()` macro. The macro would require either
-//! a live DB at compile time OR committed `.sqlx/` offline metadata; the rest
-//! of this codebase consistently uses the runtime variant (see
-//! `user_pg_repository.rs` for the canonical style), so a fresh checkout
-//! compiles without any DB connection. Trading the macro's compile-time column
-//! check for that bootstrap-friendliness is the project's standing convention.
+//! Keying contract (after migration 20260830000001): the row is keyed by
+//! the underlying resource id — exactly one of `folder_id` / `file_id` is
+//! set — not by the resource's current path. Three consequences:
+//!
+//!   * Every delete code path (REST, WebDAV, NextCloud DAV, trash empty,
+//!     folder cascade) reaps dead-property rows for free via FK
+//!     `ON DELETE CASCADE`. The store has no `remove_resource()` method
+//!     because it isn't needed: deleting the file/folder row reaps the
+//!     attached dead properties as a database invariant.
+//!   * MOVE / RENAME never changes the resource id, so dead properties
+//!     follow the resource without any store-side bookkeeping. The store
+//!     has no `rename_resource()` method for the same reason.
+//!   * Dead properties are RESOURCE state (RFC 4918 §4.2), not user
+//!     state. Two users on a shared drive PROPFIND'ing the same resource
+//!     see the same dead properties. The `user_id` scope key from the
+//!     pre-rekey schema is gone; user-delete cleanup happens
+//!     transitively through `auth.users` → `storage.{folders,files}` →
+//!     this table.
+//!
+//! Queries use `sqlx::query()` (runtime-bound) rather than `sqlx::query!()`
+//! to keep fresh checkouts compilable without a DB connection — the
+//! codebase's standing convention.
+//!
+//! COPY semantics (RFC 4918 §8.8 — dead properties MUST be duplicated)
+//! are NOT handled here. The COPY handler is responsible for explicitly
+//! reading the source's dead properties via `get_all()` and writing them
+//! against the new resource id via `set()`. Not done in this migration —
+//! it was not handled by the path-based store either, so this is a
+//! parity decision, not a regression.
 
 use std::sync::Arc;
 
@@ -19,6 +41,19 @@ use uuid::Uuid;
 
 use crate::application::adapters::webdav_adapter::QualifiedName;
 use crate::domain::errors::DomainError;
+
+/// Polymorphic reference to the resource a dead property hangs off.
+///
+/// Exactly one variant — folder or file — is ever stored in a single
+/// row. The CHECK constraint
+/// `(folder_id IS NULL) <> (file_id IS NULL)` enforces this at the
+/// database level so the application layer cannot accidentally write a
+/// row that's both or neither.
+#[derive(Clone, Copy, Debug)]
+pub enum ResourceRef {
+    Folder(Uuid),
+    File(Uuid),
+}
 
 pub struct DeadPropertyStore {
     pool: Arc<PgPool>,
@@ -30,47 +65,78 @@ impl DeadPropertyStore {
     }
 
     /// Upsert a dead property. `value = None` means an empty XML element.
+    ///
+    /// The two SQL branches are deliberately kept separate so each
+    /// ON CONFLICT clause can target the matching partial unique
+    /// index (`idx_webdav_dead_props_folder_unique` /
+    /// `idx_webdav_dead_props_file_unique`). A combined upsert would
+    /// require a non-partial unique index that treats NULL as
+    /// distinct, which doesn't match the (folder XOR file) shape.
     pub async fn set(
         &self,
-        path: &str,
-        user_id: Uuid,
+        r: ResourceRef,
         name: QualifiedName,
         value: Option<String>,
     ) -> Result<(), DomainError> {
-        sqlx::query(
-            r#"
-            INSERT INTO storage.webdav_dead_properties
-                (resource_path, user_id, namespace, local_name, value)
-            VALUES ($1, $2, $3, $4, $5)
-            ON CONFLICT (resource_path, user_id, namespace, local_name)
-            DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
-            "#,
-        )
-        .bind(path)
-        .bind(user_id)
-        .bind(&name.namespace)
-        .bind(&name.name)
-        .bind(&value)
-        .execute(&*self.pool)
-        .await
-        .map_err(|e| DomainError::internal_error("DeadPropertyStore", format!("set: {e}")))?;
+        match r {
+            ResourceRef::Folder(folder_id) => {
+                sqlx::query(
+                    r#"
+                    INSERT INTO storage.webdav_dead_properties
+                        (folder_id, namespace, local_name, value)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (folder_id, namespace, local_name)
+                        WHERE folder_id IS NOT NULL
+                    DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
+                    "#,
+                )
+                .bind(folder_id)
+                .bind(&name.namespace)
+                .bind(&name.name)
+                .bind(&value)
+                .execute(&*self.pool)
+                .await
+                .map_err(|e| {
+                    DomainError::internal_error("DeadPropertyStore", format!("set folder: {e}"))
+                })?;
+            }
+            ResourceRef::File(file_id) => {
+                sqlx::query(
+                    r#"
+                    INSERT INTO storage.webdav_dead_properties
+                        (file_id, namespace, local_name, value)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (file_id, namespace, local_name)
+                        WHERE file_id IS NOT NULL
+                    DO UPDATE SET value = EXCLUDED.value, updated_at = CURRENT_TIMESTAMP
+                    "#,
+                )
+                .bind(file_id)
+                .bind(&name.namespace)
+                .bind(&name.name)
+                .bind(&value)
+                .execute(&*self.pool)
+                .await
+                .map_err(|e| {
+                    DomainError::internal_error("DeadPropertyStore", format!("set file: {e}"))
+                })?;
+            }
+        }
         Ok(())
     }
 
     /// Delete a specific dead property. No-op if not present.
-    pub async fn remove(
-        &self,
-        path: &str,
-        user_id: Uuid,
-        name: &QualifiedName,
-    ) -> Result<(), DomainError> {
+    pub async fn remove(&self, r: ResourceRef, name: &QualifiedName) -> Result<(), DomainError> {
+        let (folder_id, file_id) = split_ref(r);
         sqlx::query(
             "DELETE FROM storage.webdav_dead_properties
-             WHERE resource_path = $1 AND user_id = $2
-               AND namespace = $3 AND local_name = $4",
+              WHERE folder_id IS NOT DISTINCT FROM $1
+                AND file_id   IS NOT DISTINCT FROM $2
+                AND namespace = $3
+                AND local_name = $4",
         )
-        .bind(path)
-        .bind(user_id)
+        .bind(folder_id)
+        .bind(file_id)
         .bind(&name.namespace)
         .bind(&name.name)
         .execute(&*self.pool)
@@ -79,19 +145,20 @@ impl DeadPropertyStore {
         Ok(())
     }
 
-    /// Return all dead properties for `path`.
+    /// Return all dead properties for the given resource.
     pub async fn get_all(
         &self,
-        path: &str,
-        user_id: Uuid,
+        r: ResourceRef,
     ) -> Result<Vec<(QualifiedName, Option<String>)>, DomainError> {
+        let (folder_id, file_id) = split_ref(r);
         let rows = sqlx::query(
             "SELECT namespace, local_name, value
-             FROM storage.webdav_dead_properties
-             WHERE resource_path = $1 AND user_id = $2",
+               FROM storage.webdav_dead_properties
+              WHERE folder_id IS NOT DISTINCT FROM $1
+                AND file_id   IS NOT DISTINCT FROM $2",
         )
-        .bind(path)
-        .bind(user_id)
+        .bind(folder_id)
+        .bind(file_id)
         .fetch_all(&*self.pool)
         .await
         .map_err(|e| DomainError::internal_error("DeadPropertyStore", format!("get_all: {e}")))?;
@@ -111,17 +178,19 @@ impl DeadPropertyStore {
     /// Returns `Some(None)` when the property exists with an empty value.
     pub async fn get(
         &self,
-        path: &str,
-        user_id: Uuid,
+        r: ResourceRef,
         name: &QualifiedName,
     ) -> Result<Option<Option<String>>, DomainError> {
+        let (folder_id, file_id) = split_ref(r);
         let row = sqlx::query(
             "SELECT value FROM storage.webdav_dead_properties
-             WHERE resource_path = $1 AND user_id = $2
-               AND namespace = $3 AND local_name = $4",
+              WHERE folder_id IS NOT DISTINCT FROM $1
+                AND file_id   IS NOT DISTINCT FROM $2
+                AND namespace = $3
+                AND local_name = $4",
         )
-        .bind(path)
-        .bind(user_id)
+        .bind(folder_id)
+        .bind(file_id)
         .bind(&name.namespace)
         .bind(&name.name)
         .fetch_optional(&*self.pool)
@@ -130,65 +199,15 @@ impl DeadPropertyStore {
 
         Ok(row.map(|r| r.get::<Option<String>, _>("value")))
     }
+}
 
-    /// Delete all dead properties for `path` (called on DELETE).
-    pub async fn remove_resource(&self, path: &str, user_id: Uuid) -> Result<(), DomainError> {
-        sqlx::query(
-            "DELETE FROM storage.webdav_dead_properties
-             WHERE resource_path = $1 AND user_id = $2",
-        )
-        .bind(path)
-        .bind(user_id)
-        .execute(&*self.pool)
-        .await
-        .map_err(|e| {
-            DomainError::internal_error("DeadPropertyStore", format!("remove_resource: {e}"))
-        })?;
-        Ok(())
-    }
-
-    /// Move dead properties from `old_path` to `new_path` (called on MOVE).
-    /// Clears any stale properties at `new_path` first.
-    pub async fn rename_resource(
-        &self,
-        old_path: &str,
-        user_id: Uuid,
-        new_path: &str,
-    ) -> Result<(), DomainError> {
-        let mut tx = self.pool.begin().await.map_err(|e| {
-            DomainError::internal_error("DeadPropertyStore", format!("rename_resource tx: {e}"))
-        })?;
-
-        sqlx::query(
-            "DELETE FROM storage.webdav_dead_properties
-             WHERE resource_path = $1 AND user_id = $2",
-        )
-        .bind(new_path)
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| {
-            DomainError::internal_error("DeadPropertyStore", format!("rename_resource delete: {e}"))
-        })?;
-
-        sqlx::query(
-            "UPDATE storage.webdav_dead_properties
-             SET resource_path = $2
-             WHERE resource_path = $1 AND user_id = $3",
-        )
-        .bind(old_path)
-        .bind(new_path)
-        .bind(user_id)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| {
-            DomainError::internal_error("DeadPropertyStore", format!("rename_resource update: {e}"))
-        })?;
-
-        tx.commit().await.map_err(|e| {
-            DomainError::internal_error("DeadPropertyStore", format!("rename_resource commit: {e}"))
-        })?;
-        Ok(())
+/// Splits a `ResourceRef` into `(folder_id, file_id)` Option pairs for
+/// binding into SQL. The unused slot is `None` so `IS NOT DISTINCT FROM`
+/// matches the NULL stored in the unused column.
+fn split_ref(r: ResourceRef) -> (Option<Uuid>, Option<Uuid>) {
+    match r {
+        ResourceRef::Folder(id) => (Some(id), None),
+        ResourceRef::File(id) => (None, Some(id)),
     }
 }
 

@@ -642,14 +642,33 @@ impl FileWritePort for FileBlobWriteRepository {
                            $4,
                            $4
                       FROM src, dest_folder
-                    RETURNING id::text, name, folder_id::text, size, mime_type,
-                              EXTRACT(EPOCH FROM created_at)::bigint,
-                              EXTRACT(EPOCH FROM updated_at)::bigint,
+                    RETURNING id,
+                              id::text AS id_text,
+                              name, folder_id::text, size, mime_type,
+                              EXTRACT(EPOCH FROM created_at)::bigint AS created_at,
+                              EXTRACT(EPOCH FROM updated_at)::bigint AS updated_at,
                               blob_hash,
                               created_by,
                               updated_by
+                ),
+                -- RFC 4918 §8.8 — dead properties MUST be duplicated on
+                -- COPY. With the id-keyed store (migration
+                -- 20260830000001) this is a single batch INSERT keyed on
+                -- the new file's id. Runs in the same query as the file
+                -- INSERT so either both land or neither does — atomic
+                -- by virtue of being one statement.
+                dead_prop_copy AS (
+                    INSERT INTO storage.webdav_dead_properties
+                        (file_id, namespace, local_name, value)
+                    SELECT (SELECT id FROM new_file),
+                           dp.namespace, dp.local_name, dp.value
+                      FROM storage.webdav_dead_properties dp
+                     WHERE dp.file_id = $1::uuid
                 )
-                SELECT * FROM new_file
+                SELECT id_text, name, folder_id, size, mime_type,
+                       created_at, updated_at,
+                       blob_hash, created_by, updated_by
+                  FROM new_file
                 "#,
             )
             .bind(file_id)

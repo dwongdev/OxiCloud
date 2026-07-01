@@ -31,6 +31,7 @@ use crate::application::services::folder_service::FolderService;
 use crate::common::di::AppState;
 use crate::domain::repositories::drive_repository::DriveRepository;
 use crate::infrastructure::services::path_resolver_service::ResolvedResource;
+use crate::infrastructure::services::webdav_dead_property_store::{DeadPropertyStore, ResourceRef};
 use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::{AuthUser, CurrentUser};
 use crate::interfaces::range_requests::{not_modified_response, range_response};
@@ -462,7 +463,6 @@ async fn handle_propfind(
             file_retrieval_service,
             user.id,
             state.webdav_dead_props.clone(),
-            path.clone(),
         )
         .await;
     }
@@ -482,16 +482,11 @@ async fn handle_propfind(
                     file_retrieval_service,
                     user.id,
                     state.webdav_dead_props.clone(),
-                    path.clone(),
                 )
                 .await;
             }
             Ok(ResolvedResource::File(file)) => {
-                let dead_props = state
-                    .webdav_dead_props
-                    .get_all(&path, user.id)
-                    .await
-                    .unwrap_or_default();
+                let dead_props = file_dead_props(&state, &file).await;
                 let file_href = webdav_href(&client_path);
                 let mut buf = Vec::with_capacity(1024);
                 {
@@ -535,7 +530,6 @@ async fn handle_propfind(
                 file_retrieval_service,
                 user.id,
                 state.webdav_dead_props.clone(),
-                path.clone(),
             )
             .await;
         }
@@ -544,11 +538,7 @@ async fn handle_propfind(
             .await
         {
             assert_owner(file.owner_id.as_deref(), &user.id.to_string(), &path)?;
-            let dead_props = state
-                .webdav_dead_props
-                .get_all(&path, user.id)
-                .await
-                .unwrap_or_default();
+            let dead_props = file_dead_props(&state, &file).await;
             let file_href = webdav_href(&client_path);
             let mut buf = Vec::with_capacity(1024);
             {
@@ -593,10 +583,7 @@ async fn build_streaming_propfind_response(
     folder_service: std::sync::Arc<FolderService>,
     file_retrieval_service: std::sync::Arc<FileRetrievalService>,
     user_id: Uuid,
-    dead_props_store: Arc<
-        crate::infrastructure::services::webdav_dead_property_store::DeadPropertyStore,
-    >,
-    folder_internal_path: String,
+    dead_props_store: Arc<DeadPropertyStore>,
 ) -> Result<Response<Body>, AppError> {
     let depth = depth.to_string();
     let base_href = base_href.to_string();
@@ -604,11 +591,17 @@ async fn build_streaming_propfind_response(
 
     let stream = async_stream::try_stream! {
         // ── XML header + <D:multistatus> + folder entry ──────────
+        //
+        // Dead-property lookups key on the resource's stable id, so we
+        // pass each FolderDto / FileDto to a small helper that parses
+        // its `id` field into a `ResourceRef` and queries the store.
+        // The synthetic root folder (id = "root") fails to parse and
+        // the helper returns an empty list — correct, since the root
+        // has no DB row to anchor properties on.
+        let folder_dead = folder_dead_props(&dead_props_store, &folder).await;
         let mut buf = Vec::with_capacity(4096);
         {
             let mut w = Writer::new(&mut buf);
-            let folder_dead = dead_props_store.get_all(&folder_internal_path, user_id).await
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
             WebDavAdapter::write_multistatus_start(&mut w)
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
             WebDavAdapter::write_folder_entry_with_dead_props(&mut w, &folder, &propfind_request, &base_href, &folder_dead)
@@ -640,15 +633,21 @@ async fn build_streaming_propfind_response(
                     break;
                 }
 
+                // Materialise dead-props for the whole page before
+                // we start writing — keeps the borrow checker happy
+                // (the writer borrows the FolderDto and the dead-props
+                // vec for the duration of write_folder_entry_*).
+                let mut subfolder_deads = Vec::with_capacity(result.items.len());
+                for subfolder in &result.items {
+                    subfolder_deads.push(folder_dead_props(&dead_props_store, subfolder).await);
+                }
+
                 let mut chunk = Vec::with_capacity(result.items.len() * 800);
                 {
                     let mut w = Writer::new(&mut chunk);
-                    for subfolder in &result.items {
+                    for (subfolder, child_dead) in result.items.iter().zip(subfolder_deads.iter()) {
                         let href = format!("{}{}/", base_href, encode_path_segment(&subfolder.name));
-                        let child_path = format!("{}/{}", folder_internal_path, subfolder.name);
-                        let child_dead = dead_props_store.get_all(&child_path, user_id).await
-                            .map_err(|e| std::io::Error::other(e.to_string()))?;
-                        WebDavAdapter::write_folder_entry_with_dead_props(&mut w, subfolder, &propfind_request, &href, &child_dead)
+                        WebDavAdapter::write_folder_entry_with_dead_props(&mut w, subfolder, &propfind_request, &href, child_dead)
                             .map_err(|e| std::io::Error::other(e.to_string()))?;
                     }
                 }
@@ -674,15 +673,17 @@ async fn build_streaming_propfind_response(
                 }
 
                 let batch_len = batch.len();
+                let mut file_deads = Vec::with_capacity(batch_len);
+                for file in &batch {
+                    file_deads.push(streamed_file_dead_props(&dead_props_store, file).await);
+                }
+
                 let mut chunk = Vec::with_capacity(batch_len * 800);
                 {
                     let mut w = Writer::new(&mut chunk);
-                    for file in &batch {
+                    for (file, child_dead) in batch.iter().zip(file_deads.iter()) {
                         let href = format!("{}{}", base_href, encode_path_segment(&file.name));
-                        let child_path = format!("{}/{}", folder_internal_path, file.name);
-                        let child_dead = dead_props_store.get_all(&child_path, user_id).await
-                            .map_err(|e| std::io::Error::other(e.to_string()))?;
-                        WebDavAdapter::write_file_entry_with_dead_props(&mut w, file, &propfind_request, &href, &child_dead)
+                        WebDavAdapter::write_file_entry_with_dead_props(&mut w, file, &propfind_request, &href, child_dead)
                             .map_err(|e| std::io::Error::other(e.to_string()))?;
                     }
                 }
@@ -752,29 +753,45 @@ async fn handle_proppatch(
         return Ok(resp);
     }
 
-    // Resolve the target resource type BEFORE consuming the body so
-    // we can pick the correct href shape in the multi-status
-    // response. RFC 4918 §5.2 + strict WebDAV-client parser rules
-    // require a trailing `/` for collection hrefs; emitting
-    // `/webdav/foo` for a folder breaks NC-desktop / Cyberduck /
-    // other multi-status consumers the same way the NC PROPFIND
-    // bug did. An empty / `/` path is the root, always a
-    // collection. A path that resolves to neither file nor folder
-    // (e.g. PROPPATCH on a resource that doesn't exist) defaults
-    // to non-collection — matches the request-line shape the
-    // client used, since collection paths conventionally arrive
-    // with trailing `/` already trimmed by routing.
-    let is_collection = if path.is_empty() || path == "/" {
-        true
+    // Resolve the target resource BEFORE consuming the body. We need
+    // the resolved kind for two reasons:
+    //
+    //   1. The store key is the resource id (folder_id XOR file_id)
+    //      after migration 20260830000001; we need to know which one
+    //      to bind into `ResourceRef`.
+    //   2. The href shape in the multi-status response differs for
+    //      collections vs leaves — RFC 4918 §5.2 + strict WebDAV-
+    //      client parser rules require a trailing `/` for collection
+    //      hrefs, and emitting `/webdav/foo` for a folder breaks
+    //      NC-desktop / Cyberduck / other multi-status consumers.
+    //
+    // PROPPATCH on a non-existent resource returns 404. This is a
+    // tighter contract than the pre-rekey code, which silently
+    // wrote a dead-prop row keyed by the ghost path — that was a
+    // foot-gun, not a feature.
+    let (resource_ref, is_collection) = if path.is_empty() || path == "/" {
+        // The synthetic root has no DB row to anchor properties on.
+        // Treat it as a collection for href shaping; reject the
+        // PROPPATCH itself below so we don't fabricate a target.
+        (None, true)
     } else {
-        let drive_id = resolve_drive_id_for_native_webdav(&state, user.id).await?;
-        state
-            .applications
-            .folder_service
-            .get_folder_by_path(&path, drive_id)
-            .await
-            .is_ok()
+        match resolve_or_legacy(&state, &path, user.id).await {
+            Some(ResolvedResource::Folder(folder)) => {
+                let id = Uuid::parse_str(&folder.id).map_err(|e| {
+                    AppError::internal_error(format!("Folder id is not a UUID: {e}"))
+                })?;
+                (Some(ResourceRef::Folder(id)), true)
+            }
+            Some(ResolvedResource::File(file)) => {
+                let id = Uuid::parse_str(&file.id)
+                    .map_err(|e| AppError::internal_error(format!("File id is not a UUID: {e}")))?;
+                (Some(ResourceRef::File(id)), false)
+            }
+            None => return Err(AppError::not_found(format!("Resource not found: {}", path))),
+        }
     };
+    let resource_ref = resource_ref
+        .ok_or_else(|| AppError::forbidden("PROPPATCH on the WebDAV root is not supported"))?;
 
     // Read request body (XML — bounded to 1 MB)
     let body_bytes = body::to_bytes(req.into_body(), MAX_XML_BODY)
@@ -792,7 +809,7 @@ async fn handle_proppatch(
         match op {
             PropPatchOp::Set(pv) => {
                 dead_props
-                    .set(&path, user.id, pv.name.clone(), pv.value.clone())
+                    .set(resource_ref, pv.name.clone(), pv.value.clone())
                     .await
                     .map_err(|e| {
                         AppError::internal_error(format!("Failed to store dead property: {e}"))
@@ -800,7 +817,7 @@ async fn handle_proppatch(
                 results.push((&pv.name, true));
             }
             PropPatchOp::Remove(name) => {
-                dead_props.remove(&path, user.id, name).await.map_err(|e| {
+                dead_props.remove(resource_ref, name).await.map_err(|e| {
                     AppError::internal_error(format!("Failed to remove dead property: {e}"))
                 })?;
                 results.push((name, true));
@@ -1066,6 +1083,58 @@ async fn resolve_or_legacy(
         return Some(ResolvedResource::File(file));
     }
     None
+}
+
+/// Fetch a file's dead properties for a PROPFIND response.
+///
+/// Lenient on every failure mode: malformed id, DB error → empty list.
+/// PROPFIND must still emit the resource's live properties even when
+/// the dead-prop lookup is broken; surfacing a 500 here would mask the
+/// resource entirely from sync clients. The legacy path-keyed lookup
+/// behaved the same way (`.unwrap_or_default()`); we preserve it.
+async fn file_dead_props(
+    state: &Arc<AppState>,
+    file: &FileDto,
+) -> Vec<(QualifiedName, Option<String>)> {
+    let Ok(file_id) = Uuid::parse_str(&file.id) else {
+        return Vec::new();
+    };
+    state
+        .webdav_dead_props
+        .get_all(ResourceRef::File(file_id))
+        .await
+        .unwrap_or_default()
+}
+
+/// Same shape as `file_dead_props` but for folder rows. Used by the
+/// streaming PROPFIND walker.
+async fn folder_dead_props(
+    store: &DeadPropertyStore,
+    folder: &FolderDto,
+) -> Vec<(QualifiedName, Option<String>)> {
+    let Ok(folder_id) = Uuid::parse_str(&folder.id) else {
+        return Vec::new();
+    };
+    store
+        .get_all(ResourceRef::Folder(folder_id))
+        .await
+        .unwrap_or_default()
+}
+
+/// File-leaf variant for the streaming walker (takes a `&DeadPropertyStore`
+/// rather than the full `&Arc<AppState>` so it can be called from inside
+/// the async-stream future without cloning state).
+async fn streamed_file_dead_props(
+    store: &DeadPropertyStore,
+    file: &FileDto,
+) -> Vec<(QualifiedName, Option<String>)> {
+    let Ok(file_id) = Uuid::parse_str(&file.id) else {
+        return Vec::new();
+    };
+    store
+        .get_all(ResourceRef::File(file_id))
+        .await
+        .unwrap_or_default()
 }
 
 /// Extract every `<...>` token from a WebDAV `If:` header value.
@@ -1587,22 +1656,12 @@ async fn handle_delete(
         None => return Err(AppError::not_found(format!("Resource not found: {}", path))),
     }
 
-    // Reap dead properties so a future resource at the same path
-    // doesn't inherit tombstone metadata from the deleted one. Best-
-    // effort: a failure to clear leaves orphan rows but the user-
-    // facing DELETE has succeeded, so we don't propagate the error.
-    // Caught by tests/api/webdav_dead_properties.hurl Step 10.
-    if let Err(e) = state
-        .webdav_dead_props
-        .remove_resource(&path, user.id)
-        .await
-    {
-        tracing::warn!(
-            user_id = %user.id,
-            path = %path,
-            "dead-property cleanup on DELETE failed: {e}"
-        );
-    }
+    // Dead-property rows attached to the deleted file/folder are reaped
+    // automatically by `storage.webdav_dead_properties.{folder,file}_id`
+    // ON DELETE CASCADE (migration 20260830000001). Same guarantee
+    // applies to every other delete code path — REST `DELETE
+    // /api/files/{id}`, bulk delete, trash empty, folder cascade —
+    // without any service-layer call. No explicit cleanup needed here.
 
     Ok(Response::builder()
         .status(StatusCode::NO_CONTENT)
@@ -1860,12 +1919,13 @@ async fn handle_move(
         }
     }
 
-    // Migrate dead properties to the new path (RFC 4918 §9.9 — MOVE preserves properties).
-    state
-        .webdav_dead_props
-        .rename_resource(&source_path, user.id, &destination_path)
-        .await
-        .map_err(|e| AppError::internal_error(format!("Failed to migrate dead properties: {e}")))?;
+    // Dead properties follow the resource automatically across MOVE
+    // and RENAME: the rows in `storage.webdav_dead_properties` key on
+    // the underlying folder/file id, which is stable across both
+    // operations (BEFORE trigger rewrites path on the row, AFTER
+    // cascade rewrites descendants' path/lpath — but no id ever
+    // changes). RFC 4918 §9.9 "MOVE preserves properties" satisfied
+    // by the database invariant, no store call needed.
 
     // RFC 4918 §9.9.5: 201 Created when destination is new, 204 when overwritten.
     let status = if dest_existed {
