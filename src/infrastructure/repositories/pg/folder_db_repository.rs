@@ -1359,16 +1359,6 @@ impl FolderRepository for FolderDbRepository {
 // ── Extra helpers for blob-storage bootstrap ──
 
 impl FolderDbRepository {
-    /// Returns user_id for a given folder. Used by file repositories.
-    pub async fn get_folder_user_id(&self, folder_id: &str) -> Result<Uuid, DomainError> {
-        sqlx::query_scalar::<_, Uuid>("SELECT user_id FROM storage.folders WHERE id = $1::uuid")
-            .bind(folder_id)
-            .fetch_optional(self.pool())
-            .await
-            .map_err(|e| DomainError::internal_error("FolderDb", format!("user_id lookup: {e}")))?
-            .ok_or_else(|| DomainError::not_found("Folder", folder_id))
-    }
-
     /// Returns `drive_id` for a given folder. Drives the new permission-floor
     /// short-circuit in `PgAclEngine::check_inner` (a caller with any role
     /// on the folder's drive automatically passes the check — drive
@@ -1380,22 +1370,6 @@ impl FolderDbRepository {
             .await
             .map_err(|e| DomainError::internal_error("FolderDb", format!("drive_id lookup: {e}")))?
             .ok_or_else(|| DomainError::not_found("Folder", folder_id))
-    }
-
-    /// Verifies that `folder_id` is owned by `owner_id`.
-    ///
-    /// Returns `DomainError::not_found(...)` for both "folder missing" and
-    /// "folder owned by someone else" — same error to avoid leaking the
-    /// existence of resources belonging to other users.
-    pub async fn verify_owner(&self, folder_id: &str, owner_id: Uuid) -> Result<(), DomainError> {
-        let actual = self.get_folder_user_id(folder_id).await?;
-        if actual != owner_id {
-            return Err(DomainError::not_found(
-                "Folder",
-                "Target folder not found or access denied",
-            ));
-        }
-        Ok(())
     }
 
     /// Cursor-paginated combined listing of sub-folders and files inside

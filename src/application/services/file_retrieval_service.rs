@@ -343,19 +343,18 @@ impl FileRetrievalUseCase for FileRetrievalService {
         folder_id: Option<&str>,
         owner_id: Uuid,
     ) -> Result<Vec<FileDto>, DomainError> {
-        if folder_id.is_some() {
-            // folder id is defined, check permissions
-            self.require_target_folder_perm(folder_id, Permission::Read, owner_id)
-                .await?;
-            self.list_files(folder_id).await
-        } else {
-            // no folder id, get owners's files' root
-            let files = self
-                .file_read
-                .list_files_for_owner(folder_id, owner_id)
-                .await?;
-            Ok(files.into_iter().map(FileDto::from).collect())
+        // Files always have a `folder_id` in the D0+ model — there is no
+        // longer any concept of "root-level files". A `None` from the
+        // caller means the query string was missing `folder_id`; reject
+        // with a clear error instead of routing through the legacy
+        // `list_files_for_owner` fallback (which used the doomed
+        // `user_id` column and returned empty in practice anyway).
+        if folder_id.is_none() {
+            return Err(DomainError::validation_error("folder_id is required"));
         }
+        self.require_target_folder_perm(folder_id, Permission::Read, owner_id)
+            .await?;
+        self.list_files(folder_id).await
     }
 
     async fn get_file_stream(

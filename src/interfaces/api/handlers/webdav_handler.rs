@@ -29,7 +29,9 @@ use crate::application::ports::storage_ports::StorageUsagePort;
 use crate::application::services::file_retrieval_service::FileRetrievalService;
 use crate::application::services::folder_service::FolderService;
 use crate::common::di::AppState;
+use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::domain::repositories::drive_repository::DriveRepository;
+use crate::domain::services::authorization::{Permission, Resource, Subject};
 use crate::infrastructure::services::path_resolver_service::ResolvedResource;
 use crate::infrastructure::services::webdav_dead_property_store::{DeadPropertyStore, ResourceRef};
 use crate::interfaces::errors::AppError;
@@ -153,18 +155,6 @@ fn extract_user(req: &Request<Body>) -> Result<AuthUser, AppError> {
         .ok_or_else(|| AppError::unauthorized("Authentication required"))
 }
 
-/// Assert that a resolved resource belongs to `user_id`.
-///
-/// Used in the legacy (no-PathResolver) fallback paths where
-/// `get_folder_by_path` / `get_file_by_path` are not user-scoped.
-/// Returns `AppError::not_found` on mismatch so we don't leak the
-/// existence of another user's resource.
-fn assert_owner(owner_id: Option<&str>, user_id: &str, path: &str) -> Result<(), AppError> {
-    match owner_id {
-        Some(oid) if oid == user_id => Ok(()),
-        _ => Err(AppError::not_found(format!("Resource not found: {}", path))),
-    }
-}
 
 /**
  * Creates and returns the WebDAV router with all required endpoints.
@@ -518,7 +508,16 @@ async fn handle_propfind(
         // the caller's default drive once and reuse it for both probes.
         let drive_id = resolve_drive_id_for_native_webdav(&state, user.id).await?;
         if let Ok(folder) = folder_service.get_folder_by_path(&path, drive_id).await {
-            assert_owner(folder.owner_id.as_deref(), &user.id.to_string(), &path)?;
+            let folder_uuid = Uuid::parse_str(&folder.id)
+                .map_err(|_| AppError::not_found(format!("Resource not found: {}", path)))?;
+            state
+                .authorization
+                .require(
+                    Subject::User(user.id),
+                    Permission::Read,
+                    Resource::Folder(folder_uuid),
+                )
+                .await?;
             let folder_id = folder.id.clone();
             return build_streaming_propfind_response(
                 folder,
@@ -537,7 +536,16 @@ async fn handle_propfind(
             .get_file_by_path(&path, drive_id)
             .await
         {
-            assert_owner(file.owner_id.as_deref(), &user.id.to_string(), &path)?;
+            let file_uuid = Uuid::parse_str(&file.id)
+                .map_err(|_| AppError::not_found(format!("Resource not found: {}", path)))?;
+            state
+                .authorization
+                .require(
+                    Subject::User(user.id),
+                    Permission::Read,
+                    Resource::File(file_uuid),
+                )
+                .await?;
             let dead_props = file_dead_props(&state, &file).await;
             let file_href = webdav_href(&client_path);
             let mut buf = Vec::with_capacity(1024);
@@ -880,15 +888,25 @@ async fn handle_get(
             }
         }
     } else {
-        // Legacy fallback — fetch + ownership check. `drive_id` is the
+        // Legacy fallback — fetch + AuthZ check. `drive_id` is the
         // path-lookup scope post-D0 (`storage.files.path` repeats across
-        // drives), derived once from the caller's default drive.
+        // drives), derived once from the caller's default drive. PUT
+        // overwrite = Update on the existing file.
         let drive_id = resolve_drive_id_for_native_webdav(&state, user.id).await?;
         let f = file_retrieval_service
             .get_file_by_path(&path, drive_id)
             .await
             .map_err(|_e| AppError::not_found(format!("File not found: {}", path)))?;
-        assert_owner(f.owner_id.as_deref(), &user.id.to_string(), &path)?;
+        let file_uuid = Uuid::parse_str(&f.id)
+            .map_err(|_| AppError::not_found(format!("File not found: {}", path)))?;
+        state
+            .authorization
+            .require(
+                Subject::User(user.id),
+                Permission::Update,
+                Resource::File(file_uuid),
+            )
+            .await?;
         f
     };
 
@@ -996,7 +1014,16 @@ async fn handle_head(
     // reuse for both the folder and file probes.
     let drive_id = resolve_drive_id_for_native_webdav(&state, user.id).await?;
     if let Ok(folder) = folder_service.get_folder_by_path(&path, drive_id).await {
-        assert_owner(folder.owner_id.as_deref(), &user.id.to_string(), &path)?;
+        let folder_uuid = Uuid::parse_str(&folder.id)
+            .map_err(|_| AppError::not_found(format!("Resource not found: {}", path)))?;
+        state
+            .authorization
+            .require(
+                Subject::User(user.id),
+                Permission::Read,
+                Resource::Folder(folder_uuid),
+            )
+            .await?;
         return Ok(Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "httpd/unix-directory")
@@ -1011,7 +1038,16 @@ async fn handle_head(
         .get_file_by_path(&path, drive_id)
         .await
         .map_err(|_e| AppError::not_found(format!("Resource not found: {}", path)))?;
-    assert_owner(file.owner_id.as_deref(), &user.id.to_string(), &path)?;
+    let file_uuid = Uuid::parse_str(&file.id)
+        .map_err(|_| AppError::not_found(format!("Resource not found: {}", path)))?;
+    state
+        .authorization
+        .require(
+            Subject::User(user.id),
+            Permission::Read,
+            Resource::File(file_uuid),
+        )
+        .await?;
 
     Ok(Response::builder()
         .status(StatusCode::OK)
@@ -1043,9 +1079,12 @@ async fn handle_head(
 /// path-match). MOVE / DELETE / COPY previously 404'd on every
 /// root-level file because they only used the optimized resolver.
 ///
-/// Ownership is enforced in both branches: the optimized resolver
-/// includes `user_id = $4` in its SQL; the fallback runs `assert_owner`
-/// explicitly so a foreign-owned hit can't leak through.
+/// Cross-drive isolation is enforced in both branches: the optimized
+/// resolver scopes by `drive_id`; the fallback derives the caller's
+/// default `drive_id` and `get_folder_by_path` / `get_file_by_path`
+/// scope by that. Callsites in the fallback additionally run
+/// `authz.require(Permission::…, Resource::…)` per operation, matching
+/// the modern AuthZ path.
 async fn resolve_or_legacy(
     state: &Arc<AppState>,
     path: &str,
@@ -1848,11 +1887,20 @@ async fn handle_move(
                     .await
                 {
                     Ok(parent) => {
-                        assert_owner(
-                            parent.owner_id.as_deref(),
-                            &user.id.to_string(),
-                            dest_parent_path,
-                        )?;
+                        let parent_uuid = Uuid::parse_str(&parent.id).map_err(|_| {
+                            AppError::conflict(format!(
+                                "Destination parent not found: {}",
+                                dest_parent_path
+                            ))
+                        })?;
+                        state
+                            .authorization
+                            .require(
+                                Subject::User(user.id),
+                                Permission::Create,
+                                Resource::Folder(parent_uuid),
+                            )
+                            .await?;
                         Some(parent.id)
                     }
                     Err(_) => {
@@ -1898,11 +1946,20 @@ async fn handle_move(
                                 dest_parent_path
                             ))
                         })?;
-                    assert_owner(
-                        parent.owner_id.as_deref(),
-                        &user.id.to_string(),
-                        dest_parent_path,
-                    )?;
+                    let parent_uuid = Uuid::parse_str(&parent.id).map_err(|_| {
+                        AppError::conflict(format!(
+                            "Destination parent not found: {}",
+                            dest_parent_path
+                        ))
+                    })?;
+                    state
+                        .authorization
+                        .require(
+                            Subject::User(user.id),
+                            Permission::Create,
+                            Resource::Folder(parent_uuid),
+                        )
+                        .await?;
                     Some(parent.id)
                 };
                 file_management_service
@@ -2106,11 +2163,20 @@ async fn handle_copy(
             .await
         {
             Ok(parent) => {
-                assert_owner(
-                    parent.owner_id.as_deref(),
-                    &user.id.to_string(),
-                    dest_parent_path,
-                )?;
+                let parent_uuid = Uuid::parse_str(&parent.id).map_err(|_| {
+                    AppError::conflict(format!(
+                        "Destination parent not found: {}",
+                        dest_parent_path
+                    ))
+                })?;
+                state
+                    .authorization
+                    .require(
+                        Subject::User(user.id),
+                        Permission::Create,
+                        Resource::Folder(parent_uuid),
+                    )
+                    .await?;
                 Some(parent.id)
             }
             Err(_) => {
