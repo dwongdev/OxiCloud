@@ -1,6 +1,5 @@
 use crate::application::dtos::address_book_dto::{
-    AddressBookDto, CreateAddressBookDto, ShareAddressBookDto, UnshareAddressBookDto,
-    UpdateAddressBookDto,
+    AddressBookDto, CreateAddressBookDto, UpdateAddressBookDto,
 };
 use crate::application::dtos::contact_dto::{
     ContactDto, ContactGroupDto, CreateContactDto, CreateContactGroupDto, CreateContactVCardDto,
@@ -127,23 +126,6 @@ pub trait AddressBookUseCase: Send + Sync + 'static {
         user_id: Uuid,
     ) -> Result<Vec<AddressBookDto>, DomainError>;
     async fn list_public_address_books(&self) -> Result<Vec<AddressBookDto>, DomainError>;
-
-    // Address Book sharing
-    async fn share_address_book(
-        &self,
-        dto: ShareAddressBookDto,
-        user_id: Uuid,
-    ) -> Result<(), DomainError>;
-    async fn unshare_address_book(
-        &self,
-        dto: UnshareAddressBookDto,
-        user_id: Uuid,
-    ) -> Result<(), DomainError>;
-    async fn get_address_book_shares(
-        &self,
-        address_book_id: &str,
-        user_id: Uuid,
-    ) -> Result<Vec<(String, bool)>, DomainError>;
 }
 
 pub trait ContactUseCase: Send + Sync + 'static {

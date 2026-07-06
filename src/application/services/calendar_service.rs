@@ -200,15 +200,6 @@ impl CalendarUseCase for CalendarService {
         Ok(out)
     }
 
-    async fn list_shared_calendars(&self, user_id: Uuid) -> Result<Vec<CalendarDto>, DomainError> {
-        // Kept for API compatibility (some frontends may still call
-        // this). Post-Round-3 the concept of "shared vs owned" is a
-        // client-side filter — the server hands back everything the
-        // caller has Read on. Callers wanting the strict "shared
-        // with me, not owned by me" subset filter by `owner_id != caller`.
-        self.list_my_calendars(user_id).await
-    }
-
     async fn list_public_calendars(
         &self,
         limit: Option<i64>,
@@ -221,99 +212,6 @@ impl CalendarUseCase for CalendarService {
         self.calendar_storage
             .list_public_calendars(limit, offset)
             .await
-    }
-
-    async fn share_calendar(
-        &self,
-        calendar_id: &str,
-        target_user_id: Uuid,
-        access_level: &str,
-        caller_user_id: Uuid,
-    ) -> Result<(), DomainError> {
-        let uuid = self
-            .require_calendar_perm(calendar_id, caller_user_id, Permission::Share)
-            .await?;
-        // Map the legacy string-shaped `access_level` onto the ReBAC
-        // Role enum. `owner` transfers ownership — the storage side
-        // used to allow this; keep semantics identical here so any
-        // pending client keeps working. `viewer` / `editor` mirror
-        // the pre-Round-3 `read` / `write` behaviour.
-        let role = match access_level {
-            "read" => Role::Viewer,
-            "write" => Role::Editor,
-            "owner" => Role::Owner,
-            other => {
-                return Err(DomainError::new(
-                    ErrorKind::InvalidInput,
-                    "Calendar",
-                    format!(
-                        "Invalid access level: {}. Valid values are: read, write, owner",
-                        other
-                    ),
-                ));
-            }
-        };
-        self.authz
-            .set_role(
-                caller_user_id,
-                Subject::User(target_user_id),
-                role,
-                Resource::Calendar(uuid),
-                None,
-            )
-            .await?;
-        Ok(())
-    }
-
-    async fn remove_calendar_sharing(
-        &self,
-        calendar_id: &str,
-        target_user_id: Uuid,
-        caller_user_id: Uuid,
-    ) -> Result<(), DomainError> {
-        let uuid = self
-            .require_calendar_perm(calendar_id, caller_user_id, Permission::Share)
-            .await?;
-        self.authz
-            .clear_role(Subject::User(target_user_id), Resource::Calendar(uuid))
-            .await
-    }
-
-    async fn get_calendar_shares(
-        &self,
-        calendar_id: &str,
-        user_id: Uuid,
-    ) -> Result<Vec<(String, String)>, DomainError> {
-        let uuid = self
-            .require_calendar_perm(calendar_id, user_id, Permission::Manage)
-            .await?;
-        // Translate the engine's `Grant` view into the legacy
-        // `(user_id, access_level_string)` tuple the handler still
-        // consumes. `Role → &str` uses the SQL discriminator so a
-        // client that expects `"read"` / `"write"` / `"owner"`
-        // keeps working through the transition.
-        let grants = self
-            .authz
-            .list_grants_on_resource(Resource::Calendar(uuid))
-            .await?;
-        Ok(grants
-            .into_iter()
-            .filter_map(|g| {
-                // The legacy shape lists user subjects only. Group /
-                // token subjects on a calendar didn't exist pre-Round-3;
-                // the new listing endpoint added in Phase 4 will
-                // surface them properly.
-                let Subject::User(user_id) = g.subject else {
-                    return None;
-                };
-                let access = match g.role {
-                    Role::Owner => "owner",
-                    Role::Editor | Role::Contributor => "write",
-                    _ => "read",
-                };
-                Some((user_id.to_string(), access.to_string()))
-            })
-            .collect())
     }
 
     async fn create_event(
