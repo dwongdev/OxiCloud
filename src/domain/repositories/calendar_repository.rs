@@ -10,9 +10,8 @@ pub type CalendarRepositoryResult<T> = Result<T, DomainError>;
 /// the pre-Round-3 methods that read/wrote `caldav.calendar_shares`
 /// (`list_calendars_shared_with_user`, `user_has_calendar_access`,
 /// `share_calendar`, `remove_calendar_sharing`, `get_calendar_shares`)
-/// have been removed from this trait. The `caldav.calendar_shares` table
-/// still exists for one-release rollback safety; a follow-up migration
-/// drops it.
+/// have been removed from this trait, and the backing table was dropped
+/// in `20260906000002_drop_legacy_share_tables.sql`.
 pub trait CalendarRepository: Send + Sync + 'static {
     /// Creates a new calendar
     async fn create_calendar(&self, calendar: Calendar) -> CalendarRepositoryResult<Calendar>;

@@ -12,9 +12,8 @@ pub type AddressBookRepositoryResult<T> = Result<T, DomainError>;
 /// The pre-Round-3 methods that read/wrote `carddav.address_book_shares`
 /// (`get_shared_address_books`, `share_address_book`,
 /// `unshare_address_book`, `get_address_book_shares`) have been removed
-/// from this trait. The `carddav.address_book_shares` table still
-/// exists for one-release rollback safety; a follow-up migration drops
-/// it.
+/// from this trait, and the backing table was dropped in
+/// `20260906000002_drop_legacy_share_tables.sql`.
 pub trait AddressBookRepository: Send + Sync + 'static {
     async fn create_address_book(
         &self,
