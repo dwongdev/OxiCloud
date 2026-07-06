@@ -547,11 +547,17 @@ mod tests {
     #[test]
     fn resource_roundtrip() {
         let id = Uuid::new_v4();
-        for r in [Resource::Folder(id), Resource::File(id)] {
+        for r in [
+            Resource::Folder(id),
+            Resource::File(id),
+            Resource::Calendar(id),
+            Resource::AddressBook(id),
+        ] {
             let back = Resource::from_parts(r.type_str(), r.id()).unwrap();
             assert_eq!(r, back);
         }
-        assert!(Resource::from_parts("calendar", id).is_none());
+        // `playlist` is still pending the Music AuthZ migration.
+        assert!(Resource::from_parts("playlist", id).is_none());
     }
 
     #[test]
