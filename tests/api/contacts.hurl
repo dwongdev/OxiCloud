@@ -24,6 +24,7 @@ Content-Type: application/json
 HTTP 200
 [Captures]
 token: jsonpath "$.access_token"
+admin_user_id: jsonpath "$.user.id"
 [Asserts]
 jsonpath "$.access_token" isString
 jsonpath "$.token_type" == "Bearer"
@@ -342,7 +343,7 @@ Content-Type: application/json
 
 HTTP 200
 [Captures]
-bob_token:   jsonpath "$.access_token"
+bob_token: jsonpath "$.access_token"
 bob_user_id: jsonpath "$.user.id"
 
 
@@ -396,9 +397,9 @@ HTTP 201
 [Captures]
 share_grant_id: jsonpath "$.grants[0].id"
 [Asserts]
-jsonpath "$.grants[0].role"           == "viewer"
-jsonpath "$.grants[0].resource.type"  == "address_book"
-jsonpath "$.grants[0].resource.id"    == "{{share_book_id}}"
+jsonpath "$.grants[0].role" == "viewer"
+jsonpath "$.grants[0].resource.type" == "address_book"
+jsonpath "$.grants[0].resource.id" == "{{share_book_id}}"
 
 
 # Step 20 — Bob's listing now includes the book, marked readonly
@@ -421,6 +422,32 @@ Content-Type: application/json
 {
   "full_name": "Viewer Cannot Write"
 }
+
+HTTP 404
+
+
+# Step 21b — Unified list-on-resource: Alice queries
+# `GET /api/grants?resource_type=address_book&resource_id=…`.
+# `Share` is required (Alice's Owner grant satisfies it) and the
+# response includes the Owner self-grant that the per-domain
+# UI hides. Confirms `ResourceTypeDto::AddressBook` is admitted
+# at the query-string boundary.
+GET {{base_url}}/api/grants?resource_type=address_book&resource_id={{share_book_id}}
+Authorization: Bearer {{token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$[*].subject.id" contains "{{bob_user_id}}"
+jsonpath "$[*].subject.id" contains "{{admin_user_id}}"
+jsonpath "$[?(@.subject.id == '{{bob_user_id}}')].role" == "viewer"
+jsonpath "$[?(@.subject.id == '{{admin_user_id}}')].role" == "owner"
+jsonpath "$[?(@.subject.id == '{{bob_user_id}}')].resource.type" == "address_book"
+
+
+# Step 21c — Viewer Bob is denied on the unified list endpoint —
+# `Share` isn't in the Viewer bundle → 404 anti-enum shape.
+GET {{base_url}}/api/grants?resource_type=address_book&resource_id={{share_book_id}}
+Authorization: Bearer {{bob_token}}
 
 HTTP 404
 
@@ -590,4 +617,4 @@ Authorization: Bearer {{token}}
 HTTP *
 [Asserts]
 status >= 200
-status <  300
+status < 300

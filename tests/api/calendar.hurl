@@ -41,6 +41,7 @@ Content-Type: application/json
 HTTP 200
 [Captures]
 alice_token: jsonpath "$.access_token"
+alice_user_id: jsonpath "$.user.id"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -109,7 +110,7 @@ Content-Type: application/json
 
 HTTP 200
 [Captures]
-bob_token:   jsonpath "$.access_token"
+bob_token: jsonpath "$.access_token"
 bob_user_id: jsonpath "$.user.id"
 
 
@@ -154,7 +155,7 @@ Content-Type: application/xml
 HTTP *
 [Asserts]
 status >= 400
-status <  500
+status < 500
 
 
 # ─────────────────────────────────────────────────────────────
@@ -175,9 +176,9 @@ HTTP 201
 [Captures]
 share_grant_id: jsonpath "$.grants[0].id"
 [Asserts]
-jsonpath "$.grants[0].role"          == "viewer"
+jsonpath "$.grants[0].role" == "viewer"
 jsonpath "$.grants[0].resource.type" == "calendar"
-jsonpath "$.grants[0].resource.id"   == "{{calendar_id}}"
+jsonpath "$.grants[0].resource.id" == "{{calendar_id}}"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -200,6 +201,37 @@ Content-Type: application/xml
 HTTP 207
 [Asserts]
 body contains "{{calendar_id}}"
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 8b – Unified list-on-resource: Alice queries
+# `GET /api/grants?resource_type=calendar&resource_id=…`. The
+# handler requires `Share` on the resource (Alice's Owner grant
+# satisfies it) and returns the raw `role_grants` rows including
+# the Owner self-grant. Confirms `ResourceTypeDto::Calendar` is
+# admitted at the query-string boundary.
+# ─────────────────────────────────────────────────────────────
+GET {{base_url}}/api/grants?resource_type=calendar&resource_id={{calendar_id}}
+Authorization: Bearer {{alice_token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$[*].subject.id" contains "{{bob_user_id}}"
+jsonpath "$[*].subject.id" contains "{{alice_user_id}}"
+jsonpath "$[?(@.subject.id == '{{bob_user_id}}')].role" == "viewer"
+jsonpath "$[?(@.subject.id == '{{alice_user_id}}')].role" == "owner"
+jsonpath "$[?(@.subject.id == '{{bob_user_id}}')].resource.type" == "calendar"
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 8c – Viewer Bob is denied on the unified list endpoint —
+# `Share` is required, Viewer's bundle excludes it → 404
+# anti-enum shape (same treatment as any other resource type).
+# ─────────────────────────────────────────────────────────────
+GET {{base_url}}/api/grants?resource_type=calendar&resource_id={{calendar_id}}
+Authorization: Bearer {{bob_token}}
+
+HTTP 404
 
 
 # ─────────────────────────────────────────────────────────────
@@ -247,4 +279,4 @@ Authorization: Bearer {{alice_token}}
 HTTP *
 [Asserts]
 status >= 200
-status <  300
+status < 300
