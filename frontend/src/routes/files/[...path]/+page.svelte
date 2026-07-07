@@ -1431,10 +1431,21 @@
 	const SKELETON = [0, 1, 2, 3, 4, 5, 6, 7];
 
 	// Reload whenever the route path changes.
+	//
+	// `load()` reads several reactive signals in its sync phase
+	// (session.isExternalUser, session.homeFolderId, plus whatever
+	// its awaited callees touch). Naively calling `void load()` here
+	// tracks all of those as dependencies of this effect — and
+	// `session.loadHomeFolder()`'s own writes to `homeFolderId`
+	// during its resolution then re-trigger the effect, firing a
+	// second and third `load()` before the first has settled. Wrap
+	// in `untrack` so the ONLY dependency is `pathSegments` (route
+	// change is the sole legitimate re-trigger).
 	$effect(() => {
-		// reference pathSegments so the effect re-runs on navigation
 		void pathSegments;
-		void load();
+		untrack(() => {
+			void load();
+		});
 	});
 
 	// The command palette's "Upload files" action navigates here then dispatches
