@@ -401,19 +401,16 @@ impl WebDavAdapter {
     /// `quota-used-bytes` known but `quota-available-bytes` unknown (see
     /// `resolve_quota` in `webdav_handler.rs`).
     fn folder_prop_is_known(prop: &QualifiedName, quota: Option<(i64, Option<i64>)>) -> bool {
-        prop.namespace == "DAV:"
-            && (matches!(
-                prop.name.as_str(),
-                "resourcetype"
-                    | "displayname"
-                    | "creationdate"
-                    | "getlastmodified"
-                    | "getetag"
-                    | "getcontentlength"
-                    | "getcontenttype"
-            ) || (quota.is_some() && prop.name == "quota-used-bytes")
-                || (quota.is_some_and(|(_, available)| available.is_some())
-                    && prop.name == "quota-available-bytes"))
+        if prop.namespace != "DAV:" {
+            return false;
+        }
+        match prop.name.as_str() {
+            "resourcetype" | "displayname" | "creationdate" | "getlastmodified" | "getetag"
+            | "getcontentlength" | "getcontenttype" => true,
+            "quota-used-bytes" => quota.is_some(),
+            "quota-available-bytes" => quota.is_some_and(|(_, available)| available.is_some()),
+            _ => false,
+        }
     }
 
     fn file_prop_is_known(prop: &QualifiedName) -> bool {
@@ -842,11 +839,11 @@ impl WebDavAdapter {
         xml_writer.write_event(Event::Empty(BytesStart::new("D:getetag")))?;
         xml_writer.write_event(Event::Empty(BytesStart::new("D:getcontentlength")))?;
         xml_writer.write_event(Event::Empty(BytesStart::new("D:getcontenttype")))?;
-        if quota.is_some() {
+        if let Some((_, available)) = quota {
             xml_writer.write_event(Event::Empty(BytesStart::new("D:quota-used-bytes")))?;
-        }
-        if quota.is_some_and(|(_, available)| available.is_some()) {
-            xml_writer.write_event(Event::Empty(BytesStart::new("D:quota-available-bytes")))?;
+            if available.is_some() {
+                xml_writer.write_event(Event::Empty(BytesStart::new("D:quota-available-bytes")))?;
+            }
         }
 
         Ok(())
