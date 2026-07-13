@@ -1366,7 +1366,7 @@
 	// hiding N items" hint so users aren't confused.
 	const isEmpty = $derived(visibleFolders.length === 0 && visibleFiles.length === 0);
 	const viewClass = $derived(
-		preferences.viewMode === 'grid' ? 'files-grid-view' : 'files-list-view'
+		filesStore.viewMode === 'grid' ? 'files-grid-view' : 'files-list-view'
 	);
 
 	// Client-side sort (flat, Drive-style). The listing endpoint returns the
@@ -1806,7 +1806,7 @@
 						{/each}
 					{/each}
 				</div>
-			{:else if preferences.viewMode === 'list'}
+			{:else if filesStore.viewMode === 'list'}
 				<!-- Flat list: only the rows near the viewport are mounted. -->
 				<div class="files-list-view">
 					{@render fileListHeader()}

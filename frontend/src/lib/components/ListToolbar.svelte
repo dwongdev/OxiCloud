@@ -12,6 +12,7 @@
 	import type { Snippet } from 'svelte';
 	import Icon from '$lib/icons/Icon.svelte';
 	import { t } from '$lib/i18n/index.svelte';
+	import { files as filesStore } from '$lib/stores/files.svelte';
 	import { preferences } from '$lib/stores/preferences.svelte';
 
 	interface Props {
@@ -126,19 +127,19 @@
 			{#if showViewToggle}
 				<button
 					class="toggle-btn"
-					class:active={preferences.viewMode === 'grid'}
+					class:active={filesStore.viewMode === 'grid'}
 					title={t('view.grid', 'Grid view')}
-					aria-pressed={preferences.viewMode === 'grid'}
+					aria-pressed={filesStore.viewMode === 'grid'}
 					data-testid="list-toolbar-view-grid-btn"
-					onclick={() => preferences.setViewMode('grid')}><Icon name="th" /></button
+					onclick={() => filesStore.setViewMode('grid')}><Icon name="th" /></button
 				>
 				<button
 					class="toggle-btn"
-					class:active={preferences.viewMode === 'list'}
+					class:active={filesStore.viewMode === 'list'}
 					title={t('view.list', 'List view')}
-					aria-pressed={preferences.viewMode === 'list'}
+					aria-pressed={filesStore.viewMode === 'list'}
 					data-testid="list-toolbar-view-list-btn"
-					onclick={() => preferences.setViewMode('list')}><Icon name="list" /></button
+					onclick={() => filesStore.setViewMode('list')}><Icon name="list" /></button
 				>
 			{/if}
 			{#if showDotfileToggle}

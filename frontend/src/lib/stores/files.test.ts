@@ -27,11 +27,13 @@ it('shows the owner as "Me" for the current user and a short id otherwise', () =
 	expect(ownerLabel('abcdef123456', 'someone-else')).toBe('abcdef12');
 });
 
-// View-mode assertions moved to `preferences.svelte.test.ts` — the
-// setting now lives on the server-side `ui_preferences` bag via the
-// `preferences` store, not on `FilesStore`. What remains of `FilesStore`
-// is navigation + selection state, exercised below.
-it('toggles selection', () => {
+it('persists the view mode and toggles selection', () => {
+	files.setViewMode('list');
+	expect(files.viewMode).toBe('list');
+	expect(localStorage.getItem('oxi-view-mode')).toBe('list');
+	files.setViewMode('grid');
+	expect(files.viewMode).toBe('grid');
+
 	files.clearSelection();
 	expect(files.selection.size).toBe(0);
 	files.toggleSelected('a');

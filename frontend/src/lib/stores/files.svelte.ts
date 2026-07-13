@@ -72,22 +72,34 @@ export type Section =
 	| 'photos'
 	| 'music';
 
-// `viewMode` used to live here (localStorage `oxi-view-mode`), but
-// moved to the server-side `ui_preferences` bag so the choice
-// follows the user across devices. Read via
-// `preferences.viewMode` and mutate via `preferences.setViewMode`
-// (`lib/stores/preferences.svelte.ts`). Kept `ViewMode` as an
-// exported type because template code still needs it for prop
-// annotations without pulling in the whole preferences module.
+const VIEW_KEY = 'oxi-view-mode';
+
+function readViewMode(): ViewMode {
+	if (typeof localStorage === 'undefined') return 'grid';
+	return localStorage.getItem(VIEW_KEY) === 'list' ? 'list' : 'grid';
+}
 
 class FilesStore {
 	currentFolder = $state<string | null>(null);
 	currentFolderInfo = $state<FolderItem | null>(null);
 	breadcrumbPath = $state<Array<{ id: string; name: string }>>([]);
+	// View mode INTENTIONALLY lives here (localStorage) rather than in
+	// the server-side `preferences` bag. See the note in
+	// `preferences.svelte.ts::UiPreferences` for the full rationale —
+	// short version: server persistence broke Playwright test
+	// isolation (favorites.spec's list-view click leaked into every
+	// downstream test's context), and view mode isn't a preference
+	// users have asked to sync across devices.
+	viewMode = $state<ViewMode>(readViewMode());
 	section = $state<Section>('files');
 	isSearchMode = $state(false);
 	// Reactive set: in-place mutations below drive template/$derived reads.
 	selection = new SvelteSet<string>();
+
+	setViewMode(mode: ViewMode): void {
+		this.viewMode = mode;
+		if (typeof localStorage !== 'undefined') localStorage.setItem(VIEW_KEY, mode);
+	}
 
 	clearSelection(): void {
 		this.selection.clear();

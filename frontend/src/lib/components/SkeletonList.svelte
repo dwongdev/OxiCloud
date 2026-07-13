@@ -1,5 +1,5 @@
 <script lang="ts">
-	import { preferences } from '$lib/stores/preferences.svelte';
+	import { files as filesStore } from '$lib/stores/files.svelte';
 
 	interface Props {
 		/** Number of placeholder cards/rows to render (default 6). */
@@ -12,11 +12,9 @@
 </script>
 
 <div class="files-container">
-	<div
-		class={preferences.viewMode === 'grid' ? 'files-grid-view files-skeleton' : 'files-skeleton'}
-	>
+	<div class={filesStore.viewMode === 'grid' ? 'files-grid-view files-skeleton' : 'files-skeleton'}>
 		{#each placeholders as i (i)}
-			{#if preferences.viewMode === 'grid'}
+			{#if filesStore.viewMode === 'grid'}
 				<div class="skeleton-card">
 					<div class="skeleton skeleton-thumb"></div>
 					<div class="skeleton skeleton-line skeleton-line--medium"></div>

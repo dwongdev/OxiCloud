@@ -62,7 +62,7 @@ vi.mock('$lib/api/endpoints/folders', () => ({
 import { fetchFolderListing, createFolder, deleteFolder } from '$lib/api/endpoints/folders';
 import { deleteFile } from '$lib/api/endpoints/files';
 import { apiFetch } from '$lib/api/client';
-import { preferences } from '$lib/stores/preferences.svelte';
+import { files as filesStore } from '$lib/stores/files.svelte';
 import FilesPage from './[...path]/+page.svelte';
 
 const m = (fn: unknown) => fn as ReturnType<typeof vi.fn>;
@@ -126,12 +126,7 @@ beforeEach(() => {
 	// listing-oriented tests target a folder directly.
 	pageState.params.path = 'home';
 	// List view renders the select-all header + per-row checkboxes; grid hides them.
-	// The store's `setViewMode` writes through to the server bag via a
-	// debounced PATCH; in the test harness there's no session so the
-	// PATCH silently no-ops on the network side but the optimistic local
-	// mutation (session.user.ui_preferences.view_mode) still lands and
-	// downstream `preferences.viewMode` re-derives to 'list'.
-	preferences.setViewMode('list');
+	filesStore.viewMode = 'list';
 });
 
 it('loads the home folder listing on mount and renders its contents', async () => {

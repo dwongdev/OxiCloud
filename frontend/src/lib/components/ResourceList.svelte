@@ -58,7 +58,7 @@
 	import UserVignette from '$lib/components/UserVignette.svelte';
 	import VirtualList from '$lib/components/VirtualList.svelte';
 	import { t } from '$lib/i18n/index.svelte';
-	import { preferences } from '$lib/stores/preferences.svelte';
+	import { files as filesStore } from '$lib/stores/files.svelte';
 	import { formatBytes } from '$lib/utils/format';
 	import { formatDate, iconNameFromClass, fileIconKindClass } from '$lib/utils/display';
 	import { gridColumns } from '$lib/utils/grid';
@@ -164,7 +164,7 @@
 
 	const isEmpty = $derived(items.length === 0);
 	const viewClass = $derived(
-		preferences.viewMode === 'grid' ? 'files-grid-view' : 'files-list-view'
+		filesStore.viewMode === 'grid' ? 'files-grid-view' : 'files-list-view'
 	);
 	/** Content width, for computing the grid's column count to match auto-fill. */
 	let gridWidth = $state(0);
@@ -458,7 +458,7 @@
 							</span>
 						{/if}
 					</div>
-					{#if preferences.viewMode === 'list'}
+					{#if filesStore.viewMode === 'list'}
 						<!-- Window each section's rows so a large grouped list (e.g. a big
 						     trash, grouped by remaining days) doesn't mount every row. The
 						     grid-grouped branch stays un-windowed: `files-grid-view` is itself
@@ -471,7 +471,7 @@
 					{/if}
 				{/each}
 			</div>
-		{:else if preferences.viewMode === 'list'}
+		{:else if filesStore.viewMode === 'list'}
 			<!-- Flat list view: only the visible rows are mounted. The spacer keeps the
 			     full scroll height so the end-of-list sentinel still fires. -->
 			<div class="files-list-view" style="--files-list-columns: {columns}">

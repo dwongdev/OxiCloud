@@ -41,22 +41,23 @@ export interface UiPreferences {
 	 * preserved on upload, matching Nextcloud / ownCloud / Seafile.
 	 */
 	hide_dotfiles?: boolean;
-	/**
-	 * App-wide file list view: grid tiles or list rows. Default
-	 * `'grid'`. Migrated from the localStorage `oxi-view-mode` key
-	 * so the choice follows the user across devices — muscle memory
-	 * for "I use list on my laptop, grid on my tablet" is rare;
-	 * consistency across devices is the common case. Public-share
-	 * viewers still use `oxi-share-view` (localStorage) because
-	 * anonymous consumers have no server preferences.
-	 */
-	view_mode?: 'grid' | 'list';
+	// NOTE: view_mode (grid/list) DELIBERATELY stays in localStorage
+	// (`oxi-view-mode` on `filesStore`). Making it server-persistent
+	// caused a real Playwright regression: `favorites.spec.ts` clicks
+	// the list-view toggle, and on the server-backed store that
+	// preference would then leak into every downstream test's fresh
+	// browser context — Playwright's default context isolation
+	// relies on localStorage being fresh per test, which the server
+	// bag can't provide. Result: files-extra's `Zip-*` folder fell
+	// outside list view's smaller virtualisation window (~25 vs ~75
+	// grid items) and `getByTestId` timed out. Google Drive / Finder
+	// / Dropbox also keep view mode per-device — the sync-across-
+	// devices UX isn't a strongly-requested pattern.
 }
 
 /** Reasonable default for an empty bag or a missing key. */
 const DEFAULTS: Required<UiPreferences> = {
-	hide_dotfiles: false,
-	view_mode: 'grid'
+	hide_dotfiles: false
 };
 
 /**
@@ -83,8 +84,6 @@ class PreferencesStore {
 			? (this.bag.hide_dotfiles as boolean)
 			: DEFAULTS.hide_dotfiles
 	);
-
-	viewMode = $derived<'grid' | 'list'>(this.bag.view_mode === 'list' ? 'list' : DEFAULTS.view_mode);
 
 	// ── Mutations ─────────────────────────────────────────────────
 
@@ -157,10 +156,6 @@ class PreferencesStore {
 
 	toggleHideDotfiles(): void {
 		this.setHideDotfiles(!this.hideDotfiles);
-	}
-
-	setViewMode(mode: 'grid' | 'list'): void {
-		this.set({ view_mode: mode });
 	}
 }
 
