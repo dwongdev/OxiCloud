@@ -43,6 +43,11 @@ import {
  * whole suite running with the filter on.
  */
 
+// Test-created folders. Tests push here in-flight; afterEach reaps.
+// Keeps /files root clean so unrelated specs' virtualised listings
+// don't lose their own fixtures to overflow.
+const scratchFolderIds: string[] = [];
+
 test.beforeEach(async ({ page }) => {
   await apiLogin(page);
   await apiSetHideDotfiles(page, false);
@@ -52,6 +57,13 @@ test.afterEach(async ({ page }) => {
   // Belt-and-braces: even if a test forgot to reset, restore the
   // default so the next spec file starts from a known state.
   await apiSetHideDotfiles(page, false).catch(() => {});
+  // Reap this test's fixtures. `catch` per id so a stale reference
+  // (already trashed by the test body, e.g. Test 3) doesn't cascade
+  // a teardown error onto a real assertion failure.
+  while (scratchFolderIds.length) {
+    const id = scratchFolderIds.pop()!;
+    await apiTrashFolder(page, id).catch(() => {});
+  }
 });
 
 function uniq(prefix: string): string {
@@ -59,15 +71,20 @@ function uniq(prefix: string): string {
 }
 
 test('toolbar eye toggle hides and re-shows dotfiles in /files', async ({ page }) => {
-  // Two siblings at root: a regular folder + a `.`-prefixed one.
-  // Both should be visible with hide off (default), then only the
-  // regular one should remain after clicking the toolbar toggle.
+  // Scratch parent so we don't dump siblings into /files root — the
+  // root's virtualised list is shared with the rest of the suite and
+  // its DOM size caps out around a few dozen rows; every persistent
+  // fixture we leave there risks pushing an unrelated test's own
+  // folder out of view (see `files-extra.spec.ts` regressions).
+  // Trashing the parent in afterEach cascades to the children.
+  const parent = await apiCreateFolder(page, uniq('DotfileToggleScratch'));
+  scratchFolderIds.push(parent.id);
   const visible = uniq('Visible');
   const hidden = `.${uniq('hidden')}`;
-  await apiCreateFolder(page, visible);
-  await apiCreateFolder(page, hidden);
+  await apiCreateFolder(page, visible, parent.id);
+  await apiCreateFolder(page, hidden, parent.id);
 
-  await page.goto('/files');
+  await page.goto(`/files/${parent.id}`);
 
   // Baseline: both rows render. Row test-id = folder name (see
   // ResourceList / +page.svelte's data-testid pattern used by the
@@ -96,6 +113,7 @@ test('empty-state hint appears when a folder holds only dotfiles', async ({ page
   // children are our dotfiles. Root has accumulated cruft from the
   // suite and would drown the empty-state case.
   const parent = await apiCreateFolder(page, uniq('OnlyDotfilesParent'));
+  scratchFolderIds.push(parent.id);
   const dot1 = `.${uniq('a')}`;
   const dot2 = `.${uniq('b')}`;
   await apiCreateFolder(page, dot1, parent.id);
@@ -148,7 +166,11 @@ test('trash always shows dotfiles even when hide is on', async ({ page }) => {
   // Row must be present. Trash entries render the resource name
   // as plain text (no per-row test-id keyed by name in the current
   // template); text lookup is the reliable selector.
-  await expect(page.getByText(dotname)).toBeVisible({ timeout: 15_000 });
+  //
+  // `exact: true` narrows to the name cell — the path cell (which
+  // renders as "Personal/{name}") would otherwise also match under
+  // Playwright's default substring semantics and trip strict mode.
+  await expect(page.getByText(dotname, { exact: true })).toBeVisible({ timeout: 15_000 });
 
   // Belt-and-braces: also verify the hide preference IS on in the
   // background — otherwise the assertion above passes trivially
