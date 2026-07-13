@@ -166,6 +166,7 @@ hurl --variables-file "$API_DIR/test.env" --file-root "$REPO_ROOT/tests" --test 
   "$API_DIR/public_shares.hurl" \
   "$API_DIR/permissions.hurl" \
   "$API_DIR/grants.hurl" \
+  "$API_DIR/grant_cleanup.hurl" \
   "$API_DIR/role_grants.hurl" \
   "$API_DIR/subject_groups.hurl" \
   "$API_DIR/groups_effective_members.hurl" \
@@ -186,7 +187,10 @@ hurl --variables-file "$API_DIR/test.env" --file-root "$REPO_ROOT/tests" --test 
   "$API_DIR/drive_policies.hurl" \
   "$API_DIR/cross_drive_move.hurl" \
   "$API_DIR/cross_drive_copy.hurl" \
+  "$API_DIR/nc_multidrive_move_regression.hurl" \
   "$API_DIR/webdav_dead_properties.hurl" \
+  "$API_DIR/nc_webdav_dead_properties.hurl" \
+  "$API_DIR/webdav_protected_properties.hurl" \
   "$API_DIR/webdav_quota_properties.hurl" \
   "$API_DIR/nc_webdav_quota_properties.hurl" \
   "$API_DIR/webdav_drive_root.hurl" \

@@ -150,6 +150,26 @@ pub trait AuthorizationEngine: Send + Sync + 'static {
         expires_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<(), DomainError>;
 
+    /// Delete every row from `storage.role_grants` whose `expires_at` is
+    /// more than `grace_days` in the past. Returns the count of rows
+    /// removed.
+    ///
+    /// The engine's `check` / `list_grants_*` paths already ignore
+    /// expired rows (they filter on `expires_at > NOW()` in-query), so
+    /// this is pure garbage collection — no live authorization decision
+    /// changes. The grace window preserves the audit / support answer
+    /// to "what happened to my access?" for a couple of weeks past
+    /// expiration.
+    ///
+    /// Grace of `0` means "delete every row whose `expires_at` is in
+    /// the past, right now" — used by the admin `?force=true` trigger
+    /// endpoint to enable Hurl regression testing without waiting the
+    /// configured grace out.
+    ///
+    /// Rows with `expires_at IS NULL` (permanent grants) are never
+    /// touched.
+    async fn purge_expired_grants(&self, grace_days: u32) -> Result<u64, DomainError>;
+
     /// Revoke a single role grant by its UUID. Idempotent — returns `Ok(())`
     /// whether or not the row existed. The id comes from a prior listing
     /// or `find_grant_full_by_id` lookup.

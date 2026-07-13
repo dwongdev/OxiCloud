@@ -332,11 +332,30 @@ async fn complete_flow(
             base_url = %base_url,
             "Login Flow v2: flow completed successfully"
         );
-        let nc_url = format!(
-            "nc://login/server:{}&user:{}&password:{}",
-            base_url, login_name, app_password
-        );
-        axum::response::Redirect::to(&nc_url).into_response()
+        // Redirect the browser to a visible success page. NC clients
+        // that use the LFv2 poll endpoint (the standard pattern) have
+        // already received the credentials server-to-server through
+        // `login_flow.complete()` above — they don't need any browser
+        // hand-off.
+        //
+        // We deliberately do NOT redirect to `nc://login/…` here:
+        //   1. Plain browsers can't follow it → the tab looks stuck
+        //      on the picker → user clicks Continue again → second
+        //      click hits an already-consumed flow token → ends up
+        //      on `/nextcloud/error?type=session-expired`.
+        //   2. NC desktop clients that pick it up while their poll
+        //      has already succeeded try to complete the flow a
+        //      second time, which fails validation ("Impossible de
+        //      valider la requête") — the poll session is fine, the
+        //      dialog is spurious noise.
+        //
+        // If a client ever needs a frontchannel `nc://` handoff
+        // (older NC releases, mobile), reintroduce the URL as a
+        // client-side-only fragment (`#target=…`) and add a manual
+        // "Open Nextcloud" fallback on the success page. Keep the
+        // credentials out of the query string either way — the query
+        // string reaches server access logs.
+        axum::response::Redirect::to("/nextcloud/success").into_response()
     } else {
         tracing::error!(
             user = %user.username,
