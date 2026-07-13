@@ -1290,6 +1290,9 @@ impl AppServiceFactory {
         let places_service: Option<Arc<PlacesService>>;
         let people_service: Option<Arc<PeopleService>>;
         let storage_usage_service: Option<Arc<StorageUsageService>>;
+        let grant_cleanup_service: Option<
+            Arc<crate::infrastructure::services::grant_cleanup_service::GrantCleanupService>,
+        >;
         let mut auth_services: Option<crate::common::di::AuthServices> = None;
         let mut nextcloud_services: Option<NextcloudServices> = None;
         // Lifted out of the database-services block so PR 9's invite
@@ -1332,6 +1335,25 @@ impl AppServiceFactory {
             self.start_db_pool_monitor(&pool);
 
             self.start_content_index_job(&maintenance_pool, &core, content_index);
+
+            grant_cleanup_service = if core.config.features.grant_cleanup.enabled {
+                let svc = Arc::new(
+                    crate::infrastructure::services::grant_cleanup_service::GrantCleanupService::new(
+                        authorization.clone(),
+                        core.config.features.grant_cleanup.grace_days,
+                        core.config.features.grant_cleanup.interval_hours,
+                    ),
+                );
+                // First tick fires immediately inside start_cleanup_job —
+                // matches the trash/storage-usage daemon shape.
+                svc.clone().start_cleanup_job().await;
+                Some(svc)
+            } else {
+                tracing::info!(
+                    "Grant-cleanup daemon disabled by OXICLOUD_GRANT_CLEANUP_ENABLED=false"
+                );
+                None
+            };
 
             // User-lifecycle dispatcher. Hook order is registration order;
             // document dependencies inline if/when any arise. Today:
@@ -1557,6 +1579,7 @@ impl AppServiceFactory {
             places_service,
             people_service,
             storage_usage_service,
+            grant_cleanup_service,
             calendar_service: None,
             calendar_use_case: None,
             addressbook_use_case: None,
@@ -2029,6 +2052,14 @@ pub struct AppState {
     pub places_service: Option<Arc<PlacesService>>,
     pub people_service: Option<Arc<PeopleService>>,
     pub storage_usage_service: Option<Arc<StorageUsageService>>,
+    /// Handle to the background daemon that purges expired
+    /// `storage.role_grants` rows. `None` when the daemon is disabled
+    /// via `OXICLOUD_GRANT_CLEANUP_ENABLED=false`. The admin
+    /// `POST /api/admin/internal/trigger-grant-cleanup` handler uses
+    /// this to invoke the purge on demand (test-only).
+    pub grant_cleanup_service: Option<
+        Arc<crate::infrastructure::services::grant_cleanup_service::GrantCleanupService>,
+    >,
     pub calendar_service: Option<Arc<CalendarService>>,
     pub calendar_use_case: Option<Arc<CalendarService>>,
     pub addressbook_use_case: Option<Arc<ContactService>>,

@@ -103,6 +103,10 @@ pub fn admin_routes() -> Router<Arc<AppState>> {
         // deployments don't need a different route table.
         .route("/internal/trigger-sweep", post(internal_trigger_sweep))
         .route("/internal/trigger-gc", post(internal_trigger_gc))
+        .route(
+            "/internal/trigger-grant-cleanup",
+            post(internal_trigger_grant_cleanup),
+        )
         // Drives — admin-wide view (distinct from `/api/drives` which
         // is filtered to the caller's role grants).
         .route("/drives", get(list_all_drives))
@@ -2159,4 +2163,94 @@ pub async fn internal_trigger_gc(
             .into_response(),
         Err(e) => AppError::internal_error(format!("gc failed: {e}")).into_response(),
     }
+}
+
+/// Query parameters for `POST /api/admin/internal/trigger-grant-cleanup`.
+///
+/// `force=true` sets the grace window to `0` for this call — deletes
+/// every row whose `expires_at` is in the past, right now. Enables
+/// Hurl regressions to plant a past-dated grant and immediately
+/// observe it purged, without waiting the configured
+/// `OXICLOUD_GRANT_CLEANUP_GRACE_DAYS` out.
+///
+/// Without `force`, the daemon's configured grace applies — the same
+/// SQL the daily loop runs.
+#[derive(Debug, serde::Deserialize, Default)]
+pub struct InternalTriggerGrantCleanupQuery {
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `POST /api/admin/internal/trigger-grant-cleanup` — run the expired-
+/// grant purge synchronously.
+///
+/// Test-only. Deletes rows from `storage.role_grants` whose
+/// `expires_at` is more than `grace_days` in the past (or immediately,
+/// with `?force=true`). Same SQL as the periodic `GrantCleanupService`
+/// daemon — exposed under an admin route so Hurl can wait for it
+/// deterministically.
+///
+/// Response fields:
+///   `grants_deleted` — count of rows removed by this invocation
+///   `grace_days`    — the grace window that was applied (0 when
+///                     `?force=true`, otherwise the config value)
+///   `forced`        — echoes the query param
+#[utoipa::path(
+    post,
+    path = "/api/admin/internal/trigger-grant-cleanup",
+    params(("force" = Option<bool>, Query, description = "Force grace = 0 for this run (test-only)")),
+    responses(
+        (status = 200, description = "Purge ran"),
+        (status = 401, description = "Unauthorized"),
+        (status = 403, description = "Admin required"),
+        (status = 404, description = "Endpoint disabled (set OXICLOUD_ENABLE_ADMIN_INTERNAL_ENDPOINTS=true)"),
+        (status = 503, description = "Grant-cleanup daemon disabled (OXICLOUD_GRANT_CLEANUP_ENABLED=false)"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "admin"
+)]
+pub async fn internal_trigger_grant_cleanup(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Query(query): Query<InternalTriggerGrantCleanupQuery>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !state.core.config.features.enable_admin_internal_endpoints {
+        return internal_endpoints_disabled();
+    }
+    if let Err(e) = admin_guard(&state, &headers).await {
+        return e.into_response();
+    }
+    // Daemon may be disabled by config even when the internal-endpoint
+    // gate is on. Return 503 (rather than 404 or 500) so integration
+    // tests can distinguish "surface not exposed" from "surface
+    // exposed but backing service off".
+    let svc = match state.grant_cleanup_service.as_ref() {
+        Some(s) => s,
+        None => {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(serde_json::json!({
+                    "error": "grant_cleanup_service not available (disabled by OXICLOUD_GRANT_CLEANUP_ENABLED=false)",
+                })),
+            )
+                .into_response();
+        }
+    };
+    // `force=true` collapses the grace window to zero for this run
+    // only — the daemon's configured grace is untouched. Mirrors the
+    // `trigger-gc?force=true` shape.
+    let grace_override = if query.force { Some(0) } else { None };
+    let grants_deleted = svc.purge(grace_override).await;
+    let grace_days = grace_override.unwrap_or_else(|| svc.grace_days());
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "ok": true,
+            "grants_deleted": grants_deleted,
+            "grace_days": grace_days,
+            "forced": query.force,
+        })),
+    )
+        .into_response()
 }

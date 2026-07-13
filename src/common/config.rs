@@ -931,6 +931,50 @@ pub struct FeaturesConfig {
     ///
     /// Env: `OXICLOUD_WEBDAV_DRIVE_LISTING_PREFIX`.
     pub webdav_drive_listing_prefix: String,
+
+    /// Background purge of expired `storage.role_grants` rows.
+    ///
+    /// The AuthZ engine already filters expired grants out of every
+    /// permission check at read time (`expires_at IS NULL OR
+    /// expires_at > NOW()`), so leaving the rows in place is a
+    /// hygiene issue — not a security one. This purge deletes rows
+    /// whose `expires_at` is more than [`GrantCleanupConfig::grace_days`]
+    /// in the past, preserving the audit / support answer to
+    /// "what happened to my access?" for the grace window.
+    ///
+    /// Enabled by default: expired-auth-row cleanup is a
+    /// security-hygiene default, not opt-in.
+    pub grant_cleanup: GrantCleanupConfig,
+}
+
+/// Config for the daily expired-grant purge (see
+/// [`FeaturesConfig::grant_cleanup`]).
+#[derive(Debug, Clone)]
+pub struct GrantCleanupConfig {
+    /// Master switch. Env: `OXICLOUD_GRANT_CLEANUP_ENABLED`
+    /// (default `true`).
+    pub enabled: bool,
+    /// Days past a grant's `expires_at` before the row is eligible
+    /// for deletion. Env: `OXICLOUD_GRANT_CLEANUP_GRACE_DAYS`
+    /// (default `15`).
+    ///
+    /// The recommendation is `> 15` — enough to answer
+    /// support/audit questions about recently-lapsed grants without
+    /// keeping dead rows forever.
+    pub grace_days: u32,
+    /// How often the daemon fires, in hours. Env:
+    /// `OXICLOUD_GRANT_CLEANUP_INTERVAL_HOURS` (default `24`).
+    pub interval_hours: u64,
+}
+
+impl Default for GrantCleanupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            grace_days: 15,
+            interval_hours: 24,
+        }
+    }
 }
 
 impl Default for FeaturesConfig {
@@ -954,6 +998,7 @@ impl Default for FeaturesConfig {
             // maps to the caller's default drive; drive listing is
             // reachable at `/webdav/@drive/`.
             webdav_drive_listing_prefix: "@drive".to_string(),
+            grant_cleanup: GrantCleanupConfig::default(),
         }
     }
 }
@@ -1523,6 +1568,25 @@ impl AppConfig {
             && let Ok(val) = enable_internal
         {
             config.features.enable_admin_internal_endpoints = val;
+        }
+
+        // Grant-cleanup daemon. Purges rows from `storage.role_grants`
+        // whose `expires_at` is more than `grace_days` in the past.
+        // See `GrantCleanupConfig` for defaults + rationale.
+        if let Ok(v) = env::var("OXICLOUD_GRANT_CLEANUP_ENABLED").map(|v| v.parse::<bool>())
+            && let Ok(val) = v
+        {
+            config.features.grant_cleanup.enabled = val;
+        }
+        if let Ok(v) = env::var("OXICLOUD_GRANT_CLEANUP_GRACE_DAYS").map(|v| v.parse::<u32>())
+            && let Ok(val) = v
+        {
+            config.features.grant_cleanup.grace_days = val;
+        }
+        if let Ok(v) = env::var("OXICLOUD_GRANT_CLEANUP_INTERVAL_HOURS").map(|v| v.parse::<u64>())
+            && let Ok(val) = v
+        {
+            config.features.grant_cleanup.interval_hours = val.max(1);
         }
 
         // Native WebDAV drive-picker path segment. Sanitised by

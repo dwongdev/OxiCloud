@@ -2075,6 +2075,27 @@ impl AuthorizationEngine for PgAclEngine {
         Ok(())
     }
 
+    async fn purge_expired_grants(&self, grace_days: u32) -> Result<u64, DomainError> {
+        // Uses the partial index `idx_role_grants_expires_at` (migration
+        // 20260730000000), which covers `WHERE expires_at IS NOT NULL`
+        // — so this DELETE only touches indexed rows even when the
+        // `role_grants` table has tens of millions of permanent grants.
+        //
+        // Grace days is bound as bigint and multiplied into an
+        // interval — parameterised, no injection surface. u32 → i64
+        // is loss-free.
+        let result = sqlx::query(
+            "DELETE FROM storage.role_grants \
+              WHERE expires_at IS NOT NULL \
+                AND expires_at < NOW() - ($1::bigint * INTERVAL '1 day')",
+        )
+        .bind(grace_days as i64)
+        .execute(self.pool.as_ref())
+        .await
+        .map_err(|e| DomainError::internal_error("PgAcl", format!("purge_expired_grants: {e}")))?;
+        Ok(result.rows_affected())
+    }
+
     async fn revoke(&self, grant_id: Uuid) -> Result<(), DomainError> {
         sqlx::query("DELETE FROM storage.role_grants WHERE id = $1")
             .bind(grant_id)

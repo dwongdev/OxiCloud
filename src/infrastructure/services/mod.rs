@@ -12,6 +12,7 @@ pub mod face_indexing_service;
 pub mod ffmpeg_video_frame_service;
 pub mod file_content_cache;
 pub mod file_system_i18n_service;
+pub mod grant_cleanup_service;
 pub mod image_transcode_service;
 pub mod jwt_service;
 pub mod local_blob_backend;

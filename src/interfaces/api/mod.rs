@@ -225,6 +225,13 @@ use crate::interfaces::api::handlers::file_handler::MoveFilePayload;
         handlers::admin_handler::complete_migration,
         handlers::admin_handler::verify_migration,
         handlers::admin_handler::generate_encryption_key,
+        // Admin internal-trigger handlers — gated by
+        // OXICLOUD_ENABLE_ADMIN_INTERNAL_ENDPOINTS (Off by default in
+        // prod; on for the Hurl suite). Documented in OpenAPI so
+        // integrators writing test harnesses can discover the surface.
+        handlers::admin_handler::internal_trigger_sweep,
+        handlers::admin_handler::internal_trigger_gc,
+        handlers::admin_handler::internal_trigger_grant_cleanup,
         // Grant / ReBAC handlers (free functions)
         handlers::grant_handler::create_grant,
         handlers::grant_handler::revoke_grant,
