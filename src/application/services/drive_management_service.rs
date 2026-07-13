@@ -556,7 +556,10 @@ impl DriveManagementService {
         let drive = self.drive_repo.get_by_id(drive_id).await.map_err(|e| {
             DomainError::internal_error("Drive", format!("Failed to fetch drive: {e:?}"))
         })?;
-        if drive.drive.is_personal() {
+        if matches!(
+            drive.drive.kind,
+            crate::domain::entities::drive::DriveKind::Personal
+        ) {
             tracing::info!(
                 target: "audit",
                 event = "drive_membership.rejected",

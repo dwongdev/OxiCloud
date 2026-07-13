@@ -131,12 +131,6 @@ impl Drive {
         self.default_for_user == Some(user_id)
     }
 
-    /// `true` if this drive is a personal drive of any kind (default or
-    /// secondary). Encapsulates the kind check at the call site.
-    pub fn is_personal(&self) -> bool {
-        matches!(self.kind, DriveKind::Personal)
-    }
-
     /// Typed view of `policies` for enforcement code. Lenient deserialise:
     /// unknown keys are preserved on disk (the column stays the canonical
     /// JSONB bag) but ignored here, missing keys default to `false`.

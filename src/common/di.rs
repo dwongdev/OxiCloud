@@ -2169,12 +2169,15 @@ impl AppState {
         }
 
         let drive = self.drive_repo.get_by_id(drive_id).await.ok()?.drive;
-        if drive.is_personal() {
-            let (used, quota) = storage_svc.get_user_storage_info(user_id).await.ok()?;
-            Some((used, (quota > 0).then(|| (quota - used).max(0))))
-        } else {
-            let used = drive.used_bytes;
-            Some((used, drive.quota_bytes.map(|q| (q - used).max(0))))
+        match drive.kind {
+            crate::domain::entities::drive::DriveKind::Personal => {
+                let (used, quota) = storage_svc.get_user_storage_info(user_id).await.ok()?;
+                Some((used, (quota > 0).then(|| (quota - used).max(0))))
+            }
+            crate::domain::entities::drive::DriveKind::Shared => {
+                let used = drive.used_bytes;
+                Some((used, drive.quota_bytes.map(|q| (q - used).max(0))))
+            }
         }
     }
 }
