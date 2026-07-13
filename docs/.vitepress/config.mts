@@ -89,6 +89,8 @@ export default defineConfig({
         {
           text: "Features",
           items: [
+            { text: "Drives", link: "/guide/drives" },
+            { text: "Sharing", link: "/guide/sharing" },
             { text: "WebDAV", link: "/guide/webdav" },
             { text: "CalDAV & CardDAV", link: "/guide/caldav-carddav" },
             { text: "DAV Client Setup", link: "/guide/dav-client-setup" },
@@ -98,7 +100,6 @@ export default defineConfig({
             { text: "Favorites & Recent", link: "/guide/favorites-and-recent" },
             { text: "Search", link: "/guide/search" },
             { text: "Thumbnails & Transcoding", link: "/guide/thumbnails-and-transcoding" },
-            { text: "Sharing", link: "/guide/sharing" },
             { text: "Trash & Recycle Bin", link: "/guide/trash" },
             { text: "ZIP & Compression", link: "/guide/zip-and-compression" },
             { text: "Internationalization", link: "/guide/i18n" },

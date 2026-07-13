@@ -3,6 +3,11 @@
 OxiCloud lets you share any file or folder with other people. Open the
 item, click **Share**, and pick who you'd like to share it with.
 
+> Sharing works inside any [Drive](/guide/drives) you have access to.
+> Some sharing options may be limited by a drive's policies (no public
+> links, no email invitations) — the share dialog just hides the
+> options that are disallowed.
+
 ## Who you can share with
 
 | Share with | When to use it |
