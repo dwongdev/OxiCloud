@@ -182,19 +182,25 @@ def test_recurring_master_plus_exception_preserves_master(
     body = _get_master_ical(fresh_calendar, uid)
     assert "RRULE:FREQ=DAILY;COUNT=10" in body, (
         "Master row lost its RRULE — the exception overwrote the master. "
-        "This is the exact regression from #528.\nMaster body: " + body
+        "This is the exact regression from #528.\nBundle body: " + body
     )
     assert "SUMMARY:Daily standup" in body
-
-    # NOTE: not asserting the exception row is client-visible here.
-    # RFC 4791 §4.1 + RFC 5545 §3.8.4.4 model a recurring event with
-    # per-instance overrides as ONE calendar-object-resource whose
-    # VCALENDAR contains the master VEVENT + all exception VEVENTs.
-    # OxiCloud currently persists them as separate rows but the
-    # GET/PROPFIND emitter returns only the master (see phase-4
-    # follow-up on branch feat/caldav-read-side). Once phase 4
-    # lands, add: assert "RECURRENCE-ID" in body and
-    # assert "rescheduled" in body.
+    # Phase-4 read-side unification: the GET response is the
+    # WHOLE calendar-object-resource — master + all exception
+    # VEVENTs concatenated in one VCALENDAR per RFC 4791 §4.1 +
+    # RFC 5545 §3.6.1. The exception's SUMMARY and its
+    # RECURRENCE-ID must therefore appear alongside the master's
+    # RRULE. Pre-phase-4 the emitter served only the master row
+    # and clients silently dropped the exception on next-PUT.
+    assert "SUMMARY:Daily standup — rescheduled" in body, (
+        "Exception VEVENT missing from bundled GET body — phase-4 "
+        "read-side regression.\nBundle body: " + body
+    )
+    assert "RECURRENCE-ID" in body, (
+        "Exception RECURRENCE-ID missing from bundled GET body — "
+        "clients need it to correlate the override with the master.\n"
+        "Bundle body: " + body
+    )
 
 
 def test_exception_only_put_does_not_wipe_master(
@@ -255,24 +261,29 @@ def test_exception_only_put_does_not_wipe_master(
         ),
     )
 
-    # Master URL GET must still return the master. Pre-fix the
-    # exception-only PUT would have replaced the master (keyed by
-    # UID with no recurrence_id filter) — this is the data-loss
-    # half of #528.
+    # Bundled GET returns the WHOLE calendar-object-resource:
+    # master row (unchanged since Step 1 seed) + the updated
+    # exception row (SUMMARY "rescheduled AGAIN" from the
+    # exception-only PUT above).
+    # Pre-phase-3 the exception-only PUT wiped the master.
+    # Pre-phase-4 the master survived but the exception was
+    # invisible in the GET body.
+    # Post-phase-4: both survive AND both are visible.
     body = _get_master_ical(fresh_calendar, uid)
-    assert "RRULE:FREQ=DAILY;COUNT=10" in body
-    assert "SUMMARY:Daily standup" in body
-    assert "rescheduled" not in body, (
-        "GET on the master URL returned the exception's data — the "
-        "master was clobbered by the exception-only PUT."
+    assert "RRULE:FREQ=DAILY;COUNT=10" in body, (
+        "Master row lost its RRULE — data-loss regression from #528.\n"
+        "Bundle body: " + body
     )
-
-    # NOTE: exception-row survival is not asserted client-side
-    # today — the emitter only surfaces the master. Phase 4
-    # (feat/caldav-read-side) will fold master + exceptions into a
-    # single VCALENDAR body; once landed, add an assertion that the
-    # updated exception's SUMMARY ("rescheduled AGAIN") is present
-    # in the same GET body as the master's RRULE.
+    assert "SUMMARY:Daily standup" in body, (
+        "Master's original SUMMARY missing from bundle body — the "
+        "master row was clobbered by the exception-only PUT.\n"
+        "Bundle body: " + body
+    )
+    assert "SUMMARY:Daily standup — rescheduled AGAIN" in body, (
+        "Updated exception SUMMARY missing — the second exception-only "
+        "PUT either failed to update or the emitter dropped the exception "
+        "row from the bundle.\nBundle body: " + body
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -322,7 +333,16 @@ def test_all_day_recurring_master_plus_exception(
         f"Master body: {data}"
     )
     assert "SUMMARY:Weekly review" in data
-
-    # NOTE: exception row is stored server-side but not yet visible
-    # in the GET body. Phase 4 will fold it in — assertion to add
-    # once that lands: assert "RECURRENCE-ID;VALUE=DATE:20260112" in data.
+    # Phase-4 bundle: exception row visible in the GET body.
+    # DATE-form RECURRENCE-ID (with the `;VALUE=DATE` parameter)
+    # survives verbatim because we serve stored ical_data
+    # instead of regenerating.
+    assert "SUMMARY:Weekly review — moved" in data, (
+        "All-day exception SUMMARY missing from bundled GET body:\n"
+        + data
+    )
+    assert "RECURRENCE-ID;VALUE=DATE:20260112" in data, (
+        "DATE-form RECURRENCE-ID lost — either the exception row "
+        "isn't in the bundle or the emitter mangled the property "
+        "parameter.\nBundle body: " + data
+    )

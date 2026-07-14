@@ -47,6 +47,106 @@ fn parse_caldav_datetime(value: &str) -> Option<DateTime<Utc>> {
         })
 }
 
+/// Extract the `BEGIN:VEVENT` ... `END:VEVENT` slice from a
+/// stored `ical_data` body (as returned by the storage layer —
+/// one full VCALENDAR per row).
+///
+/// Case-insensitive on the tag names per RFC 5545 §3.1. Includes
+/// the `BEGIN:VEVENT` and `END:VEVENT` lines themselves. Returns
+/// `None` if either tag is missing (malformed body) so callers
+/// can fall back safely.
+pub(crate) fn extract_vevent_chunk(ical_data: &str) -> Option<&str> {
+    let upper = ical_data.to_ascii_uppercase();
+    let begin = upper.find("BEGIN:VEVENT")?;
+    // End marker: the line-start of END:VEVENT after `begin`, plus
+    // the length of "END:VEVENT" itself, then find the next CRLF/LF
+    // to include the terminator line.
+    let after_begin = &upper[begin..];
+    let rel_end = after_begin.find("END:VEVENT")?;
+    let end_tag_end = begin + rel_end + "END:VEVENT".len();
+    // Include any immediate line terminator so the chunk stays a
+    // well-formed line even when the caller concatenates.
+    let mut end = end_tag_end;
+    if ical_data[end..].starts_with('\r') {
+        end += 1;
+    }
+    if ical_data[end..].starts_with('\n') {
+        end += 1;
+    }
+    Some(&ical_data[begin..end])
+}
+
+/// Group a slice of events by `ical_uid`, preserving the order of
+/// first appearance for the groups themselves, and placing the
+/// master (`recurrence_id.is_none()`) first within each group per
+/// RFC 5545 §3.6.1 convention. Ties among exceptions preserve the
+/// original slice order.
+///
+/// Used by the read-side emitters to fold master + per-instance
+/// override rows into a single calendar-object-resource, matching
+/// the "one URL per UID" contract of RFC 4791 §4.1.
+pub(crate) fn group_events_by_uid<'a>(
+    events: &'a [CalendarEventDto],
+) -> Vec<Vec<&'a CalendarEventDto>> {
+    let mut order: Vec<String> = Vec::new();
+    let mut buckets: std::collections::HashMap<String, Vec<&'a CalendarEventDto>> =
+        std::collections::HashMap::new();
+
+    for event in events {
+        let key = event.ical_uid.clone();
+        if !buckets.contains_key(&key) {
+            order.push(key.clone());
+        }
+        buckets.entry(key).or_default().push(event);
+    }
+
+    let mut out = Vec::with_capacity(order.len());
+    for uid in order {
+        let mut bucket = buckets.remove(&uid).unwrap_or_default();
+        // Master first (recurrence_id None), exceptions in insertion order.
+        bucket.sort_by_key(|e| e.recurrence_id.is_some());
+        out.push(bucket);
+    }
+    out
+}
+
+/// Build the calendar-object-resource body for a bundle (master +
+/// N exception overrides sharing the same UID). Serves each row's
+/// stored `ical_data` verbatim, extracting the VEVENT chunk and
+/// wrapping the concatenation in a single VCALENDAR shell.
+///
+/// This is the fix for the phase-4 read-side gap: the pre-fix
+/// emitter regenerated the body from DTO fields, which (a) lost
+/// every property outside UID / SUMMARY / DTSTART / DTEND /
+/// DESCRIPTION / LOCATION / RRULE (so ATTENDEE, VALARM, CATEGORIES,
+/// STATUS, X-* all silently dropped) and (b) never emitted
+/// RECURRENCE-ID so exception rows were invisible in the bundled
+/// GET body. Serving stored bytes verbatim closes both.
+///
+/// If any row's `ical_data` is malformed (no VEVENT tag pair),
+/// that row is skipped — the bundle survives the rest. An empty
+/// input bundle yields a minimal VCALENDAR with no VEVENTs (the
+/// caller decides whether to treat that as 404 upstream).
+pub(crate) fn bundle_to_calendar_body(bundle: &[&CalendarEventDto]) -> String {
+    let mut buf = String::with_capacity(256 + bundle.len() * 320);
+    buf.push_str("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//OxiCloud//NONSGML Calendar//EN\r\n");
+    for event in bundle {
+        if let Some(chunk) = extract_vevent_chunk(&event.ical_data) {
+            // The chunk already carries its own trailing line
+            // terminator (see extract_vevent_chunk). Append as-is.
+            buf.push_str(chunk);
+            // Defensive: guarantee a line separator between VEVENTs
+            // even if the extracted chunk didn't include a trailing
+            // newline (some stored bodies lack the terminator).
+            if !buf.ends_with('\n') {
+                buf.push_str("\r\n");
+            }
+        }
+    }
+    buf.push_str("END:VCALENDAR\r\n");
+    buf
+}
+
 /// Returns whether `caller_id` owns `calendar`.
 ///
 /// CalDAV clients (DAVx5, Apple Calendar, Thunderbird) only mount a collection
@@ -940,13 +1040,27 @@ impl CalDavAdapter {
         // Write the calendar collection itself
         Self::write_calendar_response(&mut xml_writer, calendar, request, base_href, caller_id)?;
 
-        // If depth > 0, include event resources
+        // If depth > 0, include event resources — folded per UID
+        // so a recurring event's master + per-instance exception
+        // overrides share ONE D:response (RFC 4791 §4.1 + RFC
+        // 5545 §3.6.1). Pre-fix this loop emitted one D:response
+        // per DB row, and since master + exception share the
+        // same href (base + uid.ics) clients saw a duplicate
+        // href and deduped — the exception appeared to have
+        // vanished.
         if depth != "0" {
-            for event in events {
-                // Write a basic DAV response for each event
-                xml_writer.write_event(Event::Start(BytesStart::new("D:response")))?;
+            for bundle in group_events_by_uid(events) {
+                // The master (sorted first by group_events_by_uid)
+                // supplies the ETag anchor + getlastmodified. If
+                // the bundle is all exceptions (no master row),
+                // fall back to the first exception.
+                let anchor = match bundle.first() {
+                    Some(e) => *e,
+                    None => continue,
+                };
+                let event_href = format!("{}{}.ics", base_href, anchor.ical_uid);
 
-                let event_href = format!("{}{}.ics", base_href, event.ical_uid);
+                xml_writer.write_event(Event::Start(BytesStart::new("D:response")))?;
                 xml_writer.write_event(Event::Start(BytesStart::new("D:href")))?;
                 xml_writer.write_event(Event::Text(BytesText::new(&event_href)))?;
                 xml_writer.write_event(Event::End(BytesEnd::new("D:href")))?;
@@ -957,10 +1071,10 @@ impl CalDavAdapter {
                 // resourcetype (empty for non-collection)
                 xml_writer.write_event(Event::Empty(BytesStart::new("D:resourcetype")))?;
 
-                // getetag
+                // getetag — anchor row's id
                 xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
                 xml_writer
-                    .write_event(Event::Text(BytesText::new(&format!("\"{}\"", event.id))))?;
+                    .write_event(Event::Text(BytesText::new(&format!("\"{}\"", anchor.id))))?;
                 xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
 
                 // getcontenttype
@@ -970,10 +1084,10 @@ impl CalDavAdapter {
                 )))?;
                 xml_writer.write_event(Event::End(BytesEnd::new("D:getcontenttype")))?;
 
-                // getlastmodified
+                // getlastmodified — anchor row's updated_at
                 xml_writer.write_event(Event::Start(BytesStart::new("D:getlastmodified")))?;
                 xml_writer
-                    .write_event(Event::Text(BytesText::new(&event.updated_at.to_rfc2822())))?;
+                    .write_event(Event::Text(BytesText::new(&anchor.updated_at.to_rfc2822())))?;
                 xml_writer.write_event(Event::End(BytesEnd::new("D:getlastmodified")))?;
 
                 xml_writer.write_event(Event::End(BytesEnd::new("D:prop")))?;
@@ -1016,13 +1130,20 @@ impl CalDavAdapter {
             CalDavReportType::SyncCollection { props, .. } => props.clone(),
         };
 
-        // Add responses for events
-        for event in events {
-            // Create the event href based on its UID
-            let href = format!("{}{}.ics", base_href, event.ical_uid);
-
-            // Write event response
-            Self::write_event_response(&mut xml_writer, event, &props, &href)?;
+        // Add responses for events — folded per UID so a
+        // recurring master + per-instance exception overrides
+        // share ONE D:response with all VEVENTs concatenated
+        // into the calendar-data payload (RFC 4791 §4.1). Pre-
+        // fix this loop emitted one D:response per DB row, so
+        // master + exception carried duplicate hrefs and clients
+        // deduped, hiding the exception from the resulting sync.
+        for bundle in group_events_by_uid(events) {
+            let anchor = match bundle.first() {
+                Some(e) => *e,
+                None => continue,
+            };
+            let href = format!("{}{}.ics", base_href, anchor.ical_uid);
+            Self::write_event_response(&mut xml_writer, &bundle, &props, &href)?;
         }
 
         // End multistatus
@@ -1031,13 +1152,22 @@ impl CalDavAdapter {
         Ok(())
     }
 
-    /// Write event properties as a response
+    /// Write a bundle (master + exception overrides sharing a
+    /// UID) as one D:response. The bundle is emitted at one
+    /// href (base + uid.ics); ETag + getlastmodified anchor on
+    /// the first bundle entry (which `group_events_by_uid` puts
+    /// the master at); calendar-data contains every VEVENT.
     fn write_event_response<W: Write>(
         xml_writer: &mut Writer<W>,
-        event: &CalendarEventDto,
+        bundle: &[&CalendarEventDto],
         props: &[QualifiedName],
         href: &str,
     ) -> Result<()> {
+        let anchor = bundle
+            .first()
+            .copied()
+            .expect("write_event_response: bundle must be non-empty (caller guards)");
+
         // Start response element
         xml_writer.write_event(Event::Start(BytesStart::new("D:response")))?;
 
@@ -1054,10 +1184,10 @@ impl CalDavAdapter {
 
         // If no specific props requested, return all common ones
         if props.is_empty() {
-            Self::write_event_standard_props(xml_writer, event)?;
+            Self::write_event_standard_props(xml_writer, anchor, bundle)?;
         } else {
             // Write specifically requested properties
-            Self::write_event_requested_props(xml_writer, event, props)?;
+            Self::write_event_requested_props(xml_writer, anchor, bundle, props)?;
         }
 
         // End prop
@@ -1077,19 +1207,24 @@ impl CalDavAdapter {
         Ok(())
     }
 
-    /// Write standard event properties
+    /// Write standard event properties for a UID bundle.
+    /// `anchor` supplies metadata (ETag, updated_at); `bundle`
+    /// supplies the full calendar-data payload (master + all
+    /// exceptions concatenated into one VCALENDAR).
     fn write_event_standard_props<W: Write>(
         xml_writer: &mut Writer<W>,
-        event: &CalendarEventDto,
+        anchor: &CalendarEventDto,
+        bundle: &[&CalendarEventDto],
     ) -> Result<()> {
         // Common WebDAV properties
 
         // Resource type (empty for non-collection)
         xml_writer.write_event(Event::Empty(BytesStart::new("D:resourcetype")))?;
 
-        // ETag based on updated_at timestamp
+        // ETag anchored on the master (or first exception in
+        // a master-less bundle — pathological state today).
         xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-        xml_writer.write_event(Event::Text(BytesText::new(&format!("\"{}\"", event.id))))?;
+        xml_writer.write_event(Event::Text(BytesText::new(&format!("\"{}\"", anchor.id))))?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
 
         // Content type
@@ -1101,38 +1236,17 @@ impl CalDavAdapter {
 
         // Last modified
         xml_writer.write_event(Event::Start(BytesStart::new("D:getlastmodified")))?;
-        xml_writer.write_event(Event::Text(BytesText::new(&event.updated_at.to_rfc2822())))?;
+        xml_writer.write_event(Event::Text(BytesText::new(&anchor.updated_at.to_rfc2822())))?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:getlastmodified")))?;
 
-        // CalDAV specific properties
-
-        // Calendar data (iCalendar format)
+        // CalDAV calendar-data — the whole bundle emitted as one
+        // VCALENDAR by extracting each row's stored VEVENT chunk
+        // verbatim. Every property (ATTENDEE / VALARM / CATEGORIES
+        // / STATUS / X-* / RECURRENCE-ID on exception rows)
+        // survives because we no longer regenerate from DTO
+        // fields.
         xml_writer.write_event(Event::Start(BytesStart::new("C:calendar-data")))?;
-        // In a full implementation, we would generate a complete iCalendar component here
-        // For now, we'll just provide a basic example
-        let ical_data = format!(
-            "BEGIN:VCALENDAR\r\n\
-            VERSION:2.0\r\n\
-            PRODID:-//OxiCloud//NONSGML Calendar//EN\r\n\
-            BEGIN:VEVENT\r\n\
-            UID:{}\r\n\
-            SUMMARY:{}\r\n\
-            DTSTART:{}\r\n\
-            DTEND:{}\r\n\
-            {}\
-            DTSTAMP:{}\r\n\
-            END:VEVENT\r\n\
-            END:VCALENDAR\r\n",
-            event.ical_uid,
-            event.summary.replace("\n", "\\n"),
-            event.start_time.format("%Y%m%dT%H%M%SZ"),
-            event.end_time.format("%Y%m%dT%H%M%SZ"),
-            event
-                .rrule
-                .as_ref()
-                .map_or("".to_string(), |r| format!("RRULE:{}\r\n", r)),
-            event.updated_at.format("%Y%m%dT%H%M%SZ"),
-        );
+        let ical_data = bundle_to_calendar_body(bundle);
         xml_writer.write_event(Event::Text(BytesText::new(&ical_data)))?;
         xml_writer.write_event(Event::End(BytesEnd::new("C:calendar-data")))?;
 
@@ -1142,7 +1256,8 @@ impl CalDavAdapter {
     /// Write requested event properties
     fn write_event_requested_props<W: Write>(
         xml_writer: &mut Writer<W>,
-        event: &CalendarEventDto,
+        anchor: &CalendarEventDto,
+        bundle: &[&CalendarEventDto],
         props: &[QualifiedName],
     ) -> Result<()> {
         for prop in props {
@@ -1154,7 +1269,7 @@ impl CalDavAdapter {
                 ("DAV:", "getetag") => {
                     xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
                     xml_writer
-                        .write_event(Event::Text(BytesText::new(&format!("\"{}\"", event.id))))?;
+                        .write_event(Event::Text(BytesText::new(&format!("\"{}\"", anchor.id))))?;
                     xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
                 }
                 ("DAV:", "getcontenttype") => {
@@ -1166,39 +1281,18 @@ impl CalDavAdapter {
                 }
                 ("DAV:", "getlastmodified") => {
                     xml_writer.write_event(Event::Start(BytesStart::new("D:getlastmodified")))?;
-                    xml_writer
-                        .write_event(Event::Text(BytesText::new(&event.updated_at.to_rfc2822())))?;
+                    xml_writer.write_event(Event::Text(BytesText::new(
+                        &anchor.updated_at.to_rfc2822(),
+                    )))?;
                     xml_writer.write_event(Event::End(BytesEnd::new("D:getlastmodified")))?;
                 }
 
-                // CalDAV namespace properties
+                // CalDAV namespace properties — calendar-data is
+                // the whole bundle, master + exceptions in one
+                // VCALENDAR served from stored ical_data.
                 ("urn:ietf:params:xml:ns:caldav", "calendar-data") => {
                     xml_writer.write_event(Event::Start(BytesStart::new("C:calendar-data")))?;
-                    // In a full implementation, we would generate a complete iCalendar component here
-                    // For now, we'll just provide a basic example
-                    let ical_data = format!(
-                        "BEGIN:VCALENDAR\r\n\
-                        VERSION:2.0\r\n\
-                        PRODID:-//OxiCloud//NONSGML Calendar//EN\r\n\
-                        BEGIN:VEVENT\r\n\
-                        UID:{}\r\n\
-                        SUMMARY:{}\r\n\
-                        DTSTART:{}\r\n\
-                        DTEND:{}\r\n\
-                        {}\
-                        DTSTAMP:{}\r\n\
-                        END:VEVENT\r\n\
-                        END:VCALENDAR\r\n",
-                        event.ical_uid,
-                        event.summary.replace("\n", "\\n"),
-                        event.start_time.format("%Y%m%dT%H%M%SZ"),
-                        event.end_time.format("%Y%m%dT%H%M%SZ"),
-                        event
-                            .rrule
-                            .as_ref()
-                            .map_or("".to_string(), |r| format!("RRULE:{}\r\n", r)),
-                        event.updated_at.format("%Y%m%dT%H%M%SZ"),
-                    );
+                    let ical_data = bundle_to_calendar_body(bundle);
                     xml_writer.write_event(Event::Text(BytesText::new(&ical_data)))?;
                     xml_writer.write_event(Event::End(BytesEnd::new("C:calendar-data")))?;
                 }
@@ -1327,6 +1421,201 @@ impl CalDavAdapter {
 // ─────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod bundle_helper_tests {
+    use super::*;
+
+    /// One DTO builder for all tests in this module — carries
+    /// enough state (uid, recurrence_id, ical_data) for both the
+    /// grouping tests and the bundle-body tests.
+    fn dto(uid: &str, is_exception: bool, ical: &str) -> CalendarEventDto {
+        use chrono::Utc;
+        CalendarEventDto {
+            id: "row-".to_string() + uid,
+            calendar_id: "cal".to_string(),
+            summary: "s".to_string(),
+            description: None,
+            location: None,
+            start_time: Utc::now(),
+            end_time: Utc::now(),
+            all_day: false,
+            rrule: None,
+            ical_uid: uid.to_string(),
+            recurrence_id: if is_exception { Some(Utc::now()) } else { None },
+            ical_data: ical.to_string(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    // ── extract_vevent_chunk ──────────────────────────────────
+
+    #[test]
+    fn extract_vevent_finds_the_block_inside_vcalendar() {
+        let body = "\
+BEGIN:VCALENDAR\r
+VERSION:2.0\r
+BEGIN:VEVENT\r
+UID:x\r
+DTSTART:20260101T090000Z\r
+END:VEVENT\r
+END:VCALENDAR\r
+";
+        let chunk = extract_vevent_chunk(body).expect("VEVENT present");
+        assert!(chunk.starts_with("BEGIN:VEVENT"));
+        assert!(chunk.contains("UID:x"));
+        assert!(chunk.trim_end().ends_with("END:VEVENT"));
+    }
+
+    #[test]
+    fn extract_vevent_case_insensitive_tags() {
+        // RFC 5545 §3.1: component names are case-insensitive on
+        // read. Real client output is nearly always uppercase but
+        // a lowercase or mixed-case tag mustn't confuse the
+        // splitter.
+        let body = "begin:vcalendar\nbegin:vevent\nuid:x\nend:vevent\nend:vcalendar\n";
+        let chunk = extract_vevent_chunk(body).expect("case-insensitive lookup");
+        assert!(chunk.to_ascii_lowercase().contains("uid:x"));
+    }
+
+    #[test]
+    fn extract_vevent_missing_returns_none() {
+        // A body with only VTIMEZONE (no VEVENT) → None. Caller
+        // uses this to skip malformed rows without crashing the
+        // bundle emitter.
+        let body = "BEGIN:VCALENDAR\r\nBEGIN:VTIMEZONE\r\nEND:VTIMEZONE\r\nEND:VCALENDAR\r\n";
+        assert!(extract_vevent_chunk(body).is_none());
+    }
+
+    #[test]
+    fn extract_vevent_includes_trailing_line_terminator() {
+        // The chunk should end with CRLF so bundle concatenation
+        // produces valid line-separated iCalendar body.
+        let body = "BEGIN:VEVENT\r\nUID:x\r\nEND:VEVENT\r\n";
+        let chunk = extract_vevent_chunk(body).unwrap();
+        assert!(
+            chunk.ends_with("\r\n"),
+            "chunk must retain trailing CRLF for safe concatenation, got {:?}",
+            chunk
+        );
+    }
+
+    // ── group_events_by_uid ───────────────────────────────────
+
+    #[test]
+    fn group_places_master_first_within_each_uid() {
+        // Mixed order: exception first, then master, then a
+        // second exception. Result: [master, exception1, exception2].
+        let ex1 = dto("u1", true, "");
+        let master = dto("u1", false, "");
+        let ex2 = dto("u1", true, "");
+        let events = vec![ex1, master, ex2];
+
+        let grouped = group_events_by_uid(&events);
+        assert_eq!(grouped.len(), 1);
+        assert_eq!(grouped[0].len(), 3);
+        assert!(
+            grouped[0][0].recurrence_id.is_none(),
+            "master (recurrence_id None) must be first per RFC 5545 §3.6.1 convention"
+        );
+        assert!(grouped[0][1].recurrence_id.is_some());
+        assert!(grouped[0][2].recurrence_id.is_some());
+    }
+
+    #[test]
+    fn group_preserves_uid_order_of_first_appearance() {
+        // If the input has UIDs in order [A, B, A], the output's
+        // group order is [A, B] — first-appearance wins.
+        let a1 = dto("A", false, "");
+        let b = dto("B", false, "");
+        let a2 = dto("A", true, "");
+        let events = vec![a1, b, a2];
+
+        let grouped = group_events_by_uid(&events);
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped[0][0].ical_uid, "A");
+        assert_eq!(grouped[0].len(), 2);
+        assert_eq!(grouped[1][0].ical_uid, "B");
+        assert_eq!(grouped[1].len(), 1);
+    }
+
+    #[test]
+    fn group_empty_input_yields_empty_output() {
+        let events: Vec<CalendarEventDto> = vec![];
+        assert!(group_events_by_uid(&events).is_empty());
+    }
+
+    // ── bundle_to_calendar_body ───────────────────────────────
+
+    #[test]
+    fn bundle_body_wraps_all_vevents_in_one_vcalendar() {
+        let master = dto(
+            "u",
+            false,
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:u\r\nSUMMARY:Master\r\nRRULE:FREQ=DAILY;COUNT=3\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        );
+        let exception = dto(
+            "u",
+            true,
+            "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nUID:u\r\nSUMMARY:Override\r\nRECURRENCE-ID:20260103T090000Z\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        );
+        let bundle: Vec<&CalendarEventDto> = vec![&master, &exception];
+
+        let body = bundle_to_calendar_body(&bundle);
+        assert!(body.starts_with("BEGIN:VCALENDAR"));
+        assert!(body.trim_end().ends_with("END:VCALENDAR"));
+        assert_eq!(
+            body.matches("BEGIN:VEVENT").count(),
+            2,
+            "bundle must produce one VEVENT per bundle member"
+        );
+        assert!(body.contains("SUMMARY:Master"));
+        assert!(body.contains("SUMMARY:Override"));
+        assert!(
+            body.contains("RECURRENCE-ID:20260103T090000Z"),
+            "exception RECURRENCE-ID must survive verbatim from stored ical_data"
+        );
+        assert!(
+            body.contains("RRULE:FREQ=DAILY;COUNT=3"),
+            "master RRULE must survive verbatim from stored ical_data"
+        );
+    }
+
+    #[test]
+    fn bundle_body_skips_rows_with_malformed_ical_data() {
+        // Real world defense: a row whose stored ical_data is
+        // corrupt (no VEVENT tag) shouldn't kill the bundle.
+        // Emit the good rows; skip the bad one.
+        let good = dto(
+            "u",
+            false,
+            "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:u\r\nSUMMARY:OK\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        );
+        let bad = dto("u", true, "not-an-ical-body");
+        let bundle: Vec<&CalendarEventDto> = vec![&good, &bad];
+
+        let body = bundle_to_calendar_body(&bundle);
+        assert_eq!(body.matches("BEGIN:VEVENT").count(), 1);
+        assert!(body.contains("SUMMARY:OK"));
+    }
+
+    #[test]
+    fn bundle_body_of_single_row_still_wraps_in_vcalendar() {
+        // A non-recurring event is a bundle of one — output shape
+        // must remain a valid VCALENDAR body.
+        let single = dto(
+            "u",
+            false,
+            "BEGIN:VCALENDAR\r\nBEGIN:VEVENT\r\nUID:u\r\nSUMMARY:Lone\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n",
+        );
+        let bundle: Vec<&CalendarEventDto> = vec![&single];
+        let body = bundle_to_calendar_body(&bundle);
+        assert!(body.starts_with("BEGIN:VCALENDAR"));
+        assert!(body.contains("SUMMARY:Lone"));
+        assert_eq!(body.matches("BEGIN:VEVENT").count(), 1);
+    }
+}
 
 #[cfg(test)]
 mod time_range_parser_tests {

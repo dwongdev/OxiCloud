@@ -95,6 +95,16 @@ pub struct CalendarEventDto {
     /// distinguished by this field represent a recurring master and
     /// its modified occurrence(s) respectively (see #528).
     pub recurrence_id: Option<DateTime<Utc>>,
+    /// Full stored iCalendar body for this row — one VCALENDAR
+    /// containing exactly one VEVENT. Populated at every read
+    /// path from the entity's `ical_data()`. The CalDAV read
+    /// emitters serve this verbatim (extracted + bundled per
+    /// UID) instead of regenerating from the other DTO fields,
+    /// so properties beyond the structured columns
+    /// (ATTENDEE, VALARM, CATEGORIES, RECURRENCE-ID, X-*)
+    /// survive PUT → GET round-trips. See phase-4 read-side
+    /// unification.
+    pub ical_data: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -113,6 +123,7 @@ impl Default for CalendarEventDto {
             rrule: None,
             ical_uid: String::new(),
             recurrence_id: None,
+            ical_data: String::new(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }
@@ -133,6 +144,7 @@ impl From<CalendarEvent> for CalendarEventDto {
             rrule: event.rrule().map(|s| s.to_string()),
             ical_uid: event.ical_uid().to_string(),
             recurrence_id: event.recurrence_id().copied(),
+            ical_data: event.ical_data().to_string(),
             created_at: *event.created_at(),
             updated_at: *event.updated_at(),
         }

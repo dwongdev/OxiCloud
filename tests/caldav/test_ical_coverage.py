@@ -12,16 +12,13 @@ DTSTART / DTEND / DESCRIPTION / LOCATION / RRULE / DTSTAMP /
 CREATED / LAST-MODIFIED). Anything not in that list is silently
 dropped even though the original `ical_data` is stored intact.
 
-Tests split into two groups:
-
-  * **Sanity** — properties the server emits on GET; they must
-    round-trip. Regressions here would be genuine server bugs.
-
-  * **xfail (documented gaps)** — properties the server currently
-    drops. `@pytest.mark.xfail(strict=False)` lets the suite stay
-    green while making the gap visible in the pytest summary. If
-    a future server fix makes one of these survive, pytest
-    reports it as `XPASS` — an alert to remove the marker.
+Every test is a strict round-trip pin: PUT a vCalendar body
+carrying the property, GET the URL, assert the property is
+present in the response. Post-phase-4 the emitter serves each
+row's stored `ical_data` verbatim (folded per UID), so a
+regression on any property here means either the storage
+layer stopped preserving ical_data OR the emitter reverted
+to DTO-field regeneration.
 """
 
 from __future__ import annotations
@@ -30,7 +27,6 @@ import textwrap
 import uuid
 
 import caldav
-import pytest
 
 
 # ─────────────────────────────────────────────────────────────
@@ -151,24 +147,16 @@ def test_uid_and_dtstamp_are_preserved(fresh_calendar: caldav.Calendar) -> None:
 
 
 # ─────────────────────────────────────────────────────────────
-# Documented gaps — properties the server currently drops on
-# GET. `xfail(strict=False)` means "expected to fail; don't fail
-# the suite, but flag XPASS if it starts passing". When the
-# read-side fix lands, remove the marker.
+# Extended round-trips — properties beyond the DTO-structured
+# columns. Post-phase-4 the emitter serves each row's stored
+# `ical_data` verbatim (folded per UID), so ATTENDEE, ORGANIZER,
+# CATEGORIES, STATUS+TRANSP, VALARM (nested), custom X-* all
+# survive PUT → GET. A regression on any of these means either
+# storage stopped preserving ical_data OR the emitter reverted
+# to DTO regeneration.
 # ─────────────────────────────────────────────────────────────
 
-_EMITTER_GAP_REASON = (
-    "GET regenerates the body from DTO fields via write_vevent "
-    "(caldav_handler.rs:~770) which only emits UID / SUMMARY / "
-    "DTSTART / DTEND / DESCRIPTION / LOCATION / RRULE / DTSTAMP / "
-    "CREATED / LAST-MODIFIED. Every other iCal property is stored "
-    "in ical_data on the row but silently dropped on read. "
-    "Fix path: either serve ical_data verbatim on GET, or extend "
-    "the DTO to carry the full property set."
-)
 
-
-@pytest.mark.xfail(reason=_EMITTER_GAP_REASON, strict=False)
 def test_attendee_survives_round_trip(fresh_calendar: caldav.Calendar) -> None:
     uid = f"cov-attendee-{uuid.uuid4().hex[:8]}"
     body = _minimal_event(
@@ -185,7 +173,6 @@ def test_attendee_survives_round_trip(fresh_calendar: caldav.Calendar) -> None:
     assert "alice@example.com" in fetched
 
 
-@pytest.mark.xfail(reason=_EMITTER_GAP_REASON, strict=False)
 def test_organizer_survives_round_trip(fresh_calendar: caldav.Calendar) -> None:
     uid = f"cov-organizer-{uuid.uuid4().hex[:8]}"
     body = _minimal_event(
@@ -199,7 +186,6 @@ def test_organizer_survives_round_trip(fresh_calendar: caldav.Calendar) -> None:
     assert "bob@example.com" in fetched
 
 
-@pytest.mark.xfail(reason=_EMITTER_GAP_REASON, strict=False)
 def test_categories_survive_round_trip(fresh_calendar: caldav.Calendar) -> None:
     uid = f"cov-cats-{uuid.uuid4().hex[:8]}"
     body = _minimal_event(
@@ -213,7 +199,6 @@ def test_categories_survive_round_trip(fresh_calendar: caldav.Calendar) -> None:
     assert "ENGINEERING" in fetched
 
 
-@pytest.mark.xfail(reason=_EMITTER_GAP_REASON, strict=False)
 def test_status_and_transp_survive_round_trip(
     fresh_calendar: caldav.Calendar,
 ) -> None:
@@ -233,7 +218,6 @@ def test_status_and_transp_survive_round_trip(
     assert "TRANSP:TRANSPARENT" in fetched
 
 
-@pytest.mark.xfail(reason=_EMITTER_GAP_REASON, strict=False)
 def test_valarm_survives_round_trip(fresh_calendar: caldav.Calendar) -> None:
     """VALARM is a nested sub-component of VEVENT (RFC 5545 §3.6.6)
     and drives every "remind me 15 min before" popup. It lives
@@ -268,7 +252,6 @@ def test_valarm_survives_round_trip(fresh_calendar: caldav.Calendar) -> None:
     assert "TRIGGER:-PT15M" in fetched
 
 
-@pytest.mark.xfail(reason=_EMITTER_GAP_REASON, strict=False)
 def test_custom_x_property_survives_round_trip(
     fresh_calendar: caldav.Calendar,
 ) -> None:

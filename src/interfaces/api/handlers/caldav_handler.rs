@@ -26,7 +26,10 @@ use percent_encoding::percent_decode_str;
 use std::fmt::Write;
 use std::sync::Arc;
 
-use crate::application::adapters::caldav_adapter::{CalDavAdapter, CalDavReportType};
+use crate::application::adapters::caldav_adapter::{
+    CalDavAdapter, CalDavReportType, bundle_to_calendar_body, extract_vevent_chunk,
+    group_events_by_uid,
+};
 use crate::application::adapters::uid_from_multiget_href;
 use crate::application::adapters::webdav_adapter::{PropFindRequest, PropFindType};
 use crate::application::dtos::calendar_dto::{
@@ -683,7 +686,13 @@ async fn handle_get(
     let calendar_id = parts[0];
 
     if parts.len() < 2 {
-        // GET on calendar collection
+        // GET on calendar collection — return all events, folded
+        // per UID so master + exception overrides live in ONE
+        // VCALENDAR body per resource (RFC 4791 §4.1 + RFC 5545
+        // §3.6.1). Serves each row's stored `ical_data` verbatim
+        // via `bundle_to_calendar_body`; VTIMEZONE / VALARM /
+        // ATTENDEE / CATEGORIES / X-* survive because we no
+        // longer regenerate the body from DTO fields.
         let events = calendar_service
             .list_events(calendar_id, None, None, user.id)
             .await
@@ -703,83 +712,87 @@ async fn handle_get(
             .body(Body::from(ical))
             .unwrap())
     } else {
-        // GET on individual event — indexed lookup by iCalendar UID.
+        // GET on individual event resource — fetch ALL rows for
+        // this UID (master + any exception overrides) and emit
+        // ONE calendar-object-resource containing every VEVENT.
+        // This is the phase-4 fix: `get_event_by_ical_uid` is
+        // master-only; using it here made exceptions invisible
+        // to clients and their next-PUT would silently drop the
+        // stored exception rows.
         let event_file = parts[1];
         let ical_uid = event_file.trim_end_matches(".ics");
 
-        let event = calendar_service
-            .get_event_by_ical_uid(calendar_id, ical_uid, user.id)
+        let bundle = calendar_service
+            .get_events_by_ical_uids(calendar_id, &[ical_uid.to_string()], user.id)
             .await
-            .map_err(AppError::from)?
-            .ok_or_else(|| AppError::not_found(format!("Event not found: {}", ical_uid)))?;
+            .map_err(AppError::from)?;
 
-        let ical = generate_event_ical(&event);
+        if bundle.is_empty() {
+            return Err(AppError::not_found(format!(
+                "Event not found: {}",
+                ical_uid
+            )));
+        }
+
+        // Group so the master (recurrence_id None) sits first,
+        // then flatten for the bundle emitter. ETag anchors on
+        // the first row of the first group — that's the master
+        // for a recurring event, or the sole row for a
+        // non-recurring one. Stable across bundle contents so
+        // If-Match on subsequent PUTs keys off the master's id.
+        let grouped = group_events_by_uid(&bundle);
+        let flat: Vec<&_> = grouped.into_iter().flatten().collect();
+        let etag_source = flat.first().map(|e| e.id.clone()).unwrap_or_default();
+        let ical = bundle_to_calendar_body(&flat);
 
         Ok(Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/calendar; charset=utf-8")
-            .header(header::ETAG, format!("\"{}\"", event.id))
+            .header(header::ETAG, format!("\"{}\"", etag_source))
             .body(Body::from(ical))
             .unwrap())
     }
 }
 
+/// Emit a full VCALENDAR body for the entire calendar, with rows
+/// grouped by UID so each recurring event's master + exception
+/// overrides live under one iCalendar resource. Each row's stored
+/// `ical_data` VEVENT chunk is served verbatim.
 fn generate_full_calendar_ical(
     calendar_name: &str,
     events: &[crate::application::dtos::calendar_dto::CalendarEventDto],
 ) -> String {
-    // Pre-estimate: ~200 bytes header + ~320 bytes per event
+    // Pre-estimate: ~200 bytes header + ~320 bytes per event.
     let mut buf = String::with_capacity(256 + events.len() * 320);
     let _ = write!(
         buf,
         "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//OxiCloud//NONSGML Calendar//EN\r\nX-WR-CALNAME:{}\r\n",
         calendar_name
     );
-    for event in events {
-        write_vevent(&mut buf, event);
+    // Group + append each row's stored VEVENT chunk. Malformed
+    // rows are silently skipped (defensive) — the bulk-GET body
+    // survives the rest.
+    for group in group_events_by_uid(events) {
+        for event in group {
+            if let Some(chunk) = extract_vevent_chunk(&event.ical_data) {
+                buf.push_str(chunk);
+                if !buf.ends_with('\n') {
+                    buf.push_str("\r\n");
+                }
+            }
+        }
     }
     buf.push_str("END:VCALENDAR\r\n");
     buf
 }
 
-fn generate_event_ical(event: &crate::application::dtos::calendar_dto::CalendarEventDto) -> String {
-    let mut buf = String::with_capacity(512);
-    buf.push_str("BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//OxiCloud//NONSGML Calendar//EN\r\n");
-    write_vevent(&mut buf, event);
-    buf.push_str("END:VCALENDAR\r\n");
-    buf
-}
-
-/// Writes a VEVENT block directly into `buf` — zero intermediate allocations.
-fn write_vevent(
-    buf: &mut String,
-    event: &crate::application::dtos::calendar_dto::CalendarEventDto,
-) {
-    let _ = write!(
-        buf,
-        "BEGIN:VEVENT\r\nUID:{}\r\nSUMMARY:{}\r\nDTSTART:{}\r\nDTEND:{}\r\n",
-        event.ical_uid,
-        event.summary.replace('\n', "\\n"),
-        event.start_time.format("%Y%m%dT%H%M%SZ"),
-        event.end_time.format("%Y%m%dT%H%M%SZ"),
-    );
-    if let Some(ref desc) = event.description {
-        let _ = write!(buf, "DESCRIPTION:{}\r\n", desc.replace('\n', "\\n"));
-    }
-    if let Some(ref loc) = event.location {
-        let _ = write!(buf, "LOCATION:{}\r\n", loc);
-    }
-    if let Some(ref rrule) = event.rrule {
-        let _ = write!(buf, "RRULE:{}\r\n", rrule);
-    }
-    let _ = write!(
-        buf,
-        "DTSTAMP:{}\r\nCREATED:{}\r\nLAST-MODIFIED:{}\r\nEND:VEVENT\r\n",
-        event.updated_at.format("%Y%m%dT%H%M%SZ"),
-        event.created_at.format("%Y%m%dT%H%M%SZ"),
-        event.updated_at.format("%Y%m%dT%H%M%SZ"),
-    );
-}
+// NOTE: the pre-phase-4 `generate_event_ical` + `write_vevent`
+// helpers were removed. They regenerated the response body from
+// DTO fields, which (a) silently dropped every property outside
+// the DTO surface (ATTENDEE, VALARM, CATEGORIES, STATUS, X-*)
+// and (b) never emitted RECURRENCE-ID on exception rows. The
+// `bundle_to_calendar_body` path replaces both by serving each
+// row's stored `ical_data` verbatim.
 
 // ─── DELETE ──────────────────────────────────────────────────────────
 

@@ -173,10 +173,16 @@ HTTP 201
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 7 – GET the master. It must STILL be the master (with
-# RRULE + original SUMMARY). Pre-fix the exception would have
-# clobbered this row and Step 7 would see the exception's
-# SUMMARY ("… rescheduled") without the RRULE.
+# Step 7 – GET the URL — must return the FULL calendar-object-
+# resource: master VEVENT (with RRULE + original SUMMARY) AND
+# the exception VEVENT (with RECURRENCE-ID + rescheduled
+# SUMMARY) concatenated in ONE VCALENDAR body. This is the
+# phase-4 read-side contract per RFC 4791 §4.1 + RFC 5545
+# §3.6.1 — one URL per UID, one VCALENDAR containing every
+# component.
+#
+# Pre-phase-4 this GET returned ONLY the master and clients
+# never saw the exception, so their next-PUT dropped it.
 # ─────────────────────────────────────────────────────────────
 GET {{base_url}}/caldav/{{calendar_id}}/daily-e2e-528.ics
 Authorization: Bearer {{admin_token}}
@@ -185,7 +191,8 @@ HTTP 200
 [Asserts]
 body contains "FREQ=DAILY;COUNT=10"
 body contains "SUMMARY:Daily standup"
-body not contains "SUMMARY:Daily standup — rescheduled"
+body contains "SUMMARY:Daily standup — rescheduled"
+body contains "RECURRENCE-ID:20260103T090000Z"
 
 
 # ─────────────────────────────────────────────────────────────
@@ -216,9 +223,15 @@ HTTP 204
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 9 – Master survives the exception update. Pre-fix this
-# would fail: the old delete-by-UID-then-insert path would
-# have removed the master when the exception-only PUT landed.
+# Step 9 – After the exception-only PUT: bundled GET returns
+# the master (unchanged, still carries RRULE + original
+# SUMMARY) AND the newly-updated exception (SUMMARY now
+# "rescheduled AGAIN" from Step 8).
+#
+# Pre-phase-3 the exception-only PUT wiped the master row.
+# Pre-phase-4 the master survived but the exception was
+# invisible in the GET body.
+# Post-phase-4: both survive, both visible.
 # ─────────────────────────────────────────────────────────────
 GET {{base_url}}/caldav/{{calendar_id}}/daily-e2e-528.ics
 Authorization: Bearer {{admin_token}}
@@ -227,7 +240,8 @@ HTTP 200
 [Asserts]
 body contains "FREQ=DAILY;COUNT=10"
 body contains "SUMMARY:Daily standup"
-body not contains "SUMMARY:Daily standup — rescheduled"
+body contains "SUMMARY:Daily standup — rescheduled AGAIN"
+body contains "RECURRENCE-ID:20260103T090000Z"
 
 
 # ─────────────────────────────────────────────────────────────
