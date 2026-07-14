@@ -30,10 +30,11 @@ impl CalendarEventRepository for CalendarEventPgRepository {
         sqlx::query(
             r#"
             INSERT INTO caldav.calendar_events (
-                id, calendar_id, summary, description, location, start_time, end_time, 
-                all_day, rrule, created_at, updated_at, ical_uid, ical_data
+                id, calendar_id, summary, description, location, start_time, end_time,
+                all_day, rrule, created_at, updated_at, ical_uid, ical_data,
+                recurrence_id
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
             "#,
         )
         .bind(event.id())
@@ -49,6 +50,10 @@ impl CalendarEventRepository for CalendarEventPgRepository {
         .bind(event.updated_at())
         .bind(event.ical_uid())
         .bind(event.ical_data())
+        // NULL on masters, non-NULL on exception overrides — see the
+        // `20260913000001_calendar_events_recurrence_id.sql` migration
+        // and `docs/architecture/rebac-authorization.md` follow-up doc.
+        .bind(event.recurrence_id().copied())
         .execute(&*self.pool)
         .await
         .map_err(|e| {
@@ -68,16 +73,17 @@ impl CalendarEventRepository for CalendarEventPgRepository {
         sqlx::query(
             r#"
             UPDATE caldav.calendar_events
-            SET summary = $1, 
-                description = $2, 
-                location = $3, 
-                start_time = $4, 
-                end_time = $5, 
-                all_day = $6, 
+            SET summary = $1,
+                description = $2,
+                location = $3,
+                start_time = $4,
+                end_time = $5,
+                all_day = $6,
                 rrule = $7,
                 ical_data = $8,
-                updated_at = $9
-            WHERE id = $10
+                recurrence_id = $9,
+                updated_at = $10
+            WHERE id = $11
             "#,
         )
         .bind(event.summary())
@@ -88,6 +94,7 @@ impl CalendarEventRepository for CalendarEventPgRepository {
         .bind(event.all_day())
         .bind(event.rrule())
         .bind(event.ical_data())
+        .bind(event.recurrence_id().copied())
         .bind(now)
         .bind(event.id())
         .execute(&*self.pool)
@@ -126,12 +133,12 @@ impl CalendarEventRepository for CalendarEventPgRepository {
     ) -> CalendarEventRepositoryResult<Vec<CalendarEvent>> {
         let rows = sqlx::query(
             r#"
-            SELECT 
-                id, calendar_id, summary, description, location, 
-                start_time, end_time, all_day, rrule, 
-                created_at, updated_at, ical_uid, ical_data
+            SELECT
+                id, calendar_id, summary, description, location,
+                start_time, end_time, all_day, rrule,
+                created_at, updated_at, ical_uid, ical_data, recurrence_id
             FROM caldav.calendar_events
-            WHERE calendar_id = $1 
+            WHERE calendar_id = $1
               AND (
                   (start_time >= $2 AND start_time < $3) OR
                   (end_time > $2 AND end_time <= $3) OR
@@ -152,7 +159,7 @@ impl CalendarEventRepository for CalendarEventPgRepository {
 
         let mut events = Vec::new();
         for row in rows {
-            let event = CalendarEvent::with_id(
+            let mut event = CalendarEvent::with_id(
                 row.get("id"),
                 row.get("calendar_id"),
                 row.get("summary"),
@@ -170,6 +177,11 @@ impl CalendarEventRepository for CalendarEventPgRepository {
             .map_err(|e| {
                 DomainError::database_error(format!("Error creating calendar event: {}", e))
             })?;
+            // Rehydrate the RECURRENCE-ID after entity construction —
+            // `with_id` initialises to `None` because the field predates
+            // the rest of the constructor signature (#528). Keeping
+            // `with_id` unchanged avoids ripple-changing every caller.
+            event.set_recurrence_id(row.get::<Option<DateTime<Utc>>, _>("recurrence_id"));
             events.push(event);
         }
 
@@ -179,10 +191,10 @@ impl CalendarEventRepository for CalendarEventPgRepository {
     async fn find_event_by_id(&self, id: &Uuid) -> CalendarEventRepositoryResult<CalendarEvent> {
         let row = sqlx::query(
             r#"
-            SELECT 
-                id, calendar_id, summary, description, location, 
-                start_time, end_time, all_day, rrule, 
-                created_at, updated_at, ical_uid, ical_data
+            SELECT
+                id, calendar_id, summary, description, location,
+                start_time, end_time, all_day, rrule,
+                created_at, updated_at, ical_uid, ical_data, recurrence_id
             FROM caldav.calendar_events
             WHERE id = $1
             "#,
@@ -195,11 +207,7 @@ impl CalendarEventRepository for CalendarEventPgRepository {
         })?
         .ok_or_else(|| DomainError::not_found("Calendar Event", id.to_string()))?;
 
-        // In a real implementation, we would build a complete CalendarEvent object
-        // For simplicity, we create an object with default values to
-        // demonstrate the approach without macros
-
-        let event = CalendarEvent::with_id(
+        let mut event = CalendarEvent::with_id(
             row.get("id"),
             row.get("calendar_id"),
             row.get("summary"),
@@ -217,6 +225,7 @@ impl CalendarEventRepository for CalendarEventPgRepository {
         .map_err(|e| {
             DomainError::database_error(format!("Error creating calendar event: {}", e))
         })?;
+        event.set_recurrence_id(row.get::<Option<DateTime<Utc>>, _>("recurrence_id"));
 
         Ok(event)
     }
@@ -227,10 +236,10 @@ impl CalendarEventRepository for CalendarEventPgRepository {
     ) -> CalendarEventRepositoryResult<Vec<CalendarEvent>> {
         let rows = sqlx::query(
             r#"
-            SELECT 
-                id, calendar_id, summary, description, location, 
-                start_time, end_time, all_day, rrule, 
-                created_at, updated_at, ical_uid, ical_data
+            SELECT
+                id, calendar_id, summary, description, location,
+                start_time, end_time, all_day, rrule,
+                created_at, updated_at, ical_uid, ical_data, recurrence_id
             FROM caldav.calendar_events
             WHERE calendar_id = $1
             ORDER BY start_time
@@ -245,7 +254,7 @@ impl CalendarEventRepository for CalendarEventPgRepository {
 
         let mut events = Vec::new();
         for row in rows {
-            let event = CalendarEvent::with_id(
+            let mut event = CalendarEvent::with_id(
                 row.get("id"),
                 row.get("calendar_id"),
                 row.get("summary"),
@@ -263,6 +272,7 @@ impl CalendarEventRepository for CalendarEventPgRepository {
             .map_err(|e| {
                 DomainError::database_error(format!("Error creating calendar event: {}", e))
             })?;
+            event.set_recurrence_id(row.get::<Option<DateTime<Utc>>, _>("recurrence_id"));
             events.push(event);
         }
 
@@ -278,10 +288,10 @@ impl CalendarEventRepository for CalendarEventPgRepository {
 
         let rows = sqlx::query(
             r#"
-            SELECT 
-                id, calendar_id, summary, description, location, 
-                start_time, end_time, all_day, rrule, 
-                created_at, updated_at, ical_uid, ical_data
+            SELECT
+                id, calendar_id, summary, description, location,
+                start_time, end_time, all_day, rrule,
+                created_at, updated_at, ical_uid, ical_data, recurrence_id
             FROM caldav.calendar_events
             WHERE calendar_id = $1 AND summary ILIKE $2
             ORDER BY start_time
@@ -297,7 +307,7 @@ impl CalendarEventRepository for CalendarEventPgRepository {
 
         let mut events = Vec::new();
         for row in rows {
-            let event = CalendarEvent::with_id(
+            let mut event = CalendarEvent::with_id(
                 row.get("id"),
                 row.get("calendar_id"),
                 row.get("summary"),
@@ -315,6 +325,7 @@ impl CalendarEventRepository for CalendarEventPgRepository {
             .map_err(|e| {
                 DomainError::database_error(format!("Error creating calendar event: {}", e))
             })?;
+            event.set_recurrence_id(row.get::<Option<DateTime<Utc>>, _>("recurrence_id"));
             events.push(event);
         }
 
@@ -326,14 +337,21 @@ impl CalendarEventRepository for CalendarEventPgRepository {
         calendar_id: &Uuid,
         ical_uid: &str,
     ) -> CalendarEventRepositoryResult<Option<CalendarEvent>> {
+        // Phase 2 note: this method looks up "an event with this UID"
+        // — the SELECT still isn't filtered on `recurrence_id IS NULL`
+        // because the phase-3 handler routing (which will distinguish
+        // master vs. exception override at PUT time) is where the
+        // filter actually needs to live. For phase 2 the invariant is
+        // enforced only at INSERT time via the two partial unique
+        // indexes; reads see whatever's there.
         let row_opt = sqlx::query(
             r#"
-            SELECT 
-                id, calendar_id, summary, description, location, 
-                start_time, end_time, all_day, rrule, 
-                created_at, updated_at, ical_uid, ical_data
+            SELECT
+                id, calendar_id, summary, description, location,
+                start_time, end_time, all_day, rrule,
+                created_at, updated_at, ical_uid, ical_data, recurrence_id
             FROM caldav.calendar_events
-            WHERE calendar_id = $1 AND ical_uid = $2
+            WHERE calendar_id = $1 AND ical_uid = $2 AND recurrence_id IS NULL
             "#,
         )
         .bind(calendar_id)
@@ -346,7 +364,7 @@ impl CalendarEventRepository for CalendarEventPgRepository {
 
         match row_opt {
             Some(row) => {
-                let event = CalendarEvent::with_id(
+                let mut event = CalendarEvent::with_id(
                     row.get("id"),
                     row.get("calendar_id"),
                     row.get("summary"),
@@ -364,6 +382,7 @@ impl CalendarEventRepository for CalendarEventPgRepository {
                 .map_err(|e| {
                     DomainError::database_error(format!("Error creating calendar event: {}", e))
                 })?;
+                event.set_recurrence_id(row.get::<Option<DateTime<Utc>>, _>("recurrence_id"));
                 Ok(Some(event))
             }
             None => Ok(None),
@@ -375,12 +394,18 @@ impl CalendarEventRepository for CalendarEventPgRepository {
         calendar_id: &Uuid,
         ical_uids: &[String],
     ) -> CalendarEventRepositoryResult<Vec<CalendarEvent>> {
+        // Batch UID lookup returns ALL rows for the given UIDs, both
+        // masters and exception overrides. Callers that want just
+        // masters filter downstream. Same phase-2 policy as the
+        // single-UID variant — read-side filtering is a phase-3
+        // concern; the DB unique indexes are what guarantee at most
+        // one master + N distinct exceptions per (calendar, UID).
         let rows = sqlx::query(
             r#"
             SELECT
                 id, calendar_id, summary, description, location,
                 start_time, end_time, all_day, rrule,
-                created_at, updated_at, ical_uid, ical_data
+                created_at, updated_at, ical_uid, ical_data, recurrence_id
             FROM caldav.calendar_events
             WHERE calendar_id = $1 AND ical_uid = ANY($2)
             ORDER BY start_time
@@ -396,7 +421,7 @@ impl CalendarEventRepository for CalendarEventPgRepository {
 
         let mut events = Vec::new();
         for row in rows {
-            let event = CalendarEvent::with_id(
+            let mut event = CalendarEvent::with_id(
                 row.get("id"),
                 row.get("calendar_id"),
                 row.get("summary"),
@@ -414,6 +439,7 @@ impl CalendarEventRepository for CalendarEventPgRepository {
             .map_err(|e| {
                 DomainError::database_error(format!("Error creating calendar event: {}", e))
             })?;
+            event.set_recurrence_id(row.get::<Option<DateTime<Utc>>, _>("recurrence_id"));
             events.push(event);
         }
 

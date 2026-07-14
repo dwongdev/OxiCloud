@@ -51,6 +51,29 @@ pub struct CalendarEvent {
     /// Recurrence rule in iCalendar RRULE format (optional)
     rrule: Option<String>,
 
+    /// RECURRENCE-ID (RFC 5545 §3.8.4.4) — non-NULL on exception
+    /// instances of a recurring event, NULL on the master.
+    ///
+    /// When a client (Thunderbird, Apple Calendar, Gnome Calendar, …)
+    /// modifies a SINGLE occurrence of a recurring event, it sends
+    /// a separate VEVENT that shares the master's UID and carries
+    /// a `RECURRENCE-ID` identifying which occurrence is being
+    /// overridden. That per-instance override lives as its own row
+    /// in `caldav.calendar_events`; the master row keeps NULL here.
+    ///
+    /// Lookup key is `(calendar_id, ical_uid, recurrence_id)` —
+    /// enforced at the DB layer by two partial unique indexes:
+    ///
+    ///   * `(calendar_id, ical_uid) WHERE recurrence_id IS NULL` —
+    ///     at most one master per UID per calendar.
+    ///   * `(calendar_id, ical_uid, recurrence_id) WHERE
+    ///     recurrence_id IS NOT NULL` — at most one override for a
+    ///     given (master, instance) pair.
+    ///
+    /// See AtalayaLabs/OxiCloud#528 for the ticket that motivated
+    /// this field, and `docs/plan/` (future) for the full model.
+    recurrence_id: Option<DateTime<Utc>>,
+
     /// Unique identifier in iCalendar format (used for CalDAV sync)
     ical_uid: String,
 
@@ -140,6 +163,7 @@ impl CalendarEvent {
             end_time,
             all_day,
             rrule,
+            recurrence_id: None,
             ical_uid: Uuid::new_v4().to_string(),
             ical_data,
             created_at: now,
@@ -209,6 +233,7 @@ impl CalendarEvent {
             end_time,
             all_day,
             rrule,
+            recurrence_id: None,
             ical_uid,
             ical_data,
             created_at,
@@ -268,10 +293,7 @@ impl CalendarEvent {
         // and anything else means timed.
         let all_day = dtstart_params
             .get("VALUE")
-            .map(|vs| {
-                vs.iter()
-                    .any(|v| v.eq_ignore_ascii_case("DATE"))
-            })
+            .map(|vs| vs.iter().any(|v| v.eq_ignore_ascii_case("DATE")))
             .unwrap_or(false);
 
         let start_time = Self::parse_ical_datetime(&dtstart_value, all_day).map_err(|e| {
@@ -299,6 +321,26 @@ impl CalendarEvent {
         let ical_uid = Self::extract_ical_property(&ical_data, "UID")
             .unwrap_or_else(|| Uuid::new_v4().to_string());
 
+        // RECURRENCE-ID (RFC 5545 §3.8.4.4). When present, this VEVENT
+        // is an override for a specific occurrence of a recurring
+        // master with the same UID. The parameter tells us whether the
+        // value is a date (all-day master) or datetime (timed master).
+        // A parse failure here downgrades to `None` — the VEVENT still
+        // gets stored, just as a plain event (worst case a client sync
+        // treats it as a new master, which the DB uniqueness will
+        // refuse; better a persistence error than a silent split).
+        let recurrence_id =
+            match Self::extract_ical_property_with_params(&ical_data, "RECURRENCE-ID") {
+                Some((value, params)) => {
+                    let is_date = params
+                        .get("VALUE")
+                        .map(|vs| vs.iter().any(|v| v.eq_ignore_ascii_case("DATE")))
+                        .unwrap_or(false);
+                    Self::parse_ical_datetime(&value, is_date).ok()
+                }
+                None => None,
+            };
+
         let now = Utc::now();
 
         Ok(Self {
@@ -311,6 +353,7 @@ impl CalendarEvent {
             end_time,
             all_day,
             rrule,
+            recurrence_id,
             ical_uid,
             ical_data,
             created_at: now,
@@ -366,6 +409,24 @@ impl CalendarEvent {
     }
 
     /// Returns the event's iCalendar UID
+    /// Returns the RECURRENCE-ID for this event, if any. `None` on
+    /// masters and standalone (non-recurring) events; `Some` on
+    /// exception overrides that target a specific occurrence of a
+    /// recurring master with the same `ical_uid`.
+    pub fn recurrence_id(&self) -> Option<&DateTime<Utc>> {
+        self.recurrence_id.as_ref()
+    }
+
+    /// Set the RECURRENCE-ID on this event. Used by the repository
+    /// layer when reconstructing an entity from a stored row (the
+    /// column is read straight into the field — no re-parse of the
+    /// ical_data body). Passing `None` clears the marker, promoting
+    /// an exception back to a plain event.
+    pub fn set_recurrence_id(&mut self, recurrence_id: Option<DateTime<Utc>>) {
+        self.recurrence_id = recurrence_id;
+        self.updated_at = Utc::now();
+    }
+
     pub fn ical_uid(&self) -> &str {
         &self.ical_uid
     }
@@ -591,8 +652,7 @@ impl CalendarEvent {
             self.start_time = start_time;
         }
 
-        if let Some((value, _params)) =
-            Self::extract_ical_property_with_params(&ical_data, "DTEND")
+        if let Some((value, _params)) = Self::extract_ical_property_with_params(&ical_data, "DTEND")
             && let Ok(end_time) = Self::parse_ical_datetime(&value, all_day)
         {
             self.end_time = end_time;
@@ -1059,7 +1119,7 @@ END:VCALENDAR\r
         let ev = parse_ok(RECURRING_WITH_EXCEPTION);
         assert_eq!(ev.summary(), "Daily standup");
         assert_eq!(ev.ical_uid(), "daily-1@oxicloud.test");
-        assert_eq!(ev.rrule().as_deref(), Some("FREQ=DAILY;COUNT=10"));
+        assert_eq!(ev.rrule(), Some("FREQ=DAILY;COUNT=10"));
     }
 
     #[test]
@@ -1120,5 +1180,116 @@ END:VCALENDAR\r
         // The lookup must accept "dtstart" as well as "DTSTART".
         let v = CalendarEvent::extract_ical_property(TIMED_EVENT, "dtstart");
         assert_eq!(v.as_deref(), Some("20260101T120000Z"));
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // Phase 2 — RECURRENCE-ID extraction into the entity
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn master_event_has_no_recurrence_id() {
+        // A plain VEVENT (no RECURRENCE-ID line) should carry a NULL
+        // recurrence_id — that's what marks it as a master in the DB.
+        let ev = parse_ok(TIMED_EVENT);
+        assert!(
+            ev.recurrence_id().is_none(),
+            "master should have recurrence_id = None"
+        );
+    }
+
+    #[test]
+    fn recurring_master_has_no_recurrence_id_even_with_rrule() {
+        // The presence of RRULE on the master does not by itself
+        // populate recurrence_id — only RECURRENCE-ID does. The
+        // exception-instance VEVENT in the same VCALENDAR carries
+        // RECURRENCE-ID; `parse_first_vevent` returns the master, so
+        // we get `None` here. Phase 3 will introduce a `parse_all_events`
+        // helper to surface the exceptions.
+        let ev = parse_ok(RECURRING_WITH_EXCEPTION);
+        assert!(
+            ev.recurrence_id().is_none(),
+            "master with RRULE should still have recurrence_id = None"
+        );
+        assert_eq!(ev.rrule().as_deref(), Some("FREQ=DAILY;COUNT=10"));
+    }
+
+    #[test]
+    fn timed_exception_populates_recurrence_id() {
+        // A standalone exception-override VEVENT (as sent by a client
+        // that's already synced the master and is now modifying one
+        // instance) parses with recurrence_id = the RECURRENCE-ID's
+        // timestamp. This is the phase-2 half of #528 — the value is
+        // preserved through the domain model; phase 3 will use it to
+        // route inserts to their own row.
+        let exception = "\
+BEGIN:VCALENDAR\r
+VERSION:2.0\r
+PRODID:-//OxiCloud test//EN\r
+BEGIN:VEVENT\r
+UID:daily-1@oxicloud.test\r
+DTSTAMP:20260101T100000Z\r
+DTSTART:20260103T110000Z\r
+DTEND:20260103T120000Z\r
+SUMMARY:Daily standup — rescheduled\r
+RECURRENCE-ID:20260103T090000Z\r
+END:VEVENT\r
+END:VCALENDAR\r
+";
+        let ev = parse_ok(exception);
+        let rid = ev
+            .recurrence_id()
+            .expect("exception must have recurrence_id set");
+        assert_eq!(
+            rid.to_rfc3339(),
+            "2026-01-03T09:00:00+00:00",
+            "RECURRENCE-ID must parse to the timed override timestamp"
+        );
+    }
+
+    #[test]
+    fn all_day_exception_populates_recurrence_id_at_midnight() {
+        // RECURRENCE-ID;VALUE=DATE:20260112 — the exact shape #528
+        // flagged. Domain normalises the DATE form to midnight UTC on
+        // the given day so the field's type stays `DateTime<Utc>`.
+        let exception = "\
+BEGIN:VCALENDAR\r
+VERSION:2.0\r
+PRODID:-//OxiCloud test//EN\r
+BEGIN:VEVENT\r
+UID:weekly-allday@oxicloud.test\r
+DTSTAMP:20260101T100000Z\r
+DTSTART;VALUE=DATE:20260113\r
+DTEND;VALUE=DATE:20260114\r
+SUMMARY:Weekly all-day — rescheduled\r
+RECURRENCE-ID;VALUE=DATE:20260112\r
+END:VEVENT\r
+END:VCALENDAR\r
+";
+        let ev = parse_ok(exception);
+        let rid = ev
+            .recurrence_id()
+            .expect("all-day exception must have recurrence_id set");
+        assert_eq!(
+            rid.to_rfc3339(),
+            "2026-01-12T00:00:00+00:00",
+            "all-day RECURRENCE-ID must normalise to 00:00:00 UTC of the target date"
+        );
+    }
+
+    #[test]
+    fn set_recurrence_id_setter_round_trips() {
+        // Repository rehydration path: `with_id` initialises
+        // recurrence_id to None; the repo calls `set_recurrence_id`
+        // with the DB column value. Prove both branches survive the
+        // setter cleanly.
+        let mut ev = parse_ok(TIMED_EVENT);
+        assert!(ev.recurrence_id().is_none());
+
+        let target = Utc.with_ymd_and_hms(2026, 3, 15, 12, 0, 0).unwrap();
+        ev.set_recurrence_id(Some(target));
+        assert_eq!(ev.recurrence_id(), Some(&target));
+
+        ev.set_recurrence_id(None);
+        assert!(ev.recurrence_id().is_none());
     }
 }
