@@ -402,6 +402,9 @@ impl Contact {
     pub fn push_phone(&mut self, p: Phone) {
         self.phone.push(p);
     }
+    pub fn push_address(&mut self, a: Address) {
+        self.address.push(a);
+    }
     pub fn set_email(&mut self, email: Vec<Email>) {
         self.email = email;
     }
@@ -416,6 +419,9 @@ impl Contact {
     }
     pub fn phone_is_empty(&self) -> bool {
         self.phone.is_empty()
+    }
+    pub fn address_is_empty(&self) -> bool {
+        self.address.is_empty()
     }
 
     // --- Consuming methods for ownership transfer ---
