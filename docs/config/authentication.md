@@ -176,9 +176,36 @@ The `error_type` field on 4xx responses lets frontends render specific UX. Codes
 | `RegistrationDomainNotAllowed` | 403 | Email domain outside `OXICLOUD_REGISTRATION_ALLOWED_EMAIL_DOMAINS` |
 | `AccountLocked` | 429 | Too many failed login attempts for (account, IP) — see rate-limit config |
 
+## DAV clients (WebDAV / CalDAV / CardDAV): app passwords only
+
+DAV surfaces at `/webdav/`, `/caldav/`, and `/carddav/` accept HTTP
+Basic Auth **only against app passwords** — the user's regular account
+password is refused on those paths. This is intentional and cannot be
+switched off.
+
+Reasons:
+
+- **Uniformity across account types.** Magic-link-only accounts (email-
+  only signup) and OIDC-linked accounts have no local password to send
+  over Basic Auth. App passwords are the one credential shape that
+  works for every account type.
+- **Revocable and scoped.** An app password can be revoked
+  individually without touching the account password. Losing a phone
+  or rotating a client only affects that client.
+- **Bounded blast radius on phishing / leak.** A leaked account
+  password grants web login (which the SPA can gate with 2FA / step-up
+  in future); an app password grants only the DAV surface it was
+  minted for.
+
+**User workflow:** in the OxiCloud web UI, *Profile → App Passwords →
+Create*, name it, copy the token shown once, and use `username +
+token` in the DAV client. See
+[DAV Client Setup](/guide/dav-client-setup#before-you-start-get-an-app-password).
+
 ## Security Model
 
 - Local passwords hashed with Argon2id
+- DAV surfaces (WebDAV / CalDAV / CardDAV) accept **app passwords only** — the account password is refused on `/webdav/`, `/caldav/`, `/carddav/` by design (see above)
 - Access control is role-based (`admin` and `user`)
 - Refresh tokens support session renewal without forcing frequent re-login
 - Login endpoint uses anti-enumeration response shapes — bad-username and bad-password return the same 403

@@ -13,11 +13,28 @@ https://your-server:8086/webdav/
 HTTP Basic Authentication:
 
 ```
-Authorization: Basic base64(username:password)
+Authorization: Basic base64(username:app_password)
 ```
 
-::: tip
-Always use HTTPS in production — Basic auth sends credentials in every request.
+::: warning Use an app password, NOT your account password
+DAV clients authenticate with an **app password** — a distinct, revocable,
+scoped credential. Your regular OxiCloud account password (used in the
+web login) will always be refused on `/webdav/`, `/caldav/`, and
+`/carddav/`.
+
+Why: app passwords are the only credential that works uniformly across
+all account types (password, magic-link-only, OIDC-linked), and they can
+be revoked individually without touching your account password.
+
+**Generate an app password:** open OxiCloud in your browser, go to
+**Profile → App Passwords**, click *Create*, name it (e.g. "Thunderbird
+laptop"), and copy the token shown once. Use your username + that token
+in every DAV client.
+:::
+
+::: tip HTTPS
+Always use HTTPS in production — Basic auth sends credentials in every
+request.
 :::
 
 ## Supported Methods
@@ -56,7 +73,7 @@ Successful directory listings return `207 Multi-Status`.
 
 ```http
 GET /webdav/projects/document.pdf HTTP/1.1
-Authorization: Basic base64(username:password)
+Authorization: Basic base64(username:app_password)
 ```
 
 ### Upload or replace a file
@@ -99,39 +116,43 @@ DELETE /webdav/projects/document.pdf HTTP/1.1
 1. Open **This PC** → **Map network drive**
 2. Enter: `https://your-server:8086/webdav/`
 3. Check **Connect using different credentials**
-4. Enter your OxiCloud username and password
+4. Enter your OxiCloud username and an [app password](#authentication)
 
 ### macOS Finder
 
 1. **Go** → **Connect to Server** (⌘K)
 2. Enter: `https://your-server:8086/webdav/`
-3. Enter credentials when prompted
+3. Enter your OxiCloud username and an [app password](#authentication)
 
 ### Linux (Nautilus / Files)
 
 1. Open Files → **Other Locations**
 2. In the address bar, type: `davs://your-server:8086/webdav/`
-3. Enter credentials
+3. Enter your OxiCloud username and an [app password](#authentication)
 
 ### Linux (Dolphin / KDE)
 
 1. In the address bar, type: `webdavs://your-server:8086/webdav/`
+2. Enter your OxiCloud username and an [app password](#authentication)
 
 ### Command Line (curl)
 
+`user:apppw` below means your OxiCloud username + the app-password token
+you generated in *Profile → App Passwords* (not your account password).
+
 ```bash
 # List root directory
-curl -u user:pass -X PROPFIND https://your-server:8086/webdav/ \
+curl -u user:apppw -X PROPFIND https://your-server:8086/webdav/ \
   -H "Depth: 1"
 
 # Download a file
-curl -u user:pass https://your-server:8086/webdav/document.pdf -o document.pdf
+curl -u user:apppw https://your-server:8086/webdav/document.pdf -o document.pdf
 
 # Upload a file
-curl -u user:pass -T localfile.txt https://your-server:8086/webdav/remotefile.txt
+curl -u user:apppw -T localfile.txt https://your-server:8086/webdav/remotefile.txt
 
 # Create a folder
-curl -u user:pass -X MKCOL https://your-server:8086/webdav/new-folder/
+curl -u user:apppw -X MKCOL https://your-server:8086/webdav/new-folder/
 ```
 
 ## Streaming PROPFIND
@@ -146,6 +167,11 @@ OxiCloud streams PROPFIND responses, so listing directories with thousands of fi
 
 ## Troubleshooting
 
+- **401 Unauthorized on every request?** You're almost certainly using
+  your account password instead of an app password. Open OxiCloud in
+  your browser → *Profile* → *App Passwords* → *Create*, then use the
+  token shown once (with your username) in your client. See
+  [Authentication](#authentication) above.
 - Always use the `/webdav/` base path
 - Prefer HTTPS because WebDAV uses Basic Authentication
 - On Windows, make sure the `WebClient` service is enabled
