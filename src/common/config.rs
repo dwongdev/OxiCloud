@@ -606,8 +606,9 @@ impl AuthPolicy {
     /// the caller can log-and-skip.
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "permit_magic_link_for_password_users"
-            | "permit-magic-link-for-password-users" => Some(Self::PermitMagicLinkForPasswordUsers),
+            "permit_magic_link_for_password_users" | "permit-magic-link-for-password-users" => {
+                Some(Self::PermitMagicLinkForPasswordUsers)
+            }
             _ => None,
         }
     }
