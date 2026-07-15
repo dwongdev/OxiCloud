@@ -820,7 +820,9 @@
       "include_in_photo_index_help": "نمایش فایل‌های تصویری و ویدیویی این Drive در جدول زمانی عکس‌ها و نقشه مکان‌ها. Drive‌های شخصی پیش‌فرض به‌طور خودکار گنجانده می‌شوند؛ برای Drive‌های مشترکی که واقعاً حاوی عکس هستند (مانند «عکس‌های خانواده») فعال کنید.",
       "include_in_music_index": "گنجاندن در موسیقی",
       "include_in_music_index_help": "گنجاندن فایل‌های صوتی این Drive در کتابخانه موسیقی. Drive‌های شخصی پیش‌فرض به‌طور خودکار گنجانده می‌شوند؛ برای Drive‌های مشترکی که واقعاً حاوی مجموعه موسیقی هستند (مانند «موسیقی خانواده»، «همکاری گروه») فعال کنید.",
-      "implied_by_forbid_sharing": "در حال حاضر توسط «ممنوعیت اشتراک‌گذاری به‌صورت منبع‌به‌منبع» اعمال می‌شود."
+      "implied_by_forbid_sharing": "در حال حاضر توسط «ممنوعیت اشتراک‌گذاری به‌صورت منبع‌به‌منبع» اعمال می‌شود.",
+      "read_only": "Read-only (freeze)",
+      "read_only_help": "Freeze the drive entirely — every mutation is refused (uploads, edits, deletes, renames, sharing, membership changes). Reads and downloads keep working. The trash-retention janitor also pauses. Use for archives, legal holds, or account wind-downs. Only an admin can un-freeze."
     }
   },
   "profile": {
@@ -1172,5 +1174,13 @@
     "banner_title": "فضای ذخیره‌سازی مخصوص خود را دریافت کنید",
     "banner_body": "شما از حساب مهمان استفاده می‌کنید. برای دریافت درایو شخصی و بارگذاری فایل‌ها ارتقا دهید.",
     "banner_cta": "ارتقا"
+  },
+  "drive": {
+    "read_only_banner": {
+      "title": "This drive is read-only",
+      "title_named": "Drive \"{{name}}\" is read-only",
+      "body": "Uploads, edits, deletes, renames, sharing and membership changes are refused. Reads and downloads keep working. Contact an administrator to un-freeze the drive.",
+      "aria": "This drive is read-only"
+    }
   }
 }

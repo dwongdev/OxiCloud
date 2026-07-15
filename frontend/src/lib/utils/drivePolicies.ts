@@ -111,6 +111,15 @@ export const policyDefs: PolicyDef[] = [
 				'admin.drive_policy.include_in_music_index_help',
 				'Include audio files from this drive in the Music library. Default personal drives are opted in automatically; turn on for shared drives that genuinely hold a music collection (e.g. "Family Music", "Band Collaboration").'
 			)
+	},
+	{
+		key: 'read_only',
+		label: () => t('admin.drive_policy.read_only', 'Read-only (freeze)'),
+		help: () =>
+			t(
+				'admin.drive_policy.read_only_help',
+				'Freeze the drive entirely — every mutation is refused (uploads, edits, deletes, renames, sharing, membership changes). Reads and downloads keep working. The trash-retention janitor also pauses. Use for archives, legal holds, or account wind-downs. Only an admin can un-freeze.'
+			)
 	}
 ];
 

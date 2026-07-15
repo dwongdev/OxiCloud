@@ -86,10 +86,18 @@ can do.
 | **Owner list changes** | Locks the Owner roster. After the admin sets the Owners, no Owner can add, remove, or demote another Owner — only the admin can. |
 | **Include in Photos** | Whether photos in this drive appear in the global **Photos** view. Off by default for non-default drives; turn on for shared drives that really are photo libraries (e.g. "Family Photos"). |
 | **Include in Music** | Whether audio files in this drive appear in the global **Music** view. Same shape as photos — off by default, on for drives that are actually music libraries. |
+| **Read-only (freeze)** | Full freeze. When on, **every mutation on the drive is refused** — new files, edits, deletes, renames, sharing, membership changes. Members can still read and download. Nothing on the drive changes until the admin unfreezes it. Use for archives, publications, legal holds, or account wind-downs. |
 
 > **Cross-drive move blocks the UI move, not download-then-re-upload.**
 > If you need to stop content from ever leaving a drive, you need
 > stricter controls (file-egress policies are a future feature).
+
+> **Read-only is a hard freeze.** Even the trash-retention janitor
+> pauses on a read-only drive — items past their normal 30-day
+> lifetime stay in trash until the drive is unfrozen. This is
+> intentional: the whole point of the freeze is that *nothing*
+> changes, including automated cleanup. Once unfrozen, the next
+> retention pass catches up on anything that aged during the freeze.
 
 ## Storage and quota
 
@@ -222,6 +230,15 @@ date** → *Save*. After that date they lose access automatically.
 **Turn off public links or email invitations for a sensitive drive.**
 Ask an admin. They can flip either policy per-drive. Existing links
 stop working when the policy changes; members can't create new ones.
+
+**Freeze a drive (legal hold, archive, wind-down).**
+Ask an admin to set the **Read-only** policy on the drive. From that
+moment, no member — including Owners — can add, edit, delete,
+rename, share, or change membership. Reads and downloads keep
+working. The trash retention janitor also pauses on the drive, so
+items past their normal lifetime stay put. When the hold is over,
+the admin turns Read-only off and mutation resumes exactly where it
+was; retention catches up on the next tick.
 
 **Restore something from a Shared drive's trash.**
 Open the drive → *Trash* → pick the item → *Restore*. (Only Owners

@@ -252,15 +252,35 @@ impl TrashRepository for TrashDbRepository {
     async fn delete_expired_bulk(&self) -> Result<(u64, u64)> {
         let cutoff = Utc::now() - chrono::Duration::days(self.retention_days);
 
+        // The `read_only` policy on a drive is a compliance-grade freeze:
+        // NO state on the drive changes while the policy is on, including
+        // background retention. The `JOIN storage.drives d ... AND
+        // (d.policies->>'read_only')::boolean IS NOT TRUE` filter excludes
+        // frozen drives at SELECT time. Retention clock keeps ticking; on
+        // unfreeze, the next sweep tick catches up on anything past its
+        // TTL. Legal-hold guarantee documented in `docs/plan/drive.md` §8
+        // and `docs/guide/trash.md`.
+        //
+        // `(policies->>'read_only')::boolean IS NOT TRUE` semantics:
+        //   - key missing        → NULL::boolean → IS NOT TRUE → included
+        //   - explicit `false`   → FALSE         → IS NOT TRUE → included
+        //   - explicit `true`    → TRUE          → IS TRUE     → excluded
+        // Correct for both current data (most drives omit the key) and
+        // freshly-frozen drives.
+
         // 1. Bulk-delete expired trashed files in batches.
         //    The PG trigger `trg_files_decrement_blob_ref` automatically
         //    decrements blob ref_count for every deleted row.
         let files_deleted = self
             .delete_expired_batch_loop(
                 "DELETE FROM storage.files
-                  WHERE id IN (SELECT id FROM storage.files
-                                WHERE is_trashed = TRUE AND trashed_at < $1
-                                ORDER BY trashed_at
+                  WHERE id IN (SELECT f.id
+                                 FROM storage.files f
+                                 JOIN storage.drives d ON d.id = f.drive_id
+                                WHERE f.is_trashed = TRUE
+                                  AND f.trashed_at < $1
+                                  AND (d.policies->>'read_only')::boolean IS NOT TRUE
+                                ORDER BY f.trashed_at
                                 LIMIT $2)",
                 cutoff,
                 1_000,
@@ -270,13 +290,19 @@ impl TrashRepository for TrashDbRepository {
         // 2. Bulk-delete expired trashed folders in batches.
         //    FK ON DELETE CASCADE handles descendant folders and their
         //    files, so each row can fan out to an entire subtree — hence
-        //    the smaller batch size.
+        //    the smaller batch size. Same read_only exclusion applies:
+        //    a subtree rooted in a frozen drive isn't purged even if the
+        //    folder's own trashed_at is past retention.
         let folders_deleted = self
             .delete_expired_batch_loop(
                 "DELETE FROM storage.folders
-                  WHERE id IN (SELECT id FROM storage.folders
-                                WHERE is_trashed = TRUE AND trashed_at < $1
-                                ORDER BY trashed_at
+                  WHERE id IN (SELECT f.id
+                                 FROM storage.folders f
+                                 JOIN storage.drives d ON d.id = f.drive_id
+                                WHERE f.is_trashed = TRUE
+                                  AND f.trashed_at < $1
+                                  AND (d.policies->>'read_only')::boolean IS NOT TRUE
+                                ORDER BY f.trashed_at
                                 LIMIT $2)",
                 cutoff,
                 100,

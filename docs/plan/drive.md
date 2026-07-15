@@ -664,7 +664,7 @@ have charged to it). Both steps idempotent.
 
 ### 8. Policies (JSONB, extensible)
 
-Each drive carries a `policies` JSON object. Five known keys for v1:
+Each drive carries a `policies` JSON object. Six known keys for v1:
 
 ```jsonc
 {
@@ -672,7 +672,8 @@ Each drive carries a `policies` JSON object. Five known keys for v1:
     "forbid_external_sharing":  false,  // blocks grants to is_external=true subjects
     "forbid_public_links":      false,  // blocks token-share (anonymous link) creation
     "forbid_cross_drive_move":  false,  // blocks MOVE when src.drive_id != dst.drive_id
-    "forbid_owner_role_change": false   // locks the Owner roster against non-admin callers
+    "forbid_owner_role_change": false,  // locks the Owner roster against non-admin callers
+    "read_only":                false   // full freeze — every mutation refused (user + background)
 }
 ```
 
@@ -705,6 +706,7 @@ Enforcement points (one place per policy — single grep target):
 | `forbid_public_links` | `share_service::create_shared_link` and `grant_handler::create_grant` (when subject is `Token`) |
 | `forbid_cross_drive_move` | `file_management_service::move_file_with_perms` and `folder_service::move_folder_with_perms` — refuse when `src.drive_id != dst.drive_id` |
 | `forbid_owner_role_change` | `DriveManagementService::set_member_role` (refuses Owner-role writes + demotions of current Owners) and `::remove_member` (refuses removals of Owners) — non-admin callers only |
+| `read_only` | `PgAclEngine::check_inner` — every permission except `Read` is refused on File/Folder/Drive resources in the drive (compliance-grade freeze). Background trash-retention purge (`trash_db_repository::delete_expired_bulk`) filters out read-only drives at SELECT time so the JVM-side gate has a matching database-side gate: neither surface can mutate a frozen drive. Cached in `drive_policies_cache` (30 s TTL, invalidated on every policy PATCH). Admin escape hatch remains via `admin_guard` on `PATCH /api/drives/{id}/policies` — bypasses `authz.require` so admin can always un-freeze. |
 
 Default to `false` (everything allowed). Admin opts in per drive via
 `PATCH /api/drives/{id}/policies`.
@@ -730,6 +732,30 @@ Default to `false` (everything allowed). Admin opts in per drive via
   the admin-only `PATCH /policies` carve-out above: once admin sets
   the owners + locks the policies, the configuration is genuinely
   immutable from the owner side.
+- **`read_only`** is the **full freeze** — every permission except
+  `Read` is refused on every resource in the drive, regardless of
+  role. Legal-hold / archive / account-wind-down use case. Two
+  enforcement homes on purpose:
+  - **Foreground** — `PgAclEngine::check_inner` gates every mutating
+    `authz.require` call. Cached in `drive_policies_cache` (subject-
+    independent, 30 s TTL, invalidated on `update_policies`). Emits
+    `event = "authz.denied"` with `reason = "drive_read_only"` before
+    returning false, so operators can filter freeze-caused denials
+    from ordinary role denials.
+  - **Background** — `trash_db_repository::delete_expired_bulk` adds
+    a SQL predicate `AND (d.policies->>'read_only')::boolean IS NOT
+    TRUE` on both the file and folder purge branches. A tick already
+    in flight is allowed to complete (option A on the freeze-mid-tick
+    race — legal-hold uses set the policy *before* the compliance
+    window opens, so the race isn't practical). Blob GC and orphan-
+    upload sweeps are neutral by construction: they operate at the
+    blob / temp-directory layer, not on drive-scoped file rows.
+  - Applies to both personal and shared drives — a user winding down
+    their account, freezing a secondary personal archive, and a
+    shared drive on legal hold all use the same knob.
+  - Admin escape hatch is unaffected: `PATCH /api/drives/{id}/policies`
+    sits behind `admin_guard` at the handler layer and bypasses
+    `authz.require` entirely, so admin can always un-freeze.
 
 #### Future policy keys (out of scope for v1 — but the JSONB shape
 accommodates them without schema migration)

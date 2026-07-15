@@ -404,6 +404,8 @@ pub struct UpdateDrivePoliciesDto {
     pub include_in_photo_index: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_in_music_index: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_only: Option<bool>,
 }
 
 /// `PATCH /api/drives/{id}/policies` — **OxiCloud-admin only** policy
@@ -487,6 +489,9 @@ pub async fn update_drive_policies(
     }
     if let Some(v) = dto.include_in_music_index {
         partial_obj.insert("include_in_music_index".into(), serde_json::Value::Bool(v));
+    }
+    if let Some(v) = dto.read_only {
+        partial_obj.insert("read_only".into(), serde_json::Value::Bool(v));
     }
     // Pass the raw JSON straight through so the JSONB `||` merge in
     // the repo only touches keys the caller supplied. Round-tripping

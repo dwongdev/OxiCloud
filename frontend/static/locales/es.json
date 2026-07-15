@@ -852,7 +852,9 @@
       "include_in_photo_index_help": "Muestra los archivos de imagen y vídeo de este Drive en la línea de tiempo de Fotos y en el mapa de Lugares. Los Drives personales predeterminados se incluyen automáticamente; activa esta opción en Drives compartidos que realmente contengan fotos (p. ej. «Fotos de familia»).",
       "include_in_music_index": "Incluir en Música",
       "include_in_music_index_help": "Incluir los archivos de audio de este Drive en la biblioteca de Música. Los Drives personales predeterminados se incluyen automáticamente; activa esta opción en Drives compartidos que realmente contengan una colección musical (p. ej. «Música de familia», «Colaboración de banda»).",
-      "implied_by_forbid_sharing": "Ya aplicada por «Prohibir compartir por recurso»."
+      "implied_by_forbid_sharing": "Ya aplicada por «Prohibir compartir por recurso».",
+      "read_only": "Solo lectura (congelar)",
+      "read_only_help": "Congelar el Drive por completo — se rechaza cualquier modificación (subidas, ediciones, eliminaciones, renombrados, compartidos, cambios de miembros). La lectura y descarga siguen funcionando. La limpieza automática de la papelera también se pausa. Úsalo para archivos, retenciones legales o cierre de cuentas. Solo un administrador puede descongelar."
     }
   },
   "profile": {
@@ -1187,5 +1189,13 @@
     "banner_title": "Consigue tu propio almacenamiento",
     "banner_body": "Estás usando una cuenta invitada. Actualiza para obtener una unidad personal y empezar a subir archivos.",
     "banner_cta": "Actualizar"
+  },
+  "drive": {
+    "read_only_banner": {
+      "title": "Este Drive es de solo lectura",
+      "title_named": "El Drive «{{name}}» es de solo lectura",
+      "body": "Se rechazan subidas, ediciones, eliminaciones, renombrados, compartidos y cambios de miembros. La lectura y descarga siguen funcionando. Contacta con un administrador para descongelar el Drive.",
+      "aria": "Este Drive es de solo lectura"
+    }
   }
 }

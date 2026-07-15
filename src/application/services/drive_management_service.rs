@@ -488,6 +488,16 @@ impl DriveManagementService {
                 ),
             })?;
 
+        // Flush the cached typed policy view so the very next mutating
+        // authz check on any resource in this drive sees the fresh
+        // `read_only` value (and every other policy field). Without this,
+        // a policy change would take up to `DRIVE_POLICIES_CACHE_TTL` (30 s)
+        // to take effect on the hot path — unacceptable for the read_only
+        // freeze, which admins expect to be effective immediately.
+        self.authz
+            .invalidate_drive_policies_cache_for_drive(drive_id)
+            .await;
+
         tracing::info!(
             target: "audit",
             event = "drive.policy_changed",
@@ -500,6 +510,7 @@ impl DriveManagementService {
             forbid_owner_role_change = merged.forbid_owner_role_change,
             include_in_photo_index = merged.include_in_photo_index,
             include_in_music_index = merged.include_in_music_index,
+            read_only = merged.read_only,
             "📜 drive policies updated",
         );
         Ok(merged)

@@ -837,7 +837,9 @@
       "include_in_photo_index_help": "Bilder und Videos aus diesem Drive im Fotos-Zeitstrahl und auf der Orte-Karte anzeigen. Standardmäßig persönliche Drives sind automatisch enthalten; für freigegebene Drives einschalten, die tatsächlich Fotos enthalten (z. B. „Familienfotos\").",
       "include_in_music_index": "In Musik einschließen",
       "include_in_music_index_help": "Audiodateien aus diesem Drive in die Musikbibliothek aufnehmen. Standardmäßig persönliche Drives sind automatisch enthalten; für freigegebene Drives einschalten, die tatsächlich eine Musiksammlung enthalten (z. B. „Familienmusik\", „Bandkooperation\").",
-      "implied_by_forbid_sharing": "Bereits durch „Freigabe pro Ressource verbieten\" durchgesetzt."
+      "implied_by_forbid_sharing": "Bereits durch „Freigabe pro Ressource verbieten\" durchgesetzt.",
+      "read_only": "Schreibgeschützt (Sperren)",
+      "read_only_help": "Das Drive vollständig sperren — jede Änderung wird abgelehnt (Uploads, Bearbeitungen, Löschungen, Umbenennungen, Freigaben, Mitgliedschaftsänderungen). Lesen und Herunterladen funktionieren weiterhin. Auch die automatische Bereinigung des Papierkorbs pausiert. Für Archive, gesetzliche Sperren oder Kontoschließungen. Nur ein Administrator kann die Sperre aufheben."
     }
   },
   "profile": {
@@ -1172,5 +1174,13 @@
     "banner_title": "Erhalten Sie Ihren eigenen Speicher",
     "banner_body": "Sie verwenden ein Gast-Konto. Upgraden Sie, um einen persönlichen Speicher zu erhalten und Dateien hochzuladen.",
     "banner_cta": "Upgraden"
+  },
+  "drive": {
+    "read_only_banner": {
+      "title": "Dieses Drive ist schreibgeschützt",
+      "title_named": "Das Drive „{{name}}\" ist schreibgeschützt",
+      "body": "Uploads, Bearbeitungen, Löschungen, Umbenennungen, Freigaben und Mitgliedschaftsänderungen werden abgelehnt. Lesen und Herunterladen funktionieren weiterhin. Wende dich an einen Administrator, um die Sperre aufzuheben.",
+      "aria": "Dieses Drive ist schreibgeschützt"
+    }
   }
 }

@@ -1088,7 +1088,8 @@
 		// migration), so `readPolicyBool` will surface the correct current
 		// state on modal open.
 		include_in_photo_index: false,
-		include_in_music_index: false
+		include_in_music_index: false,
+		read_only: false
 	});
 	let managePoliciesError = $state<string | null>(null);
 	let managePoliciesBusy = $state(false);
@@ -1104,7 +1105,8 @@
 			forbid_cross_drive_move: readPolicyBool(p, 'forbid_cross_drive_move'),
 			forbid_owner_role_change: readPolicyBool(p, 'forbid_owner_role_change'),
 			include_in_photo_index: readPolicyBool(p, 'include_in_photo_index'),
-			include_in_music_index: readPolicyBool(p, 'include_in_music_index')
+			include_in_music_index: readPolicyBool(p, 'include_in_music_index'),
+			read_only: readPolicyBool(p, 'read_only')
 		};
 	}
 
@@ -1128,6 +1130,13 @@
 			drivesList = drivesList.map((d) =>
 				d.id === driveId ? { ...d, policies: { ...d.policies, ...merged } } : d
 			);
+			// The shared `drivesStore` (feeds `/config/drive/{uuid}`, the
+			// sidebar picker, the breadcrumb) caches `GET /api/drives` with
+			// `loaded=true` after the first fetch — without this invalidate
+			// call the admin's policy change wouldn't propagate to those
+			// surfaces until a full page reload. Sibling `requestDeleteDrive`
+			// does the same after `deleteDriveAdmin`.
+			drivesStore.invalidate();
 			closeManagePolicies();
 		} catch (e) {
 			managePoliciesError = errorMessage(e);

@@ -201,6 +201,26 @@ pub struct DrivePolicies {
     /// scrutiny (voicemail MP3s in a work drive shouldn't bleed into
     /// the personal library). See §15.
     pub include_in_music_index: bool,
+    /// **Full freeze / legal-hold.** When `true`, every mutation on
+    /// resources in this drive is refused — user-initiated and
+    /// background alike. Compliance-grade guarantee:
+    ///
+    /// - User-initiated: enforced at `PgAclEngine::check_inner`, which
+    ///   short-circuits `Create` / `Update` / `Delete` / `Share`
+    ///   permissions on any resource in a read-only drive. Read still
+    ///   passes. Manage-on-Drive still passes so admins can un-freeze.
+    /// - Background jobs: the periodic trash-retention purge and
+    ///   orphan-upload sweep filter out read-only drives at SELECT
+    ///   time (SQL-side `JOIN storage.drives … WHERE (policies->>
+    ///   'read_only')::boolean IS NOT TRUE`). Retention clock keeps
+    ///   ticking; on unfreeze, the next sweep tick catches up.
+    ///
+    /// Applies to both personal and shared drives — a user winding
+    /// down their account, freezing a secondary personal archive, or
+    /// putting a shared drive on legal hold all use the same knob.
+    /// Mutation is admin-only via `PATCH /api/drives/{id}/policies`
+    /// (per §8 — same carve-out as every other policy).
+    pub read_only: bool,
 }
 
 impl DrivePolicies {

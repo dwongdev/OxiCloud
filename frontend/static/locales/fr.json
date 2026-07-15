@@ -837,7 +837,9 @@
       "include_in_photo_index_help": "Afficher les images et vidéos de ce Drive dans le fil Photos et sur la carte Lieux. Les Drives personnels par défaut sont inclus automatiquement ; activez cette option pour les Drives partagés qui contiennent réellement des photos (par ex. « Photos famille »).",
       "include_in_music_index": "Inclure dans Musique",
       "include_in_music_index_help": "Inclure les fichiers audio de ce Drive dans la bibliothèque Musique. Les Drives personnels par défaut sont inclus automatiquement ; activez cette option pour les Drives partagés qui contiennent réellement une collection musicale (par ex. « Musique famille », « Collaboration groupe »).",
-      "implied_by_forbid_sharing": "Déjà appliqué par « Interdire le partage par ressource »."
+      "implied_by_forbid_sharing": "Déjà appliqué par « Interdire le partage par ressource ».",
+      "read_only": "Lecture seule (gel)",
+      "read_only_help": "Geler entièrement le Drive — toute modification est refusée (téléversements, éditions, suppressions, renommages, partages, changements d'appartenance). La lecture et le téléchargement continuent de fonctionner. Le nettoyage automatique de la corbeille est également mis en pause. À utiliser pour les archives, les mises sous scellé légal ou la clôture de comptes. Seul un administrateur peut lever le gel."
     }
   },
   "profile": {
@@ -1172,5 +1174,13 @@
     "banner_title": "Obtenez votre propre espace",
     "banner_body": "Vous utilisez un compte invité. Passez à un compte complet pour obtenir un disque personnel et téléverser des fichiers.",
     "banner_cta": "Mettre à niveau"
+  },
+  "drive": {
+    "read_only_banner": {
+      "title": "Ce Drive est en lecture seule",
+      "title_named": "Le Drive « {{name}} » est en lecture seule",
+      "body": "Les téléversements, éditions, suppressions, renommages, partages et changements d'appartenance sont refusés. La lecture et le téléchargement continuent de fonctionner. Contactez un administrateur pour lever le gel du Drive.",
+      "aria": "Ce Drive est en lecture seule"
+    }
   }
 }

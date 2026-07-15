@@ -45,6 +45,7 @@
 	import { preferences } from '$lib/stores/preferences.svelte';
 	import type { FileItem, FolderItem, ItemType } from '$lib/api/types';
 	import ListToolbar from '$lib/components/ListToolbar.svelte';
+	import ReadOnlyBanner from '$lib/components/ReadOnlyBanner.svelte';
 	import VirtualList from '$lib/components/VirtualList.svelte';
 	import { lazyComponent } from '$lib/composables/lazyComponent.svelte';
 	import { t } from '$lib/i18n/index.svelte';
@@ -90,6 +91,36 @@
 	const rootIcon = $derived.by(() => {
 		const drive = drivesStore.findByRootFolderId(pathSegments[0] ?? null);
 		return drive ? driveIcon(drive) : 'home';
+	});
+
+	// The drive whose content the user is currently browsing.
+	//
+	// Priorities (first match wins):
+	//   1. `currentFolderDriveId` — set by `load()` after a `getFolder`
+	//      fetch on the current folder. Authoritative for deep-links
+	//      too (the URL's leading segment might not be a drive root).
+	//   2. `listing.folders[0]?.drive_id` — fast-path when the folder
+	//      has at least one subfolder; avoids the extra round-trip on
+	//      the initial `applyListing` before `getFolder` returns.
+	//      (`FileDto` doesn't carry `drive_id` today, so we can't use
+	//      files as a fallback source; folders alone.)
+	//   3. `drivesStore.findByRootFolderId(pathSegments[0])` — legacy
+	//      fallback for the common "sidebar picker → drive root URL"
+	//      navigation, unchanged from `rootIcon` above.
+	//
+	// Feeds the read-only freeze banner further down: when this drive's
+	// `policies.read_only` is on, mutation controls elsewhere in the app
+	// will fail against the backend engine gate; the banner is the
+	// affordance that tells the user why.
+	let currentFolderDriveId = $state<string | null>(null);
+	const currentDrive = $derived.by(() => {
+		if (currentFolderDriveId) {
+			const d = drivesStore.findById(currentFolderDriveId);
+			if (d) return d;
+		}
+		const listingDriveId = listing.folders[0]?.drive_id ?? null;
+		if (listingDriveId) return drivesStore.findById(listingDriveId);
+		return drivesStore.findByRootFolderId(pathSegments[0] ?? null);
 	});
 
 	let listing = $state<FolderListing>({ folders: [], files: [], favoriteIds: [], sharedIds: [] });
@@ -256,6 +287,25 @@
 		void buildCrumbs(pathSegments).then((trail) => {
 			if (seq === loadSeq) crumbs = trail;
 		});
+
+		// Resolve the current folder's drive_id so the read-only banner
+		// works even on deep-links into a sub-folder (where
+		// `pathSegments[0]` isn't a drive-root folder id). `getFolder`
+		// hits the same `/api/folders/{id}` endpoint the breadcrumb chain
+		// walks; the folder-name cache warmed by `buildCrumbs` above
+		// makes this a memoised lookup for most navigations. Guarded by
+		// `seq` so a stale in-flight response can't overwrite a newer
+		// navigation's drive.
+		void getFolder(folderId)
+			.then((folder) => {
+				if (seq === loadSeq) currentFolderDriveId = folder.drive_id;
+			})
+			.catch(() => {
+				// Folder metadata fetch failure isn't fatal — the fallback
+				// chain in `currentDrive` (listing[0]?.drive_id, then
+				// pathSegments[0] root-folder lookup) still gives us a
+				// best-effort drive resolution.
+			});
 
 		try {
 			const res = await fetchFolderListing(folderId, { etag: cached?.etag });
@@ -1567,6 +1617,16 @@
 	ondragleave={() => (dragOver = false)}
 	ondrop={onDrop}
 >
+	<!-- Read-only freeze banner, placed inside the listing container so it
+	     lives in the same visual/scroll flow as the file list (previously
+	     rendered above the page container, which visually detached it from
+	     the listing). Scrolls with the content — sticky header below stays
+	     pinned. Shows when either any item in the current listing surfaces
+	     a `drive_id` for a frozen drive, or (empty folder fallback) the
+	     URL's leading segment resolves to one. -->
+	{#if currentDrive?.policies?.read_only}
+		<ReadOnlyBanner driveName={currentDrive.name} />
+	{/if}
 	<div class="page-sticky-header">
 		<!-- Hidden upload inputs stay mounted even while the batch bar is shown. -->
 		<input

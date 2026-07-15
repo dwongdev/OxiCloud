@@ -837,7 +837,9 @@
       "include_in_photo_index_help": "Toon afbeeldings- en videobestanden uit deze Drive in de Foto's-tijdlijn en op de Plaatsen-kaart. Standaard persoonlijke Drives zijn automatisch opgenomen; schakel dit in voor gedeelde Drives die daadwerkelijk foto's bevatten (bv. «Gezinsfoto's»).",
       "include_in_music_index": "Opnemen in Muziek",
       "include_in_music_index_help": "Neem audiobestanden uit deze Drive op in de Muziekbibliotheek. Standaard persoonlijke Drives zijn automatisch opgenomen; schakel dit in voor gedeelde Drives die daadwerkelijk een muziekcollectie bevatten (bv. «Gezinsmuziek», «Bandsamenwerking»).",
-      "implied_by_forbid_sharing": "Al afgedwongen door «Per-resource delen verbieden»."
+      "implied_by_forbid_sharing": "Al afgedwongen door «Per-resource delen verbieden».",
+      "read_only": "Alleen-lezen (bevriezen)",
+      "read_only_help": "Bevries de Drive volledig — elke wijziging wordt geweigerd (uploads, bewerkingen, verwijderingen, hernoemingen, delen, lidmaatschapswijzigingen). Lezen en downloaden blijven werken. Ook de automatische prullenbakopruiming pauzeert. Voor archieven, juridische bewaarplicht of accountsluitingen. Alleen een beheerder kan ontdooien."
     }
   },
   "profile": {
@@ -1172,5 +1174,13 @@
     "banner_title": "Krijg je eigen opslag",
     "banner_body": "Je gebruikt een gastaccount. Upgrade om een persoonlijke schijf te krijgen en bestanden te uploaden.",
     "banner_cta": "Upgraden"
+  },
+  "drive": {
+    "read_only_banner": {
+      "title": "Deze Drive is alleen-lezen",
+      "title_named": "Drive \"{{name}}\" is alleen-lezen",
+      "body": "Uploads, bewerkingen, verwijderingen, hernoemingen, delen en lidmaatschapswijzigingen worden geweigerd. Lezen en downloaden blijven werken. Neem contact op met een beheerder om de Drive te ontdooien.",
+      "aria": "Deze Drive is alleen-lezen"
+    }
   }
 }

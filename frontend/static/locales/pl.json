@@ -837,7 +837,9 @@
       "include_in_photo_index_help": "Wyświetlaj obrazy i filmy z tego Dysku na osi czasu Zdjęć i na mapie Miejsc. Domyślne dyski osobiste są uwzględniane automatycznie; włącz to dla dysków współdzielonych, które faktycznie zawierają zdjęcia (np. «Zdjęcia rodzinne»).",
       "include_in_music_index": "Uwzględnij w Muzyce",
       "include_in_music_index_help": "Uwzględniaj pliki audio z tego Dysku w bibliotece Muzyki. Domyślne dyski osobiste są uwzględniane automatycznie; włącz to dla dysków współdzielonych, które faktycznie zawierają kolekcję muzyczną (np. «Muzyka rodzinna», «Współpraca zespołu»).",
-      "implied_by_forbid_sharing": "Już egzekwowane przez «Zakaz udostępniania per-zasób»."
+      "implied_by_forbid_sharing": "Już egzekwowane przez «Zakaz udostępniania per-zasób».",
+      "read_only": "Tylko do odczytu (zamrożenie)",
+      "read_only_help": "Zamrożenie Dysku w całości — każda modyfikacja zostaje odrzucona (wysyłki, edycje, usunięcia, zmiany nazw, udostępnianie, zmiany członkostwa). Odczyt i pobieranie nadal działają. Automatyczne czyszczenie kosza również jest wstrzymane. Używaj do archiwów, blokad prawnych lub zamykania kont. Tylko administrator może odblokować."
     }
   },
   "profile": {
@@ -1172,5 +1174,13 @@
     "banner_title": "Uzyskaj własną przestrzeń",
     "banner_body": "Używasz konta gościa. Rozszerz, aby uzyskać osobisty dysk i przesyłać pliki.",
     "banner_cta": "Rozszerz"
+  },
+  "drive": {
+    "read_only_banner": {
+      "title": "Ten Dysk jest tylko do odczytu",
+      "title_named": "Dysk \"{{name}}\" jest tylko do odczytu",
+      "body": "Wysyłki, edycje, usunięcia, zmiany nazw, udostępnianie i zmiany członkostwa są odrzucane. Odczyt i pobieranie nadal działają. Skontaktuj się z administratorem, aby odblokować Dysk.",
+      "aria": "Ten Dysk jest tylko do odczytu"
+    }
   }
 }

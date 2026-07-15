@@ -837,7 +837,9 @@
       "include_in_photo_index_help": "Mostra i file di immagine e video di questo Drive nella timeline Foto e sulla mappa Luoghi. I Drive personali predefiniti sono inclusi automaticamente; attiva questa opzione per i Drive condivisi che contengono davvero foto (ad es. «Foto famiglia»).",
       "include_in_music_index": "Includi in Musica",
       "include_in_music_index_help": "Includi i file audio di questo Drive nella libreria Musica. I Drive personali predefiniti sono inclusi automaticamente; attiva questa opzione per i Drive condivisi che contengono davvero una raccolta musicale (ad es. «Musica famiglia», «Collaborazione band»).",
-      "implied_by_forbid_sharing": "Già imposto da «Vieta condivisione per risorsa»."
+      "implied_by_forbid_sharing": "Già imposto da «Vieta condivisione per risorsa».",
+      "read_only": "Sola lettura (congelare)",
+      "read_only_help": "Congela completamente il Drive — ogni modifica viene rifiutata (caricamenti, modifiche, eliminazioni, rinominazioni, condivisioni, cambi di appartenenza). Lettura e download continuano a funzionare. Anche la pulizia automatica del cestino viene messa in pausa. Usalo per archivi, blocchi legali o chiusure account. Solo un amministratore può sbloccare."
     }
   },
   "profile": {
@@ -1172,5 +1174,13 @@
     "banner_title": "Ottieni il tuo spazio di archiviazione",
     "banner_body": "Stai utilizzando un account ospite. Passa a un account completo per ottenere un'unità personale e caricare file.",
     "banner_cta": "Aggiorna"
+  },
+  "drive": {
+    "read_only_banner": {
+      "title": "Questo Drive è in sola lettura",
+      "title_named": "Il Drive «{{name}}» è in sola lettura",
+      "body": "Caricamenti, modifiche, eliminazioni, rinominazioni, condivisioni e cambi di appartenenza sono rifiutati. Lettura e download continuano a funzionare. Contatta un amministratore per sbloccare il Drive.",
+      "aria": "Questo Drive è in sola lettura"
+    }
   }
 }

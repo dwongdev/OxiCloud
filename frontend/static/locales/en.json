@@ -1134,7 +1134,9 @@
       "include_in_photo_index_help": "Show image and video files from this drive in the Photos timeline and on the Places map. Default personal drives are opted in automatically; turn on for shared drives that genuinely hold photos (e.g. \"Family Photos\").",
       "include_in_music_index": "Include in Music",
       "include_in_music_index_help": "Include audio files from this drive in the Music library. Default personal drives are opted in automatically; turn on for shared drives that genuinely hold a music collection (e.g. \"Family Music\", \"Band Collaboration\").",
-      "implied_by_forbid_sharing": "Already enforced by Forbid per-resource sharing."
+      "implied_by_forbid_sharing": "Already enforced by Forbid per-resource sharing.",
+      "read_only": "Read-only (freeze)",
+      "read_only_help": "Freeze the drive entirely — every mutation is refused (uploads, edits, deletes, renames, sharing, membership changes). Reads and downloads keep working. The trash-retention janitor also pauses. Use for archives, legal holds, or account wind-downs. Only an admin can un-freeze."
     }
   },
   "profile": {
@@ -1573,5 +1575,13 @@
     "banner_title": "Get your own storage",
     "banner_body": "You're using a guest account. Upgrade to get a personal drive and start uploading files.",
     "banner_cta": "Upgrade"
+  },
+  "drive": {
+    "read_only_banner": {
+      "title": "This drive is read-only",
+      "title_named": "Drive \"{{name}}\" is read-only",
+      "body": "Uploads, edits, deletes, renames, sharing and membership changes are refused. Reads and downloads keep working. Contact an administrator to un-freeze the drive.",
+      "aria": "This drive is read-only"
+    }
   }
 }

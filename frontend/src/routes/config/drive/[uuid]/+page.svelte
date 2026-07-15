@@ -11,6 +11,7 @@
 	import { ui } from '$lib/stores/ui.svelte';
 	import type { Drive, DriveMember, DriveRole, DrivePoliciesPartial } from '$lib/api/types';
 	import PolicyList from '$lib/components/PolicyList.svelte';
+	import ReadOnlyBanner from '$lib/components/ReadOnlyBanner.svelte';
 	import ShareDialog from '$lib/components/ShareDialog.svelte';
 	import UserVignette from '$lib/components/UserVignette.svelte';
 	import Icon from '$lib/icons/Icon.svelte';
@@ -276,6 +277,10 @@
 				{/if}
 			{/if}
 		</div>
+
+		{#if drivePoliciesView.read_only}
+			<ReadOnlyBanner />
+		{/if}
 
 		<div class="card">
 			<h2><Icon name="info-circle" /> {t('drive.info', 'Drive info')}</h2>

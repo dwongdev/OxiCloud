@@ -40,6 +40,7 @@ use sqlx::PgPool;
 
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::common::errors::DomainError;
+use crate::domain::entities::drive::DrivePolicies;
 use crate::domain::entities::subject_group::INTERNAL_GROUP_ID;
 use crate::domain::repositories::subject_group_repository::SubjectGroupRepository;
 use crate::domain::services::authorization::{
@@ -91,6 +92,17 @@ const DRIVE_ROLE_CACHE_CAPACITY: u64 = 100_000;
 /// enough that any oversight self-heals in <1 minute.
 const DRIVE_ROLE_CACHE_TTL: Duration = Duration::from_secs(30);
 
+/// `drive_policies_cache` bound: entries are `(Uuid, DrivePolicies)` — a
+/// handful of bools per drive. 100k is generous headroom for the drive
+/// population of any realistic deployment.
+const DRIVE_POLICIES_CACHE_CAPACITY: u64 = 100_000;
+/// `drive_policies_cache` TTL. Policy mutations explicitly invalidate
+/// (see `invalidate_drive_policies_cache_for_drive`) so the TTL is the
+/// self-heal net for edge cases (direct SQL PATCH by an operator, migration
+/// backfill). Short enough that a manually-flipped `read_only` becomes
+/// effective within a minute on the hot path.
+const DRIVE_POLICIES_CACHE_TTL: Duration = Duration::from_secs(30);
+
 pub struct PgAclEngine {
     pool: Arc<PgPool>,
     folder_repo: Arc<FolderDbRepository>,
@@ -132,6 +144,22 @@ pub struct PgAclEngine {
     /// `DriveManagementService`, the grant handler's revoke path) hit the
     /// invalidator inline.
     drive_role_cache: Cache<(Subject, Uuid), Option<Role>>,
+
+    /// Memoise `drive_id → DrivePolicies` (the typed view of the JSONB
+    /// `storage.drives.policies` column). Read on every mutating authz
+    /// check on a resource that lives in a drive (File/Folder/Drive) to
+    /// gate the `read_only` freeze.
+    ///
+    /// Subject-independent — policies are the same for every caller, so a
+    /// single entry per drive covers the whole tenant. Kept separate from
+    /// `drive_role_cache` (subject-keyed) so policy changes only flush this
+    /// cache, and membership changes only flush that one.
+    ///
+    /// **Invalidation**: explicit on every `DriveManagementService::update_policies`
+    /// call — a policy PATCH invalidates the entry before the response
+    /// returns, so the next check sees the fresh values. Short 30 s TTL
+    /// as the self-heal net for direct-SQL edits and migration backfills.
+    drive_policies_cache: Cache<Uuid, DrivePolicies>,
 }
 
 impl PgAclEngine {
@@ -164,6 +192,10 @@ impl PgAclEngine {
                 .support_invalidation_closures()
                 .max_capacity(DRIVE_ROLE_CACHE_CAPACITY)
                 .time_to_live(DRIVE_ROLE_CACHE_TTL)
+                .build(),
+            drive_policies_cache: Cache::builder()
+                .max_capacity(DRIVE_POLICIES_CACHE_CAPACITY)
+                .time_to_live(DRIVE_POLICIES_CACHE_TTL)
                 .build(),
         }
     }
@@ -231,6 +263,10 @@ impl PgAclEngine {
                 .max_capacity(1)
                 .time_to_live(Duration::from_secs(1))
                 .build(),
+            drive_policies_cache: Cache::builder()
+                .max_capacity(1)
+                .time_to_live(Duration::from_secs(1))
+                .build(),
         }
     }
 
@@ -257,6 +293,15 @@ impl PgAclEngine {
     /// `drive_role_cache` initialiser above), otherwise moka returns
     /// `InvalidationClosuresDisabled` and the mutation silently leaves
     /// stale role rows in cache for the full TTL.
+    /// Drop the cached `DrivePolicies` entry for one drive. Called by
+    /// `DriveManagementService::update_policies` after every JSONB PATCH so
+    /// the next mutating authz check sees the fresh `read_only` flag and
+    /// other policy values without waiting for the TTL. Single-entry
+    /// invalidate is a cheap concurrent-map op.
+    pub async fn invalidate_drive_policies_cache_for_drive(&self, drive_id: Uuid) {
+        self.drive_policies_cache.invalidate(&drive_id).await;
+    }
+
     pub async fn invalidate_drive_role_cache_for_drive(&self, drive_id: Uuid) {
         // `invalidate_entries_if` rejects predicates returning errors —
         // simple Fn(K, V) -> bool. We capture `drive_id` by value (Copy)
@@ -711,6 +756,65 @@ impl PgAclEngine {
         Ok(role)
     }
 
+    /// Fetch a drive's typed `DrivePolicies`, going through `drive_policies_cache`
+    /// (30 s TTL, explicit invalidation on policy PATCH). Malformed JSONB
+    /// falls back to the all-false default — consistent with
+    /// `DrivePolicies::from_value` — so enforcement can't panic on legacy
+    /// or partial data.
+    async fn drive_policies_cached(
+        &self,
+        drive_id: Uuid,
+        counters: &QueryCounters,
+    ) -> Result<DrivePolicies, DomainError> {
+        if let Some(cached) = self.drive_policies_cache.get(&drive_id).await {
+            counters.cache_hit.fetch_add(1, Ordering::Relaxed);
+            return Ok(cached);
+        }
+        counters.sql_queries.fetch_add(1, Ordering::Relaxed);
+        let row: Option<(serde_json::Value,)> =
+            sqlx::query_as("SELECT policies FROM storage.drives WHERE id = $1")
+                .bind(drive_id)
+                .fetch_optional(self.pool.as_ref())
+                .await
+                .map_err(|e| {
+                    DomainError::internal_error("PgAcl", format!("policies lookup: {e}"))
+                })?;
+        // Missing drive: cache the default (all-false). Anti-enum handled by
+        // the caller — a missing drive returns NotFound at the resource-resolve
+        // step upstream; here we just make sure the cache doesn't panic-loop
+        // if the read happens post-drive-delete.
+        let policies = row
+            .map(|(v,)| DrivePolicies::from_value(&v))
+            .unwrap_or_default();
+        self.drive_policies_cache
+            .insert(drive_id, policies.clone())
+            .await;
+        Ok(policies)
+    }
+
+    /// Every permission except `Read` mutates persistent state on a
+    /// drive-scoped resource and is therefore refused when the drive is
+    /// `read_only=true`:
+    ///
+    /// - `Create` / `Update` / `Delete` — the obvious file/folder mutations.
+    /// - `Share` — persists a new `role_grants` row.
+    /// - `Comment` — adds user-generated content (reserved feature).
+    /// - `Manage` — mutates drive-level membership (add/remove/promote
+    ///   members) on `Resource::Drive`.
+    ///
+    /// **Admin escape hatch does NOT rely on this gate.** Un-freezing a
+    /// drive goes through `PATCH /api/drives/{id}/policies`, which is
+    /// admin-only via `admin_guard` at the handler layer — it never
+    /// enters `authz.require`. So blocking `Manage` here doesn't lock
+    /// admins out; it locks OWNERS out of membership mutation while the
+    /// freeze holds, which is exactly the legal-hold guarantee.
+    ///
+    /// Only `Read` passes: members can still list, download, and PROPFIND
+    /// the drive's contents.
+    fn read_only_gate_applies(p: Permission) -> bool {
+        !matches!(p, Permission::Read)
+    }
+
     /// Look up a single role grant by id, returning the actors a revoke /
     /// notify handler needs to make a decision without a second round-trip.
     /// Returns `(subject, resource, granted_by)` or `None` if no such row.
@@ -826,6 +930,36 @@ impl PgAclEngine {
                 }
                 Err(e) => return Err(e),
             };
+            // Read-only drive freeze — every mutating permission on any
+            // resource in this drive is refused, regardless of the caller's
+            // role. Compliance-grade guarantee: paired with the background-
+            // job SQL filters, no state on this drive changes until the
+            // policy is flipped. See `docs/plan/drive.md` §8 (`read_only`).
+            //
+            // Anti-enumeration: emit an audit line with the specific
+            // `drive_read_only` reason, then return `false`. The generic
+            // `authz.denied` line at `require` also fires — operators
+            // filter on the specific event to find freeze-caused denials.
+            if Self::read_only_gate_applies(permission)
+                && self
+                    .drive_policies_cached(drive_id, counters)
+                    .await?
+                    .read_only
+            {
+                tracing::info!(
+                    target: "audit",
+                    event = "authz.denied",
+                    reason = "drive_read_only",
+                    subject_type = subject.type_str(),
+                    subject_id = %subject.id(),
+                    permission = permission.as_str(),
+                    resource_type = resource.type_str(),
+                    resource_id = %resource.id(),
+                    drive_id = %drive_id,
+                    "🧊 mutation refused: drive is read-only",
+                );
+                return Ok(false);
+            }
             if let Some(role) = self
                 .caller_role_on_drive_cached(subject, drive_id, counters)
                 .await?
@@ -866,6 +1000,28 @@ impl PgAclEngine {
                 .await
             }
             Resource::Drive(id) => {
+                // Same read_only gate as the File/Folder branch: a frozen
+                // drive refuses every mutating permission (Create / Update /
+                // Delete / Share) targeting the drive resource itself.
+                // Manage stays permitted so admins can toggle the policy
+                // back off; Read stays permitted so members can still list.
+                if Self::read_only_gate_applies(permission)
+                    && self.drive_policies_cached(id, counters).await?.read_only
+                {
+                    tracing::info!(
+                        target: "audit",
+                        event = "authz.denied",
+                        reason = "drive_read_only",
+                        subject_type = subject.type_str(),
+                        subject_id = %subject.id(),
+                        permission = permission.as_str(),
+                        resource_type = "drive",
+                        resource_id = %id,
+                        drive_id = %id,
+                        "🧊 mutation refused: drive is read-only",
+                    );
+                    return Ok(false);
+                }
                 // Same cache-aware path the precheck uses — keeps the
                 // single-source-of-truth for drive role resolution and
                 // benefits identically from `drive_role_cache`.

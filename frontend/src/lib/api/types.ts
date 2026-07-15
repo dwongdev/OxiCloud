@@ -39,6 +39,15 @@ export interface FolderItem {
 	parent_id: string | null;
 	path: string;
 	etag: string;
+	/**
+	 * The drive this folder belongs to (post-D0 ownership pivot per
+	 * `docs/plan/drive.md` §3). Populated by the backend `FolderDto`
+	 * on every response; the field was left out of the TS type until
+	 * a caller needed it. Used by `/files` to resolve the current
+	 * drive for the read-only banner without depending on the URL's
+	 * leading segment being a drive-root folder id.
+	 */
+	drive_id: string;
 }
 
 export interface FileItem {
@@ -307,6 +316,14 @@ export interface DrivePolicies {
 	 * Symmetric shape to `include_in_photo_index`.
 	 */
 	include_in_music_index: boolean;
+	/**
+	 * Full freeze / legal-hold. When `true`, every mutation on resources
+	 * in the drive is refused — user-initiated AND background alike (the
+	 * trash-retention purge SQL filter excludes read-only drives). Only
+	 * `Read` passes. Admins can un-freeze via the admin-only policy PATCH.
+	 * See `docs/plan/drive.md` §8 (`read_only`).
+	 */
+	read_only: boolean;
 }
 
 /**
