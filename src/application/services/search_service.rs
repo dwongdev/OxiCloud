@@ -425,20 +425,28 @@ impl SearchService {
     /// Quick suggestions search — returns up to `limit` name suggestions
     /// matching the query. Pushes filtering, relevance sort and LIMIT to SQL
     /// so only a handful of rows cross the DB→app boundary.
-    pub async fn suggest(
+    ///
+    /// `caller_id` scopes the underlying repo queries to drives the caller
+    /// can Read. Without it (the pre-fix shape) any authenticated user —
+    /// including external magic-link recipients — could autocomplete both
+    /// names and full paths across every tenant on the instance (AuthZ
+    /// audit finding #1, 2026-07-12). Named `_with_perms` per the
+    /// AGENTS.md AuthZ convention.
+    pub async fn suggest_with_perms(
         &self,
         query: &str,
         folder_id: Option<&str>,
         limit: usize,
+        caller_id: Uuid,
     ) -> Result<SearchSuggestionsDto> {
         let start = Instant::now();
 
         // Ask SQL for at most `limit` best-matching files and folders
         let (files, folders) = tokio::join!(
             self.file_repository
-                .suggest_files_by_name(folder_id, query, limit),
+                .suggest_files_by_name(folder_id, query, limit, caller_id),
             self.folder_repository
-                .suggest_folders_by_name(folder_id, query, limit),
+                .suggest_folders_by_name(folder_id, query, limit, caller_id),
         );
         let files = files?;
         let folders = folders?;
@@ -724,14 +732,20 @@ impl SearchUseCase for SearchService {
             })
     }
 
-    /// Returns quick suggestions for autocomplete.
+    /// Returns quick suggestions for autocomplete. Delegates to the
+    /// inherent `suggest_with_perms` — the trait method is preserved as
+    /// the polymorphic entry point (e.g. for `StubSearchUseCase` in
+    /// tests); production callers can equivalently call the inherent
+    /// method directly.
     async fn suggest(
         &self,
         query: &str,
         folder_id: Option<&str>,
         limit: usize,
+        caller_id: Uuid,
     ) -> Result<SearchSuggestionsDto> {
-        self.suggest(query, folder_id, limit).await
+        self.suggest_with_perms(query, folder_id, limit, caller_id)
+            .await
     }
 
     /// Clears the search results cache.
@@ -763,6 +777,7 @@ impl SearchService {
                 _query: &str,
                 _folder_id: Option<&str>,
                 _limit: usize,
+                _caller_id: Uuid,
             ) -> Result<SearchSuggestionsDto> {
                 Ok(SearchSuggestionsDto {
                     suggestions: Vec::new(),

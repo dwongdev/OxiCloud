@@ -205,13 +205,21 @@ pub trait FileReadPort: Send + Sync + 'static {
     /// Results are ordered by relevance (exact > starts-with > contains) so the
     /// caller can use them directly for autocomplete suggestions.
     ///
-    /// The default implementation falls back to `list_files` + in-memory filter
-    /// so that stubs and mocks compile without changes.
+    /// `caller_id` scopes results to files whose owning drive the caller can
+    /// Read (direct or group-mediated `role_grants`). Without it the endpoint
+    /// leaks names + paths across every tenant on the instance — closed as
+    /// AuthZ audit finding #1 (2026-07-12).
+    ///
+    /// The default implementation falls back to `list_files` + in-memory
+    /// filter so that stubs and mocks compile without changes. Stub-mode
+    /// callers already operate against a single tenant's data, so ignoring
+    /// `caller_id` here is safe; the PG impl enforces the real scope.
     async fn suggest_files_by_name(
         &self,
         folder_id: Option<&str>,
         query: &str,
         limit: usize,
+        _caller_id: Uuid,
     ) -> Result<Vec<File>, DomainError> {
         let all = self.list_files(folder_id).await?;
         let q = query.to_lowercase();
