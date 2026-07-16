@@ -208,6 +208,41 @@ HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
+# Step 9b — Bob (VIEWER) CANNOT COPY the probe folder.
+#           COPY requires Create on the destination parent, which
+#           Viewer doesn't have. Anti-enum 404 shape.
+#
+#           This is the regression pin for AuthZ audit #2
+#           (2026-07-12): the COPY handler used to `map_err(|e|
+#           AppError::internal_error(format!("Failed to copy folder
+#           tree: {}", e)))?` on `copy_folder_tree_with_perms`,
+#           which collapsed the `NotFound` that `authz.require`
+#           returns on denial into HTTP 500 — an "exists-but-denied"
+#           oracle. Fix routes through `AppError::from` so the same
+#           denial surfaces as 404, indistinguishable from a source
+#           path that simply doesn't exist.
+# ─────────────────────────────────────────────────────────────
+COPY {{base_url}}/webdav/@drive/{{shared_drive_id}}/probe-folder
+Authorization: Bearer {{bob_token}}
+Destination: {{base_url}}/webdav/@drive/{{shared_drive_id}}/probe-folder-copy
+
+HTTP 404
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 9c — Bob (VIEWER) CANNOT DELETE the probe folder.
+#           DELETE requires Delete on the target, which Viewer
+#           doesn't have. Anti-enum 404 shape — same regression
+#           pin as 9b (`map_err → internal_error` collapsed
+#           the `NotFound` from authz.require into a 500 oracle).
+# ─────────────────────────────────────────────────────────────
+DELETE {{base_url}}/webdav/@drive/{{shared_drive_id}}/probe-folder
+Authorization: Bearer {{bob_token}}
+
+HTTP 404
+
+
+# ─────────────────────────────────────────────────────────────
 # Step 10 — Promote Bob from VIEWER to EDITOR.
 #           `PATCH /api/drives/{id}/members/{subject-type}/{id}`
 #           mutates the role in-place.
