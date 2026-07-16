@@ -922,9 +922,22 @@ impl PersonalDriveLifecycleHook {
         // parent_id=NULL, drive_id pinned) + drives.root_folder_id
         // wire-up + Owner role_grant. Single SQL statement, atomic
         // against server crash mid-sequence (docs/plan/drive.md §3).
+        //
+        // `quota_bytes = None` (NULL in the DB) is the invariant for
+        // every personal drive per plan §7: the cap for a user's
+        // personal storage lives on `auth.users.storage_quota_bytes`
+        // (the user envelope), not on the drive row. Passing
+        // `Some(user.storage_quota_bytes())` here previously baked
+        // the user quota into `drives.quota_bytes` and — combined
+        // with the "0 = unlimited" convention on the user check but
+        // "0 = literal zero" convention on the drive check — turned
+        // "unlimited user" into "0-byte drive" (see #595). The
+        // migration `20260916000000_null_personal_drive_quota.sql`
+        // heals existing rows and adds a CHECK constraint pinning
+        // this invariant at the schema layer.
         let drive_with_name = self
             .drive_repo
-            .create_personal_drive_atomic(user.id(), Some(user.storage_quota_bytes()))
+            .create_personal_drive_atomic(user.id(), None)
             .await
             .map_err(|e| {
                 DomainError::internal_error(
