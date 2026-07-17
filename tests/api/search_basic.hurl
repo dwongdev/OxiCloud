@@ -26,6 +26,22 @@
 
 
 # ─────────────────────────────────────────────────────────────
+# Pre-setup — anonymous request pin.
+#
+# `DELETE /api/admin/search/cache` with NO credentials must land as
+# 401 Unauthorized (from `auth_middleware`, before the admin gate
+# even runs). Kept at the very top of the file so no earlier
+# request has populated any auth state that could accidentally
+# authenticate this request. `[Options] cookie-storage-clear` was
+# tried earlier but isn't supported in Hurl 8.0.1, so we rely on
+# ordering instead — this DELETE runs FIRST, before any login.
+# ─────────────────────────────────────────────────────────────
+DELETE {{base_url}}/api/admin/search/cache
+
+HTTP 401
+
+
+# ─────────────────────────────────────────────────────────────
 # Setup — admin login + bob (re-)provisioning
 # ─────────────────────────────────────────────────────────────
 POST {{base_url}}/api/auth/login
@@ -273,11 +289,11 @@ Authorization: Bearer {{bob_token}}
 HTTP 403
 
 
-DELETE {{base_url}}/api/admin/search/cache
-
-HTTP 401
-
-
+# The unauthenticated 401 case is pinned at the top of the file
+# (before any login has run) — see the pre-setup block. Placing it
+# there instead of here avoids relying on Hurl's cookie / auth
+# behaviour, which `cookie-storage-clear` (unsupported in 8.0.1)
+# would otherwise be needed to reset.
 DELETE {{base_url}}/api/admin/search/cache
 Authorization: Bearer {{admin_token}}
 

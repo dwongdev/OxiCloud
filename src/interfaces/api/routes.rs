@@ -613,8 +613,19 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
     // NOTE: CalDAV and CardDAV routes are mounted at top-level (/caldav, /carddav)
     // in main.rs for protocol compliance, NOT under /api.
 
-    // Admin settings routes (protected by admin_guard inside the handler)
-    let admin_router = admin_handler::admin_routes().with_state(app_state.clone());
+    // Admin settings routes — the whole subtree is admin-only by
+    // construction. The `require_admin` layer runs AFTER the outer
+    // `auth_middleware` (main.rs::protected_api), so it can rely on
+    // `CurrentUser` already being in the request extensions. Any new
+    // route added to `admin_handler::admin_routes()` inherits the
+    // gate automatically — implementors no longer have to remember
+    // to call `require_admin(&state, &headers).await?` inline, and a
+    // forgotten call can't silently expose a non-admin surface.
+    let admin_router = admin_handler::admin_routes()
+        .layer(axum::middleware::from_fn(
+            crate::interfaces::middleware::auth::require_admin,
+        ))
+        .with_state(app_state.clone());
     router = router.nest("/admin", admin_router);
 
     // ReBAC subject-group management. All mutating routes are admin-gated;

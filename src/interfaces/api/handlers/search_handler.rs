@@ -1,6 +1,6 @@
 use axum::{
     extract::{Json, Query, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde_json::json;
@@ -12,7 +12,6 @@ use crate::application::dtos::search_dto::{
 use crate::application::ports::inbound::SearchUseCase;
 use crate::common::di::AppState;
 use crate::interfaces::errors::AppError;
-use crate::interfaces::middleware::admin::require_admin;
 use crate::interfaces::middleware::auth::AuthUser;
 use std::sync::Arc;
 
@@ -189,22 +188,25 @@ impl SearchHandler {
         }
     }
 
-    /// `DELETE /search/cache` — flush the shared moka search results
-    /// cache. Admin-only.
+    /// `DELETE /admin/search/cache` — flush the shared moka search
+    /// results cache. Admin-only.
     ///
-    /// AuthZ audit #14 (2026-07-12): pre-fix this endpoint required
-    /// only a valid JWT (via the top-level auth middleware) — any
-    /// authenticated user, including external / magic-link accounts,
-    /// could DELETE it in a loop and keep the results cache cold
-    /// indefinitely (sustained DoS on every subsequent `/api/search`
-    /// query). Now gated by `require_admin` (401 for missing token,
-    /// 403 for non-admin caller, 200 for admin). Audit line on success
-    /// so operator-driven flushes are traceable in security reviews.
+    /// AuthZ audit #14 (2026-07-12): pre-fix this endpoint lived at
+    /// `/api/search/cache` and required only a valid JWT — any
+    /// authenticated user (external / magic-link included) could
+    /// DELETE it in a loop and keep the results cache cold indefinitely
+    /// (sustained DoS on every subsequent `/api/search` query). Now
+    /// mounted at `/api/admin/search/cache`, gated by the
+    /// `require_admin` middleware layer on the `/api/admin` nest point.
+    /// The handler no longer needs an inline authz call — reaching
+    /// this code implies `AuthUser` is admin by construction. Audit
+    /// line on success so operator-driven flushes are traceable in
+    /// security reviews.
     pub(super) async fn clear_search_cache_impl(
         State(state): State<Arc<AppState>>,
-        headers: HeaderMap,
+        auth_user: AuthUser,
     ) -> Result<Response, AppError> {
-        let (caller_id, _) = require_admin(&state, &headers).await?;
+        let caller_id = auth_user.id;
         info!("API: Clearing search cache");
 
         let Some(search_service) = &state.applications.search_service else {
@@ -396,7 +398,7 @@ pub async fn suggest_files(
 )]
 pub async fn clear_search_cache(
     state: State<Arc<AppState>>,
-    headers: HeaderMap,
+    auth_user: AuthUser,
 ) -> Result<Response, AppError> {
-    SearchHandler::clear_search_cache_impl(state, headers).await
+    SearchHandler::clear_search_cache_impl(state, auth_user).await
 }
