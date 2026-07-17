@@ -1074,7 +1074,8 @@ impl AppServiceFactory {
                 user_repository,
             )
             .with_drive_repo(
-                drive_repo as Arc<dyn crate::domain::repositories::drive_repository::DriveRepository>,
+                drive_repo
+                    as Arc<dyn crate::domain::repositories::drive_repository::DriveRepository>,
             ),
         );
         // Keep cached storage usage fresh off the request path: GET /api/auth/me

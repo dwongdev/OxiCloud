@@ -151,7 +151,6 @@ pub fn admin_routes() -> Router<Arc<AppState>> {
 pub async fn get_oidc_settings(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, AppError> {
-
     let svc = state
         .admin_settings_service
         .as_ref()
@@ -206,7 +205,6 @@ async fn test_oidc_connection(
     State(state): State<Arc<AppState>>,
     Json(dto): Json<TestOidcConnectionDto>,
 ) -> Result<impl IntoResponse, AppError> {
-
     let svc = state
         .admin_settings_service
         .as_ref()
@@ -239,7 +237,6 @@ async fn test_oidc_connection(
 pub async fn get_storage_settings(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, AppError> {
-
     let svc = state
         .storage_settings_service
         .as_ref()
@@ -294,7 +291,6 @@ async fn test_storage_connection(
     State(state): State<Arc<AppState>>,
     Json(dto): Json<TestStorageConnectionDto>,
 ) -> Result<impl IntoResponse, AppError> {
-
     let svc = state
         .storage_settings_service
         .as_ref()
@@ -349,7 +345,6 @@ pub async fn start_migration(
     Json(dto): Json<StartMigrationDto>,
 ) -> Result<impl IntoResponse, AppError> {
     use crate::infrastructure::services::migration_blob_backend::MigrationStatus;
-
 
     // Check not already running.
     {
@@ -521,7 +516,6 @@ pub async fn verify_migration(
     State(state): State<Arc<AppState>>,
     Json(dto): Json<VerifyMigrationDto>,
 ) -> Result<impl IntoResponse, AppError> {
-
     let pool = state
         .db_pool
         .clone()
@@ -652,7 +646,6 @@ fn build_backend_from_config(
 pub async fn get_dashboard_stats(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, AppError> {
-
     let auth = state
         .auth_service
         .as_ref()
@@ -742,7 +735,6 @@ pub async fn list_users(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ListUsersQueryDto>,
 ) -> Result<impl IntoResponse, AppError> {
-
     let auth = state
         .auth_service
         .as_ref()
@@ -789,7 +781,6 @@ pub async fn get_user(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, AppError> {
-
     let id = Uuid::parse_str(&id).map_err(|_| AppError::bad_request("Invalid UUID"))?;
 
     let auth = state
@@ -981,7 +972,6 @@ pub async fn update_user_quota(
     Path(id): Path<String>,
     Json(dto): Json<UpdateUserQuotaDto>,
 ) -> Result<impl IntoResponse, AppError> {
-
     let id = Uuid::parse_str(&id).map_err(|_| AppError::bad_request("Invalid UUID"))?;
 
     let auth = state
@@ -1024,7 +1014,6 @@ pub async fn create_user(
     State(state): State<Arc<AppState>>,
     Json(dto): Json<AdminCreateUserDto>,
 ) -> Result<impl IntoResponse, AppError> {
-
     let auth = state
         .auth_service
         .as_ref()
@@ -1064,7 +1053,6 @@ pub async fn reset_user_password(
     Path(id): Path<String>,
     Json(dto): Json<AdminResetPasswordDto>,
 ) -> Result<impl IntoResponse, AppError> {
-
     let id = Uuid::parse_str(&id).map_err(|_| AppError::bad_request("Invalid UUID"))?;
 
     let auth = state
@@ -1147,7 +1135,6 @@ pub async fn set_registration_setting(
 async fn reextract_audio_metadata(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, AppError> {
-
     let audio_service = state
         .applications
         .audio_metadata_service
@@ -1175,7 +1162,6 @@ async fn reextract_audio_metadata(
 async fn reextract_image_metadata(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, AppError> {
-
     let result = state
         .applications
         .media_metadata_service
@@ -1218,10 +1204,7 @@ async fn reextract_image_metadata(
     security(("bearerAuth" = [])),
     tag = "admin"
 )]
-async fn get_smtp_info(
-    State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, AppError> {
-
+async fn get_smtp_info(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, AppError> {
     let smtp = &state.core.config.smtp;
     let info = SmtpInfoDto {
         enabled: smtp.is_enabled() && state.email_sender.is_some(),
@@ -1252,7 +1235,6 @@ async fn get_captured_email(
     State(state): State<Arc<AppState>>,
     Query(params): Query<CapturedEmailQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-
     if !std::env::var("OXICLOUD_SMTP_MOCK")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false)
