@@ -140,6 +140,7 @@ impl SearchHandler {
     /// Autocomplete suggestions for search.
     pub(super) async fn suggest_files_impl(
         State(state): State<Arc<AppState>>,
+        auth_user: AuthUser,
         Query(params): Query<SuggestParams>,
     ) -> impl IntoResponse {
         info!("API: Search suggestions for {:?}", params.query);
@@ -159,7 +160,12 @@ impl SearchHandler {
         let limit = params.limit.unwrap_or(10).min(20);
 
         match search_service
-            .suggest(&params.query, params.folder_id.as_deref(), limit)
+            .suggest_with_perms(
+                &params.query,
+                params.folder_id.as_deref(),
+                limit,
+                auth_user.id,
+            )
             .await
         {
             Ok(suggestions) => {
@@ -354,9 +360,10 @@ pub async fn search_files_post(
 )]
 pub async fn suggest_files(
     state: State<Arc<AppState>>,
+    auth_user: AuthUser,
     query: Query<SuggestParams>,
 ) -> impl IntoResponse {
-    SearchHandler::suggest_files_impl(state, query).await
+    SearchHandler::suggest_files_impl(state, auth_user, query).await
 }
 
 #[utoipa::path(

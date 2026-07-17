@@ -204,38 +204,38 @@ jsonpath "$[*].id" contains "{{playlist_id}}"
 
 # ─────────────────────────────────────────────────────────────
 # Step 11 – Bob cannot rename the playlist. Viewer's bundle is
-# Read-only (no Update), so `require_playlist_perm(Update)` denies
-# with the 404 anti-enum shape.
+# Read-only (no Update). Bob has Read → graduated denial returns
+# 403 (see [[project_authz_require_graduated_denial]]).
 # ─────────────────────────────────────────────────────────────
 PUT {{base_url}}/api/playlists/{{playlist_id}}
 Authorization: Bearer {{bob_token}}
 Content-Type: application/json
 { "name": "hijacked" }
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
 # Step 12 – Bob cannot delete the playlist. Viewer's bundle
-# excludes Delete → 404.
+# excludes Delete → 403 (Read granted).
 # ─────────────────────────────────────────────────────────────
 DELETE {{base_url}}/api/playlists/{{playlist_id}}
 Authorization: Bearer {{bob_token}}
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
 # Step 13 – Bob cannot re-share the playlist. Viewer's bundle
-# excludes Share → 404 on the legacy /share endpoint (which now
-# routes through `authz.require(Share)`).
+# excludes Share → 403 (Read granted). The legacy /share endpoint
+# routes through `authz.require(Share)`.
 # ─────────────────────────────────────────────────────────────
 POST {{base_url}}/api/playlists/{{playlist_id}}/share
 Authorization: Bearer {{bob_token}}
 Content-Type: application/json
 { "user_id": "{{alice_user_id}}", "can_write": true }
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
@@ -277,13 +277,14 @@ jsonpath "$[?(@.subject.id == '{{bob_user_id}}')].resource.type" == "playlist"
 
 # ─────────────────────────────────────────────────────────────
 # Step 14c – Bob (Viewer only) is denied on the unified list
-# endpoint: `Share` is required, Viewer's bundle excludes it →
-# 404 anti-enum shape.
+# endpoint: `Share` is required, Viewer's bundle excludes it.
+# Bob has Read → graduated denial returns 403 (see
+# [[project_authz_require_graduated_denial]]).
 # ─────────────────────────────────────────────────────────────
 GET {{base_url}}/api/grants?resource_type=playlist&resource_id={{playlist_id}}
 Authorization: Bearer {{bob_token}}
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
@@ -346,13 +347,14 @@ jsonpath "$.description" == "renamed by editor bob"
 
 # ─────────────────────────────────────────────────────────────
 # Step 19 – Editor still cannot Share (Share stays Owner-only).
+# Bob has Read (Editor bundle) → graduated denial returns 403.
 # ─────────────────────────────────────────────────────────────
 POST {{base_url}}/api/playlists/{{playlist_id}}/share
 Authorization: Bearer {{bob_token}}
 Content-Type: application/json
 { "user_id": "{{alice_user_id}}", "can_write": false }
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────

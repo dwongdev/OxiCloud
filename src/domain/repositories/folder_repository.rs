@@ -269,13 +269,21 @@ pub trait FolderRepository: Send + Sync + 'static {
     /// Results are ordered by relevance (exact > starts-with > contains) for
     /// autocomplete suggestions.
     ///
+    /// `caller_id` scopes results to folders whose owning drive the caller
+    /// can Read (direct or group-mediated `role_grants`). Without it the
+    /// endpoint leaked names + paths across every tenant on the instance —
+    /// closed as AuthZ audit finding #1 (2026-07-12).
+    ///
     /// The default implementation falls back to `list_folders` + in-memory
-    /// filter so that stubs and mocks compile without changes.
+    /// filter so that stubs and mocks compile without changes. Stub-mode
+    /// callers already operate against a single tenant's data, so ignoring
+    /// `caller_id` here is safe; the PG impl enforces the real scope.
     async fn suggest_folders_by_name(
         &self,
         parent_id: Option<&str>,
         query: &str,
         limit: usize,
+        _caller_id: uuid::Uuid,
     ) -> Result<Vec<Folder>, DomainError> {
         let all = self.list_folders(parent_id).await?;
         let q = query.to_lowercase();

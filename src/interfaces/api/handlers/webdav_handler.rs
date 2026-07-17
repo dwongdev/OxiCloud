@@ -2220,18 +2220,27 @@ async fn handle_delete(
     // optimized resolver and the read repositories disagree on path
     // shape for some files; see `resolve_or_legacy` docs.
     let _ = file_retrieval_service; // present for legacy fallback if needed elsewhere
+    // AuthZ audit #2 (2026-07-12): route service errors through
+    // `AppError::from` so authz denials from `_with_perms` surface as
+    // 404 (the anti-enum shape). The prior `map_err(|e| internal_error…)`
+    // collapsed every error — including the `NotFound` that
+    // `authz.require` returns on denial — into HTTP 500, giving a
+    // reliable "exists-but-denied" vs "missing" oracle to a probing
+    // caller. Also preserves `QuotaExceeded → 507`,
+    // `AlreadyExists → 409`, `InvalidInput → 400` shapes surfacing
+    // through the standard error mapping.
     match resolve_or_legacy(&state, &path, drive_id).await {
         Some(ResolvedResource::Folder(folder)) => {
             folder_service
                 .delete_folder_with_perms(&folder.id, user.id)
                 .await
-                .map_err(|e| AppError::internal_error(format!("Failed to delete folder: {}", e)))?;
+                .map_err(AppError::from)?;
         }
         Some(ResolvedResource::File(file)) => {
             file_management_service
                 .delete_file_with_perms(&file.id, user.id)
                 .await
-                .map_err(|e| AppError::internal_error(format!("Failed to delete file: {}", e)))?;
+                .map_err(AppError::from)?;
         }
         None => return Err(AppError::not_found(format!("Resource not found: {}", path))),
     }
@@ -2380,28 +2389,23 @@ async fn handle_move(
         // RFC 4918 §9.9.3: when Overwrite: T, perform a DELETE on the
         // destination before moving. Without this the rename/move fails
         // on a unique-index conflict (same name in same parent).
+        // AuthZ audit #2 (2026-07-12): `_with_perms` returns `DomainError`;
+        // route through `AppError::from` so authz denials surface as 404 (the
+        // anti-enum shape) instead of a `map_err → internal_error` 500 that
+        // gives a probing caller an "exists-but-denied" oracle. Also preserves
+        // `QuotaExceeded → 507`, `AlreadyExists → 409`, `InvalidInput → 400`.
         match resolve_or_legacy(&state, &destination_path, dst_drive_id).await {
             Some(ResolvedResource::Folder(f)) => {
                 folder_service
                     .delete_folder_with_perms(&f.id, user.id)
                     .await
-                    .map_err(|e| {
-                        AppError::internal_error(format!(
-                            "Failed to delete existing destination: {}",
-                            e
-                        ))
-                    })?;
+                    .map_err(AppError::from)?;
             }
             Some(ResolvedResource::File(f)) => {
                 file_management_service
                     .delete_file_with_perms(&f.id, user.id)
                     .await
-                    .map_err(|e| {
-                        AppError::internal_error(format!(
-                            "Failed to delete existing destination: {}",
-                            e
-                        ))
-                    })?;
+                    .map_err(AppError::from)?;
             }
             None => {}
         }
@@ -2679,28 +2683,23 @@ async fn handle_copy(
         // RFC 4918 §9.8.4: when Overwrite: T, the server MUST perform a
         // DELETE on the destination before the copy. Without this the copy
         // service returns a unique-index conflict (500).
+        // AuthZ audit #2 (2026-07-12): `_with_perms` returns `DomainError`;
+        // route through `AppError::from` so authz denials surface as 404 (the
+        // anti-enum shape) instead of a `map_err → internal_error` 500 that
+        // gives a probing caller an "exists-but-denied" oracle. Also preserves
+        // `QuotaExceeded → 507`, `AlreadyExists → 409`, `InvalidInput → 400`.
         match resolve_or_legacy(&state, &destination_path, dst_drive_id).await {
             Some(ResolvedResource::Folder(f)) => {
                 folder_service
                     .delete_folder_with_perms(&f.id, user.id)
                     .await
-                    .map_err(|e| {
-                        AppError::internal_error(format!(
-                            "Failed to delete existing destination: {}",
-                            e
-                        ))
-                    })?;
+                    .map_err(AppError::from)?;
             }
             Some(ResolvedResource::File(f)) => {
                 file_management_service
                     .delete_file_with_perms(&f.id, user.id)
                     .await
-                    .map_err(|e| {
-                        AppError::internal_error(format!(
-                            "Failed to delete existing destination: {}",
-                            e
-                        ))
-                    })?;
+                    .map_err(AppError::from)?;
             }
             None => {}
         }
@@ -2754,6 +2753,12 @@ async fn handle_copy(
         }
     };
 
+    // AuthZ audit #2 (2026-07-12): route service errors through
+    // `AppError::from` so authz denials from `_with_perms` surface as 404
+    // (the anti-enum shape) instead of a `map_err → internal_error` 500
+    // that gives a probing caller an "exists-but-denied" oracle. Also
+    // preserves `QuotaExceeded → 507`, `AlreadyExists → 409`,
+    // `InvalidInput → 400` shapes.
     match resolved {
         ResolvedResource::Folder(folder) => {
             let recursive = depth != "0";
@@ -2766,9 +2771,7 @@ async fn handle_copy(
                         Some(dest_name.to_string()),
                     )
                     .await
-                    .map_err(|e| {
-                        AppError::internal_error(format!("Failed to copy folder tree: {}", e))
-                    })?;
+                    .map_err(AppError::from)?;
             } else {
                 let create_dto = crate::application::dtos::folder_dto::CreateFolderDto {
                     name: dest_name.to_string(),
@@ -2777,12 +2780,7 @@ async fn handle_copy(
                 folder_service
                     .create_folder_with_perms(create_dto, user.id)
                     .await
-                    .map_err(|e| {
-                        AppError::internal_error(format!(
-                            "Failed to create destination folder: {}",
-                            e
-                        ))
-                    })?;
+                    .map_err(AppError::from)?;
             }
         }
         ResolvedResource::File(file) => {
@@ -2790,7 +2788,7 @@ async fn handle_copy(
             file_management_service
                 .copy_file_with_perms(&file.id, user.id, target_parent_id, copy_name)
                 .await
-                .map_err(|e| AppError::internal_error(format!("Failed to copy file: {}", e)))?;
+                .map_err(AppError::from)?;
         }
     }
 

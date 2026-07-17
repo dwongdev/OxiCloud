@@ -1233,31 +1233,39 @@ impl FolderRepository for FolderDbRepository {
         parent_id: Option<&str>,
         query: &str,
         limit: usize,
+        caller_id: uuid::Uuid,
     ) -> Result<Vec<Folder>, DomainError> {
+        // Same drive-scope filter as `suggest_files_by_name` — closed as
+        // AuthZ audit finding #1 (2026-07-12). `CALLER_CAN_READ_DRIVE`
+        // aliases `storage.folders` as `fo`; the pre-fix query aliased it
+        // as an unqualified `storage.folders`, so this rewrite adds the
+        // `fo` alias in every branch.
         let pattern = super::like_escape(query);
         let limit_i64 = limit as i64;
 
         let rows: Vec<FolderRow> = if let Some(pid) = parent_id {
-            sqlx::query_as(
+            sqlx::query_as(&format!(
                 r#"
-                SELECT id::text, name, path, parent_id::text, drive_id,
-                       EXTRACT(EPOCH FROM created_at)::bigint,
-                       EXTRACT(EPOCH FROM updated_at)::bigint,
-                       EXTRACT(EPOCH FROM tree_modified_at)::bigint,
-                         created_by, updated_by
-                  FROM storage.folders
-                 WHERE parent_id = $1::uuid
-                   AND NOT is_trashed
-                   AND name ILIKE $2
+                SELECT fo.id::text, fo.name, fo.path, fo.parent_id::text, fo.drive_id,
+                       EXTRACT(EPOCH FROM fo.created_at)::bigint,
+                       EXTRACT(EPOCH FROM fo.updated_at)::bigint,
+                       EXTRACT(EPOCH FROM fo.tree_modified_at)::bigint,
+                         fo.created_by, fo.updated_by
+                  FROM storage.folders fo
+                 WHERE {CALLER_CAN_READ_DRIVE}
+                   AND fo.parent_id = $2::uuid
+                   AND NOT fo.is_trashed
+                   AND fo.name ILIKE $3
                  ORDER BY CASE
-                            WHEN name ILIKE $3 THEN 0
-                            WHEN name ILIKE $3 || '%' THEN 1
+                            WHEN fo.name ILIKE $4 THEN 0
+                            WHEN fo.name ILIKE $4 || '%' THEN 1
                             ELSE 2
                           END,
-                          name
-                 LIMIT $4
-                "#,
-            )
+                          fo.name
+                 LIMIT $5
+                "#
+            ))
+            .bind(caller_id)
             .bind(pid)
             .bind(&pattern)
             .bind(query)
@@ -1265,26 +1273,28 @@ impl FolderRepository for FolderDbRepository {
             .fetch_all(self.pool())
             .await
         } else {
-            sqlx::query_as(
+            sqlx::query_as(&format!(
                 r#"
-                SELECT id::text, name, path, parent_id::text, drive_id,
-                       EXTRACT(EPOCH FROM created_at)::bigint,
-                       EXTRACT(EPOCH FROM updated_at)::bigint,
-                       EXTRACT(EPOCH FROM tree_modified_at)::bigint,
-                         created_by, updated_by
-                  FROM storage.folders
-                 WHERE parent_id IS NULL
-                   AND NOT is_trashed
-                   AND name ILIKE $1
+                SELECT fo.id::text, fo.name, fo.path, fo.parent_id::text, fo.drive_id,
+                       EXTRACT(EPOCH FROM fo.created_at)::bigint,
+                       EXTRACT(EPOCH FROM fo.updated_at)::bigint,
+                       EXTRACT(EPOCH FROM fo.tree_modified_at)::bigint,
+                         fo.created_by, fo.updated_by
+                  FROM storage.folders fo
+                 WHERE {CALLER_CAN_READ_DRIVE}
+                   AND fo.parent_id IS NULL
+                   AND NOT fo.is_trashed
+                   AND fo.name ILIKE $2
                  ORDER BY CASE
-                            WHEN name ILIKE $2 THEN 0
-                            WHEN name ILIKE $2 || '%' THEN 1
+                            WHEN fo.name ILIKE $3 THEN 0
+                            WHEN fo.name ILIKE $3 || '%' THEN 1
                             ELSE 2
                           END,
-                          name
-                 LIMIT $3
-                "#,
-            )
+                          fo.name
+                 LIMIT $4
+                "#
+            ))
+            .bind(caller_id)
             .bind(&pattern)
             .bind(query)
             .bind(limit_i64)

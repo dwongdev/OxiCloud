@@ -6,9 +6,10 @@
 #
 #   1. Per-role gates through the drive-scope resolver: a Viewer on a
 #      shared drive can PROPFIND/GET but cannot MKCOL/PUT/MOVE. An
-#      Editor can. AuthZ denials return `NotFound` (anti-enum), so
-#      a probing caller can't tell a genuinely-missing folder from
-#      one they simply lack Create on.
+#      Editor can. AuthZ denials use graduated shape: a caller with
+#      Read on the target (Viewer here) gets 403 Forbidden — no point
+#      hiding existence from someone already reading it. A caller with
+#      no Read at all gets 404 (anti-enum), matching "no such folder".
 #
 #   2. Drive policy `forbid_cross_drive_move` gates MOVE at the
 #      SOURCE drive (see `DrivePolicies::refuse_cross_drive_move`
@@ -123,17 +124,22 @@ HTTP 207
 
 # ─────────────────────────────────────────────────────────────
 # Step 6 — Bob (VIEWER) CANNOT MKCOL on the shared drive.
-#          `authz.require(Create, Folder)` denial returns
-#          `DomainError::not_found` (anti-enum), which maps to 404.
+#          `authz.require(Create, Folder)` denies. Bob has Read
+#          on the drive (viewer role) → engine's graduated denial
+#          returns `DomainError::access_denied` → 403 Forbidden.
+#          Anti-enum still holds for callers with no Read at all
+#          (would surface as 404); this is the "you can see it,
+#          but can't touch it" branch.
 # ─────────────────────────────────────────────────────────────
 MKCOL {{base_url}}/webdav/@drive/{{shared_drive_id}}/viewer-blocked-folder
 Authorization: Bearer {{bob_token}}
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 7 — Bob (VIEWER) CANNOT PUT a file.
+# Step 7 — Bob (VIEWER) CANNOT PUT a file. Same 403 shape
+#          (Bob has Read on the drive).
 # ─────────────────────────────────────────────────────────────
 PUT {{base_url}}/webdav/@drive/{{shared_drive_id}}/viewer-blocked-file.txt
 Authorization: Bearer {{bob_token}}
@@ -142,7 +148,7 @@ Content-Type: text/plain
 viewer should not upload
 ```
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
@@ -158,13 +164,47 @@ HTTP 201
 # ─────────────────────────────────────────────────────────────
 # Step 9 — Bob (VIEWER) CANNOT MOVE (rename) the probe folder.
 #          MOVE requires Update on the source, which Viewer
-#          doesn't have. Same anti-enum 404 shape.
+#          doesn't have. Bob can Read the folder (viewer) → 403.
 # ─────────────────────────────────────────────────────────────
 MOVE {{base_url}}/webdav/@drive/{{shared_drive_id}}/probe-folder
 Authorization: Bearer {{bob_token}}
 Destination: {{base_url}}/webdav/@drive/{{shared_drive_id}}/probe-folder-renamed
 
-HTTP 404
+HTTP 403
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 9b — Bob (VIEWER) CANNOT COPY the probe folder.
+#           COPY requires Create on the destination parent, which
+#           Viewer doesn't have. Bob has Read on both source and
+#           destination parent → 403 (graduated denial).
+#
+#           This is the regression pin for AuthZ audit #2
+#           (2026-07-12): the COPY handler used to `map_err(|e|
+#           AppError::internal_error(format!("Failed to copy folder
+#           tree: {}", e)))?` on `copy_folder_tree_with_perms`,
+#           collapsing the `DomainError` engine returned on denial
+#           into HTTP 500 — an "exists-but-denied" oracle. Fix
+#           routes through `AppError::from` so the same denial
+#           surfaces as the correct 403 / 404 per graduated-denial
+#           policy.
+# ─────────────────────────────────────────────────────────────
+COPY {{base_url}}/webdav/@drive/{{shared_drive_id}}/probe-folder
+Authorization: Bearer {{bob_token}}
+Destination: {{base_url}}/webdav/@drive/{{shared_drive_id}}/probe-folder-copy
+
+HTTP 403
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 9c — Bob (VIEWER) CANNOT DELETE the probe folder.
+#           DELETE requires Delete on the target, which Viewer
+#           doesn't have. Bob has Read → 403.
+# ─────────────────────────────────────────────────────────────
+DELETE {{base_url}}/webdav/@drive/{{shared_drive_id}}/probe-folder
+Authorization: Bearer {{bob_token}}
+
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────

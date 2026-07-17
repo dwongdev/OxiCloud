@@ -137,14 +137,15 @@ jsonpath "$.grants[0].role" == "viewer"
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 7 — Viewer cannot rename (no update grant).
+# Step 7 — Viewer cannot rename (no Update grant). Dave has Read
+# (viewer role) → graduated denial returns 403.
 # ─────────────────────────────────────────────────────────────
 PUT {{base_url}}/api/folders/{{shared_folder_id}}/rename
 Authorization: Bearer {{dave_token}}
 Content-Type: application/json
 { "name": "bob-tried-again" }
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
@@ -260,14 +261,15 @@ jsonpath "$[0].role" == "viewer"
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 16 — Demoted Bob can no longer rename.
+# Step 16 — Demoted Bob (now Viewer) can no longer rename. Read
+# is still granted → graduated denial returns 403.
 # ─────────────────────────────────────────────────────────────
 PUT {{base_url}}/api/folders/{{shared_folder_id}}/rename
 Authorization: Bearer {{dave_token}}
 Content-Type: application/json
 { "name": "bob-tried-after-demote" }
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
@@ -594,34 +596,37 @@ Authorization: Bearer {{adam_token}}
 
 HTTP 200
 
-# ── Mutations still denied (Viewer has no Update/Create/Delete) ─
+# ── Mutations still denied (Viewer has no Update/Create/Delete).
+#    Viewer has Read → graduated denial returns 403 (not 404
+#    anti-enum, which is reserved for Phase 2A above where Adam
+#    had no Read at all).
 POST {{base_url}}/api/folders
 Authorization: Bearer {{adam_token}}
 Content-Type: application/json
 { "name": "adam-attack-2", "parent_id": "{{perm_folder_id}}" }
 
-HTTP 404
+HTTP 403
 
 PUT {{base_url}}/api/folders/{{perm_folder_id}}/rename
 Authorization: Bearer {{adam_token}}
 Content-Type: application/json
 { "name": "adam-rename-as-viewer" }
 
-HTTP 404
+HTTP 403
 
 PUT {{base_url}}/api/files/{{perm_file_id}}/rename
 Authorization: Bearer {{adam_token}}
 Content-Type: application/json
 { "name": "adam-file-rename-as-viewer" }
 
-HTTP 404
+HTTP 403
 
 PUT {{base_url}}/api/files/{{perm_file_id}}/thumbnail/icon
 Authorization: Bearer {{adam_token}}
 Content-Type: image/png
 file,fixtures/blue-image.png;
 
-HTTP 404
+HTTP 403
 
 POST {{base_url}}/api/files/upload
 Authorization: Bearer {{adam_token}}
@@ -629,17 +634,17 @@ Authorization: Bearer {{adam_token}}
 folder_id: {{perm_folder_id}}
 file: file,fixtures/hello.txt; text/plain
 
-HTTP 404
+HTTP 403
 
 DELETE {{base_url}}/api/files/{{perm_file_id}}
 Authorization: Bearer {{adam_token}}
 
-HTTP 404
+HTTP 403
 
 DELETE {{base_url}}/api/folders/{{perm_folder_id}}
 Authorization: Bearer {{adam_token}}
 
-HTTP 404
+HTTP 403
 
 # ── Viewer cannot start a chunked upload (no Create grant) ──
 POST {{base_url}}/api/uploads
@@ -653,7 +658,7 @@ Content-Type: application/json
   "chunk_size": 3000000
 }
 
-HTTP 404
+HTTP 403
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -813,16 +818,17 @@ Authorization: Bearer {{adam_token}}
 
 HTTP 204
 
-# ── Delete still denied (Editor excludes Delete) ────────────
+# ── Delete still denied (Editor excludes Delete). Editor has
+#    Read → graduated denial returns 403.
 DELETE {{base_url}}/api/files/{{perm_file_id}}
 Authorization: Bearer {{adam_token}}
 
-HTTP 404
+HTTP 403
 
 DELETE {{base_url}}/api/folders/{{perm_folder_id}}
 Authorization: Bearer {{adam_token}}
 
-HTTP 404
+HTTP 403
 
 
 # ════════════════════════════════════════════════════════════════════

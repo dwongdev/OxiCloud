@@ -1422,12 +1422,20 @@ impl FileReadPort for FileBlobReadRepository {
         folder_id: Option<&str>,
         query: &str,
         limit: usize,
+        caller_id: Uuid,
     ) -> Result<Vec<File>, DomainError> {
+        // Scope by drive membership: `CALLER_CAN_READ_DRIVE` (`$1` =
+        // caller_id) restricts the result set to files whose owning drive
+        // the caller has any active `role_grants` on — direct or via a
+        // transitive group cascade. Pre-fix, the query only filtered on
+        // `NOT is_trashed AND name ILIKE $pattern`, exposing names + paths
+        // across every tenant on the instance (AuthZ audit finding #1,
+        // 2026-07-12).
         let pattern = super::like_escape(query);
         let limit_i64 = limit as i64;
 
         let rows: Vec<FileRow> = if let Some(fid) = folder_id {
-            sqlx::query_as(
+            sqlx::query_as(&format!(
                 r#"
                 SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
                        fi.size, fi.mime_type,
@@ -1438,7 +1446,40 @@ impl FileReadPort for FileBlobReadRepository {
                    fi.created_by, fi.updated_by
                   FROM storage.files fi
                   LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
-                 WHERE fi.folder_id = $1::uuid
+                 WHERE {CALLER_CAN_READ_DRIVE}
+                   AND fi.folder_id = $2::uuid
+                   AND NOT fi.is_trashed
+                   AND fi.name ILIKE $3
+                 ORDER BY CASE
+                            WHEN fi.name ILIKE $4 THEN 0
+                            WHEN fi.name ILIKE $4 || '%' THEN 1
+                            ELSE 2
+                          END,
+                          fi.name
+                 LIMIT $5
+                "#
+            ))
+            .bind(caller_id)
+            .bind(fid)
+            .bind(&pattern)
+            .bind(query)
+            .bind(limit_i64)
+            .fetch_all(self.pool.as_ref())
+            .await
+        } else {
+            sqlx::query_as(&format!(
+                r#"
+                SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
+                       fi.size, fi.mime_type,
+                       EXTRACT(EPOCH FROM fi.created_at)::bigint,
+                       EXTRACT(EPOCH FROM fi.updated_at)::bigint,
+                       fi.blob_hash,
+
+                   fi.created_by, fi.updated_by
+                  FROM storage.files fi
+                  LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
+                 WHERE {CALLER_CAN_READ_DRIVE}
+                   AND fi.folder_id IS NULL
                    AND NOT fi.is_trashed
                    AND fi.name ILIKE $2
                  ORDER BY CASE
@@ -1448,38 +1489,9 @@ impl FileReadPort for FileBlobReadRepository {
                           END,
                           fi.name
                  LIMIT $4
-                "#,
-            )
-            .bind(fid)
-            .bind(&pattern)
-            .bind(query)
-            .bind(limit_i64)
-            .fetch_all(self.pool.as_ref())
-            .await
-        } else {
-            sqlx::query_as(
-                r#"
-                SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
-                       fi.size, fi.mime_type,
-                       EXTRACT(EPOCH FROM fi.created_at)::bigint,
-                       EXTRACT(EPOCH FROM fi.updated_at)::bigint,
-                       fi.blob_hash,
-
-                   fi.created_by, fi.updated_by
-                  FROM storage.files fi
-                  LEFT JOIN storage.folders fo ON fo.id = fi.folder_id
-                 WHERE fi.folder_id IS NULL
-                   AND NOT fi.is_trashed
-                   AND fi.name ILIKE $1
-                 ORDER BY CASE
-                            WHEN fi.name ILIKE $2 THEN 0
-                            WHEN fi.name ILIKE $2 || '%' THEN 1
-                            ELSE 2
-                          END,
-                          fi.name
-                 LIMIT $3
-                "#,
-            )
+                "#
+            ))
+            .bind(caller_id)
             .bind(&pattern)
             .bind(query)
             .bind(limit_i64)

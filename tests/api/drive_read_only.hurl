@@ -30,9 +30,13 @@
 #   1. Baseline — drive not frozen → owner can upload / rename /
 #      delete / trash / share (proves the fixture is writable).
 #   2. Admin freezes the drive via PATCH policies.
-#   3. Every mutation attempt returns 404 (anti-enum):
-#        upload, rename, delete, trash-restore, permanent delete,
-#        create public link, rename the drive itself.
+#   3. Every mutation attempt is refused. The engine's graduated
+#      denial returns 403 to the owner (who can Read their own
+#      drive) — anti-enum only kicks in for callers with no Read
+#      at all, whose 404 shape is exercised by the cross-tenant
+#      tests in `webdav_permissions.hurl` / `permissions.hurl`.
+#      Cases: upload, rename, delete, trash-restore, permanent
+#      delete, create public link, rename the drive itself.
 #   4. Read still works: GET /api/drives, GET /api/folders,
 #      download the file, list trash.
 #   5. Admin unfreezes.
@@ -203,9 +207,13 @@ jsonpath "$[?(@.id=='{{personal_drive_id}}')].policies.read_only" == true
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 8 — MUTATIONS BLOCKED. Upload → 404 (Create).
-#          Anti-enum: NotFound not 403, same shape as "no such
-#          folder." The engine gate emits an audit line with
+# Step 8 — MUTATIONS BLOCKED. Upload → 403 (Create).
+#          Graduated denial: owner can Read their own frozen
+#          drive, so the engine returns `access_denied` → 403
+#          rather than the anti-enum 404 (hiding a drive from
+#          its owner would be absurd). Cross-tenant callers with
+#          no Read on the drive still see 404 by the same code
+#          path. The engine gate emits an audit line with
 #          `reason = drive_read_only` — inspectable in server
 #          logs, not asserted here (no log-scraping harness).
 # ─────────────────────────────────────────────────────────────
@@ -215,11 +223,11 @@ Authorization: Bearer {{owner_token}}
 folder_id: {{personal_root_id}}
 file: file,fixtures/hello.txt; text/plain
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 9 — Rename file A → 404 (Update). Endpoint is
+# Step 9 — Rename file A → 403 (Update). Endpoint is
 #          `PUT /api/files/{id}/rename` (not PATCH — the file
 #          service exposes rename as a distinct verb, mirroring
 #          the folder side). WebDAV MOVE would fire the same
@@ -230,30 +238,30 @@ Authorization: Bearer {{owner_token}}
 Content-Type: application/json
 { "name": "renamed_during_freeze.txt" }
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 10 — Delete file A → 404 (Delete).
+# Step 10 — Delete file A → 403 (Delete).
 # ─────────────────────────────────────────────────────────────
 DELETE {{base_url}}/api/trash/files/{{file_a_id}}
 Authorization: Bearer {{owner_token}}
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 11 — Restore file B from trash → 404 (Update on the
+# Step 11 — Restore file B from trash → 403 (Update on the
 #           soft-deleted row is a mutation like any other).
 # ─────────────────────────────────────────────────────────────
 POST {{base_url}}/api/trash/{{file_b_id}}/restore
 Authorization: Bearer {{owner_token}}
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 12 — Permanent delete of file B → 404 (Delete).
+# Step 12 — Permanent delete of file B → 403 (Delete).
 #           Note: the background retention purge SQL filter is
 #           tested via source-review + a unit test on the
 #           `delete_expired_bulk` query, not here — advancing
@@ -265,11 +273,11 @@ HTTP 404
 DELETE {{base_url}}/api/trash/{{file_b_id}}
 Authorization: Bearer {{owner_token}}
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 13 — Share creation → 404 (Share). Goes through
+# Step 13 — Share creation → 403 (Share). Goes through
 #           `share_service::create_shared_link` which calls
 #           `authz.require(Share, Resource::File)` → engine gate.
 # ─────────────────────────────────────────────────────────────
@@ -281,11 +289,11 @@ Content-Type: application/json
   "item_type": "file"
 }
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
-# Step 14 — Grant (per-resource, not public link) → 404 (Share).
+# Step 14 — Grant (per-resource, not public link) → 403 (Share).
 #           Same engine gate — Share permission on File is
 #           refused regardless of which endpoint asks for it.
 # ─────────────────────────────────────────────────────────────
@@ -298,7 +306,7 @@ Content-Type: application/json
   "role":     "viewer"
 }
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────

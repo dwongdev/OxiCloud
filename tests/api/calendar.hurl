@@ -234,13 +234,14 @@ jsonpath "$[?(@.subject.id == '{{bob_user_id}}')].resource.type" == "calendar"
 
 # ─────────────────────────────────────────────────────────────
 # Step 8c – Viewer Bob is denied on the unified list endpoint —
-# `Share` is required, Viewer's bundle excludes it → 404
-# anti-enum shape (same treatment as any other resource type).
+# `Share` is required, Viewer's bundle excludes it. Bob has Read
+# on the calendar → graduated denial returns 403 (see
+# [[project_authz_require_graduated_denial]]).
 # ─────────────────────────────────────────────────────────────
 GET {{base_url}}/api/grants?resource_type=calendar&resource_id={{calendar_id}}
 Authorization: Bearer {{bob_token}}
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────

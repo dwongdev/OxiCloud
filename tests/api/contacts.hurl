@@ -412,10 +412,12 @@ HTTP 200
 jsonpath "$[?(@.id == '{{share_book_id}}')].is_readonly" == true
 
 
-# Step 21 — Viewer bundle has no Create permission — Bob's
-# contact write still 404s. Same minimal-body reasoning as
-# Step 18b: keep the request valid at the wire layer so any
-# rejection has to come from the AuthZ engine.
+# Step 21 — Viewer bundle has no Create permission. Bob has Read
+# on the address book (viewer role) so graduated denial returns
+# 403, not 404 (see [[project_authz_require_graduated_denial]]).
+# Same minimal-body reasoning as Step 18b: keep the request valid
+# at the wire layer so any rejection has to come from the AuthZ
+# engine.
 POST {{base_url}}/api/address-books/{{share_book_id}}/contacts
 Authorization: Bearer {{bob_token}}
 Content-Type: application/json
@@ -423,7 +425,7 @@ Content-Type: application/json
   "full_name": "Viewer Cannot Write"
 }
 
-HTTP 404
+HTTP 403
 
 
 # Step 21b — Unified list-on-resource: Alice queries
@@ -445,11 +447,12 @@ jsonpath "$[?(@.subject.id == '{{bob_user_id}}')].resource.type" == "address_boo
 
 
 # Step 21c — Viewer Bob is denied on the unified list endpoint —
-# `Share` isn't in the Viewer bundle → 404 anti-enum shape.
+# `Share` isn't in the Viewer bundle. Bob has Read → graduated
+# denial returns 403 (see [[project_authz_require_graduated_denial]]).
 GET {{base_url}}/api/grants?resource_type=address_book&resource_id={{share_book_id}}
 Authorization: Bearer {{bob_token}}
 
-HTTP 404
+HTTP 403
 
 
 # Step 22 — Alice revokes the grant.

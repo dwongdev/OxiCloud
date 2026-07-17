@@ -564,34 +564,35 @@ jsonpath "$[*].id" contains {{team_drive_id}}
 #            `Permission::Create` on the parent folder — bundled
 #            with `owner`/`editor`/`contributor` role_grants only,
 #            NOT with `viewer`. `POST /api/files/upload` shares the
-#            same `save_file_with_blob` gate, so a Viewer probe
-#            must land 404 (anti-enum: same shape as no-such-folder)
-#            + `authz.denied` audit line. Also verify the batch /
-#            overwrite paths refuse — the whole chain from
-#            drive-membership to file write is exercised here.
+#            same `save_file_with_blob` gate. Bob has Read on the
+#            drive (viewer role cascades) → graduated denial returns
+#            403 (see [[project_authz_require_graduated_denial]]).
+#            Also verify the batch / overwrite paths refuse — the
+#            whole chain from drive-membership to file write is
+#            exercised here.
 # ─────────────────────────────────────────────────────────────
 
-# 22b.i — Fresh file: 404.
+# 22b.i — Fresh file: 403.
 POST {{base_url}}/api/files/upload
 Authorization: Bearer {{bob_token}}
 [MultipartFormData]
 folder_id: {{team_root_folder_id}}
 file: file,fixtures/hello.txt; text/plain
 
-HTTP 404
+HTTP 403
 
 
-# 22b.ii — Overwrite attempt on the Editor-era upload: still 404.
+# 22b.ii — Overwrite attempt on the Editor-era upload: still 403.
 #          `save_file_with_blob` catches the duplicate name at the
 #          `Create`-permission check before the upsert races (which
-#          would otherwise 409). The audit shape stays 404.
+#          would otherwise 409).
 POST {{base_url}}/api/files/upload
 Authorization: Bearer {{bob_token}}
 [MultipartFormData]
 folder_id: {{team_root_folder_id}}
 file: file,fixtures/hello.txt; text/plain
 
-HTTP 404
+HTTP 403
 
 
 # 22b.iii — Alice's Editor-era file is untouched.
@@ -698,8 +699,8 @@ jsonpath "$.role" == "viewer"
 
 # ─────────────────────────────────────────────────────────────
 # Step 25 — Viewer CANNOT edit drive members.
-#           Bob is Viewer. Every member-mutation verb → 404
-#           (anti-enum: same shape as if the drive didn't exist).
+#           Bob is Viewer (has Read on the drive) → graduated denial
+#           returns 403 on every member-mutation verb.
 # ─────────────────────────────────────────────────────────────
 POST {{base_url}}/api/drives/{{team_drive_id}}/members
 Authorization: Bearer {{bob_token}}
@@ -709,7 +710,7 @@ Content-Type: application/json
   "role": "editor"
 }
 
-HTTP 404
+HTTP 403
 
 
 PATCH {{base_url}}/api/drives/{{team_drive_id}}/members/user/{{carol_user_id}}
@@ -717,13 +718,13 @@ Authorization: Bearer {{bob_token}}
 Content-Type: application/json
 { "role": "viewer" }
 
-HTTP 404
+HTTP 403
 
 
 DELETE {{base_url}}/api/drives/{{team_drive_id}}/members/user/{{carol_user_id}}
 Authorization: Bearer {{bob_token}}
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
@@ -739,7 +740,7 @@ Content-Type: application/json
 HTTP 200
 
 
-# 26a — Editor POST /api/drives/{id}/members → 404.
+# 26a — Editor POST /api/drives/{id}/members → 403 (Editor has Read).
 POST {{base_url}}/api/drives/{{team_drive_id}}/members
 Authorization: Bearer {{bob_token}}
 Content-Type: application/json
@@ -748,39 +749,39 @@ Content-Type: application/json
   "role": "viewer"
 }
 
-HTTP 404
+HTTP 403
 
 
-# 26b — Editor PATCH a member → 404.
+# 26b — Editor PATCH a member → 403.
 PATCH {{base_url}}/api/drives/{{team_drive_id}}/members/user/{{carol_user_id}}
 Authorization: Bearer {{bob_token}}
 Content-Type: application/json
 { "role": "viewer" }
 
-HTTP 404
+HTTP 403
 
 
-# 26c — Editor DELETE a member → 404.
+# 26c — Editor DELETE a member → 403.
 DELETE {{base_url}}/api/drives/{{team_drive_id}}/members/user/{{carol_user_id}}
 Authorization: Bearer {{bob_token}}
 
-HTTP 404
+HTTP 403
 
 
-# 26d — Editor renames the drive (root folder) → 404.
+# 26d — Editor renames the drive (root folder) → 403.
 #       Folder rename normally requires `Permission::Update` (which
 #       Editor has on every folder in the drive via the engine's drive
 #       precheck). The folder service promotes the requirement to
 #       `Permission::Manage` when the target folder has `parent_id IS
 #       NULL` — i.e. it's a drive root — so the drive-rename surface is
 #       Owner-only per drive.md §6, without changing the public folder
-#       endpoint shape. Anti-enum: refusal returns 404 (not 403).
+#       endpoint shape. Editor has Read → graduated denial → 403.
 PUT {{base_url}}/api/folders/{{team_root_folder_id}}/rename
 Authorization: Bearer {{bob_token}}
 Content-Type: application/json
 { "name": "team-drive-editor-renamed" }
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
@@ -883,7 +884,7 @@ HTTP 404
 
 # ─────────────────────────────────────────────────────────────
 # Step 30 — Drive delete (D3b).
-#           - Non-Owner → 404 (Bob is Viewer post-Step 28).
+#           - Non-Owner → 403 (Bob is Viewer post-Step 28, has Read).
 #           - Owner on non-empty drive → 409 (the editor-created-folder
 #             from Step 27 is still live).
 #           - Owner after the folder is trashed → 204.
@@ -892,12 +893,11 @@ HTTP 404
 #           we exercise its 405 below.
 # ─────────────────────────────────────────────────────────────
 
-# 30a — Viewer (Bob) cannot delete the drive → 404, anti-enum same as
-#       the member-mutation refusals.
+# 30a — Viewer (Bob) cannot delete the drive → 403 (has Read).
 DELETE {{base_url}}/api/drives/{{team_drive_id}}
 Authorization: Bearer {{bob_token}}
 
-HTTP 404
+HTTP 403
 
 
 # 30b — Owner (Alice) on a non-empty drive → 409 with the canonical

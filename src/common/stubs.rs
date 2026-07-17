@@ -725,6 +725,7 @@ impl SearchUseCase for StubSearchUseCase {
         _query: &str,
         _folder_id: Option<&str>,
         _limit: usize,
+        _caller_id: Uuid,
     ) -> Result<SearchSuggestionsDto, DomainError> {
         Ok(SearchSuggestionsDto {
             suggestions: Vec::new(),
