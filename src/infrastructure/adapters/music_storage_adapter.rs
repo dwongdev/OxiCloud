@@ -95,6 +95,11 @@ impl MusicStoragePort for MusicStorageAdapter {
         }
     }
 
+    async fn get_playlists_by_ids(&self, ids: &[Uuid]) -> Result<Vec<PlaylistDto>, DomainError> {
+        let playlists = self.playlist_repository.find_playlists_by_ids(ids).await?;
+        Ok(playlists.into_iter().map(PlaylistDto::from).collect())
+    }
+
     async fn list_playlists_by_owner(
         &self,
         owner_id: Uuid,

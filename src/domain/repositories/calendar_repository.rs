@@ -25,6 +25,12 @@ pub trait CalendarRepository: Send + Sync + 'static {
     /// Finds a calendar by its ID
     async fn find_calendar_by_id(&self, id: &Uuid) -> CalendarRepositoryResult<Calendar>;
 
+    /// Batch sibling of [`Self::find_calendar_by_id`]: one `= ANY($1)`
+    /// round-trip for a page of grant-derived ids. Missing ids drop out
+    /// (no per-id NotFound), matching the listing carve-out for
+    /// deleted/trashed races. Ordering is not guaranteed.
+    async fn find_calendars_by_ids(&self, ids: &[Uuid]) -> CalendarRepositoryResult<Vec<Calendar>>;
+
     /// Lists all calendars owned by a specific user. Post-Round-3 the
     /// service layer prefers `authz.list_incoming_grants` (surfaces
     /// owned + shared in one union), but this direct lookup remains

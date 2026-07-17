@@ -196,15 +196,18 @@ impl MusicUseCase for MusicService {
         // only. Owner is a grant like any other in `role_grants`, so we
         // filter the aggregated set against the owner_id stamped on
         // each row after hydration — cheaper than a second SQL round-trip.
-        let mut playlists: Vec<PlaylistDto> = Vec::with_capacity(playlist_ids.len());
+        // Hydrate in ONE `= ANY` round-trip (was one point SELECT per
+        // accessible playlist). Missing rows (deleted race) drop out of
+        // the result set silently, as before.
         let user_str = user_id.to_string();
-        for id in playlist_ids.drain() {
-            if let Ok(Some(p)) = self.storage.get_playlist(&id.to_string()).await
-                && (include_shared || p.owner_id == user_str)
-            {
-                playlists.push(p);
-            }
-        }
+        let ids: Vec<Uuid> = playlist_ids.drain().collect();
+        let mut playlists: Vec<PlaylistDto> = self
+            .storage
+            .get_playlists_by_ids(&ids)
+            .await?
+            .into_iter()
+            .filter(|p| include_shared || p.owner_id == user_str)
+            .collect();
 
         if include_public {
             let public = self.storage.list_public_playlists(limit, offset).await?;

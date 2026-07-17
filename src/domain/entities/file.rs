@@ -1,7 +1,7 @@
 use uuid::Uuid;
 
 use crate::domain::services::path_service::{
-    StoragePath, normalize_storage_name, validate_storage_name,
+    StoragePath, normalize_storage_name_owned, validate_storage_name,
 };
 
 // Re-export entity errors from the centralized module
@@ -122,7 +122,7 @@ impl File {
         mime_type: String,
         folder_id: Option<String>,
     ) -> FileResult<Self> {
-        let name = normalize_storage_name(&name);
+        let name = normalize_storage_name_owned(name);
         if let Err(reason) = validate_storage_name(&name) {
             return Err(FileError::InvalidFileName(format!("{name}: {reason}")));
         }
@@ -133,7 +133,7 @@ impl File {
             .as_secs();
 
         // Store the path string for serialization compatibility
-        let path_string = storage_path.to_string();
+        let path_string = storage_path.to_path_string();
 
         Ok(Self {
             id,
@@ -160,13 +160,13 @@ impl File {
         created_at: u64,
         modified_at: u64,
     ) -> FileResult<Self> {
-        let name = normalize_storage_name(&name);
+        let name = normalize_storage_name_owned(name);
         if let Err(reason) = validate_storage_name(&name) {
             return Err(FileError::InvalidFileName(format!("{name}: {reason}")));
         }
 
         // Store the path string for serialization compatibility
-        let path_string = storage_path.to_string();
+        let path_string = storage_path.to_path_string();
 
         Ok(Self {
             id,
@@ -252,13 +252,64 @@ impl File {
         created_by: Option<Uuid>,
         updated_by: Option<Uuid>,
     ) -> FileResult<Self> {
-        let name = normalize_storage_name(&name);
+        let name = normalize_storage_name_owned(name);
         if let Err(reason) = validate_storage_name(&name) {
             return Err(FileError::InvalidFileName(format!("{name}: {reason}")));
         }
 
         // Store the path string for serialization compatibility
-        let path_string = storage_path.to_string();
+        let path_string = storage_path.to_path_string();
+
+        Ok(Self {
+            id,
+            name,
+            storage_path,
+            path_string,
+            size,
+            mime_type,
+            folder_id,
+            created_at,
+            modified_at,
+            blob_hash,
+            created_by,
+            updated_by,
+        })
+    }
+
+    /// PG-row constructor: the per-listing-row hot path.
+    ///
+    /// Builds `storage_path` **and** `path_string` in one pass from the
+    /// materialized folder path via
+    /// [`StoragePath::from_folder_and_name`], instead of the old chain
+    /// (`format!` temp → `from_string` split → `Display` re-join) that
+    /// allocated the full path three times per row. The owned `name` is
+    /// NFC-normalized without the always-copy of the borrowing variant
+    /// (DB rows are NFC by invariant, so this is a zero-alloc check).
+    ///
+    /// The path is built from the raw incoming name and the name field is
+    /// normalized afterwards — the exact observable sequence of the old
+    /// `make_file_path` + constructor pair, byte-identical for every
+    /// input (for DB rows the two names coincide: stored names are NFC).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_materialized_row(
+        id: String,
+        name: String,
+        folder_path: Option<&str>,
+        size: u64,
+        mime_type: String,
+        folder_id: Option<String>,
+        created_at: u64,
+        modified_at: u64,
+        blob_hash: String,
+        created_by: Option<Uuid>,
+        updated_by: Option<Uuid>,
+    ) -> FileResult<Self> {
+        let (storage_path, path_string) = StoragePath::from_folder_and_name(folder_path, &name);
+
+        let name = normalize_storage_name_owned(name);
+        if let Err(reason) = validate_storage_name(&name) {
+            return Err(FileError::InvalidFileName(format!("{name}: {reason}")));
+        }
 
         Ok(Self {
             id,
@@ -442,7 +493,7 @@ impl File {
         // Create directly without validation to avoid errors in DTO
         // conversions. Still NFC-normalize so even DTO-reconstructed
         // entities maintain the storage invariant.
-        let name = normalize_storage_name(&name);
+        let name = normalize_storage_name_owned(name);
 
         Self {
             id,
@@ -466,7 +517,7 @@ impl File {
 
     /// Creates a new version of the file with updated name
     pub fn with_name(mut self, new_name: String) -> FileResult<Self> {
-        let new_name = normalize_storage_name(&new_name);
+        let new_name = normalize_storage_name_owned(new_name);
         if let Err(reason) = validate_storage_name(&new_name) {
             return Err(FileError::InvalidFileName(format!("{new_name}: {reason}")));
         }
@@ -485,7 +536,7 @@ impl File {
         // Consume `self` and mutate in place — only the path, name and mtime
         // change; id / mime_type / folder_id / blob_hash are carried over
         // without the per-field clone the old `&self` builder paid.
-        self.path_string = new_storage_path.to_string();
+        self.path_string = new_storage_path.to_path_string();
         self.storage_path = new_storage_path;
         self.name = new_name;
         self.modified_at = now;
@@ -510,7 +561,7 @@ impl File {
             .as_secs();
 
         // Consume `self`: only the path, folder_id and mtime change.
-        self.path_string = new_storage_path.to_string();
+        self.path_string = new_storage_path.to_path_string();
         self.storage_path = new_storage_path;
         self.folder_id = folder_id;
         self.modified_at = now;

@@ -138,6 +138,42 @@ impl CalendarRepository for CalendarPgRepository {
         Ok(calendar)
     }
 
+    async fn find_calendars_by_ids(&self, ids: &[Uuid]) -> CalendarRepositoryResult<Vec<Calendar>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            r#"
+            SELECT id, name, owner_id, description, color, is_public, created_at, updated_at
+            FROM caldav.calendars
+            WHERE id = ANY($1)
+            "#,
+        )
+        .bind(ids)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| {
+            DomainError::database_error(format!("Failed to get calendars by ids: {}", e))
+        })?;
+
+        rows.iter()
+            .map(|row| {
+                Calendar::with_id(
+                    row.get("id"),
+                    row.get("name"),
+                    row.get("owner_id"),
+                    row.get("description"),
+                    row.get("color"),
+                    row.get("created_at"),
+                    row.get("updated_at"),
+                )
+                .map_err(|e| {
+                    DomainError::database_error(format!("Failed to create calendar object: {}", e))
+                })
+            })
+            .collect()
+    }
+
     async fn list_calendars_by_owner(
         &self,
         owner_id: Uuid,

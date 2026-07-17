@@ -56,14 +56,32 @@ fn parse_caldav_datetime(value: &str) -> Option<DateTime<Utc>> {
 /// `None` if either tag is missing (malformed body) so callers
 /// can fall back safely.
 pub(crate) fn extract_vevent_chunk(ical_data: &str) -> Option<&str> {
-    let upper = ical_data.to_ascii_uppercase();
-    let begin = upper.find("BEGIN:VEVENT")?;
-    // End marker: the line-start of END:VEVENT after `begin`, plus
-    // the length of "END:VEVENT" itself, then find the next CRLF/LF
-    // to include the terminator line.
-    let after_begin = &upper[begin..];
-    let rel_end = after_begin.find("END:VEVENT")?;
-    let end_tag_end = begin + rel_end + "END:VEVENT".len();
+    // Byte index of the first ASCII-case-insensitive occurrence of
+    // `needle` in `hay` at or after `from`. Every stored body OxiCloud
+    // itself writes carries uppercase tags, so try the memchr-backed
+    // exact `find` first; only genuinely mixed-case foreign bodies pay
+    // the manual scan. Either way this replaces the old
+    // `to_ascii_uppercase()` of the ENTIRE body — one full-copy String
+    // allocation per event per REPORT/GET, done purely to locate two
+    // tags.
+    fn find_ci(hay: &str, needle: &str, from: usize) -> Option<usize> {
+        if let Some(i) = hay[from..].find(needle) {
+            return Some(from + i);
+        }
+        let h = hay.as_bytes();
+        let n = needle.as_bytes();
+        if h.len() < n.len() {
+            return None;
+        }
+        (from..=h.len() - n.len()).find(|&i| h[i..i + n.len()].eq_ignore_ascii_case(n))
+    }
+
+    let begin = find_ci(ical_data, "BEGIN:VEVENT", 0)?;
+    // End marker: the first END:VEVENT after `begin`, plus the length
+    // of "END:VEVENT" itself, then any immediate CRLF/LF to include
+    // the terminator line.
+    let rel_end = find_ci(ical_data, "END:VEVENT", begin)?;
+    let end_tag_end = rel_end + "END:VEVENT".len();
     // Include any immediate line terminator so the chunk stays a
     // well-formed line even when the caller concatenates.
     let mut end = end_tag_end;
@@ -88,21 +106,27 @@ pub(crate) fn extract_vevent_chunk(ical_data: &str) -> Option<&str> {
 pub(crate) fn group_events_by_uid<'a>(
     events: &'a [CalendarEventDto],
 ) -> Vec<Vec<&'a CalendarEventDto>> {
-    let mut order: Vec<String> = Vec::new();
-    let mut buckets: std::collections::HashMap<String, Vec<&'a CalendarEventDto>> =
+    // Keys borrow from the DTO slice (which outlives every local) — the
+    // old String-keyed map cloned every event's UID (twice for first
+    // appearances) on every REPORT / collection PROPFIND / GET.
+    let mut order: Vec<&'a str> = Vec::new();
+    let mut buckets: std::collections::HashMap<&'a str, Vec<&'a CalendarEventDto>> =
         std::collections::HashMap::new();
 
     for event in events {
-        let key = event.ical_uid.clone();
-        if !buckets.contains_key(&key) {
-            order.push(key.clone());
+        let key = event.ical_uid.as_str();
+        match buckets.entry(key) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                order.push(key);
+                slot.insert(vec![event]);
+            }
+            std::collections::hash_map::Entry::Occupied(mut slot) => slot.get_mut().push(event),
         }
-        buckets.entry(key).or_default().push(event);
     }
 
     let mut out = Vec::with_capacity(order.len());
     for uid in order {
-        let mut bucket = buckets.remove(&uid).unwrap_or_default();
+        let mut bucket = buckets.remove(uid).unwrap_or_default();
         // Master first (recurrence_id None), exceptions in insertion order.
         bucket.sort_by_key(|e| e.recurrence_id.is_some());
         out.push(bucket);
@@ -1123,11 +1147,13 @@ impl CalDavAdapter {
             ]),
         ))?;
 
-        // Determine which properties to include based on request type
+        // Determine which properties to include based on request type —
+        // borrowed straight out of the request (the old `clone()` copied
+        // the whole Vec of owned QualifiedName strings per REPORT).
         let props = match request {
-            CalDavReportType::CalendarQuery { props, .. } => props.clone(),
-            CalDavReportType::CalendarMultiget { props, .. } => props.clone(),
-            CalDavReportType::SyncCollection { props, .. } => props.clone(),
+            CalDavReportType::CalendarQuery { props, .. } => props,
+            CalDavReportType::CalendarMultiget { props, .. } => props,
+            CalDavReportType::SyncCollection { props, .. } => props,
         };
 
         // Add responses for events — folded per UID so a
@@ -1143,7 +1169,7 @@ impl CalDavAdapter {
                 None => continue,
             };
             let href = format!("{}{}.ics", base_href, anchor.ical_uid);
-            Self::write_event_response(&mut xml_writer, &bundle, &props, &href)?;
+            Self::write_event_response(&mut xml_writer, &bundle, props, &href)?;
         }
 
         // End multistatus
@@ -1415,6 +1441,26 @@ impl CalDavAdapter {
         }
 
         Ok((displayname, description, color))
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Bench support
+// ─────────────────────────────────────────────────────────────
+
+/// Thin public wrappers over the `pub(crate)` read-side helpers so
+/// `examples/bench_caldav_parse.rs` can measure them. Gated behind the
+/// `bench` feature — adds nothing to prod builds.
+#[cfg(feature = "bench")]
+pub mod bench {
+    use super::*;
+
+    pub fn extract_vevent_chunk(ical_data: &str) -> Option<&str> {
+        super::extract_vevent_chunk(ical_data)
+    }
+
+    pub fn group_events_by_uid(events: &[CalendarEventDto]) -> Vec<Vec<&CalendarEventDto>> {
+        super::group_events_by_uid(events)
     }
 }
 

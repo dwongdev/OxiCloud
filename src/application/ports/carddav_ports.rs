@@ -37,6 +37,12 @@ pub trait ContactStoragePort: Send + Sync + 'static {
     ) -> Result<AddressBook, DomainError>;
     async fn delete_address_book(&self, id: &Uuid) -> Result<(), DomainError>;
     async fn get_address_book_by_id(&self, id: &Uuid) -> Result<Option<AddressBook>, DomainError>;
+
+    /// Batch sibling of [`Self::get_address_book_by_id`]: hydrate a page
+    /// of grant-derived ids in ONE storage round-trip. Missing rows drop
+    /// out silently; ordering is not guaranteed.
+    async fn get_address_books_by_ids(&self, ids: &[Uuid])
+    -> Result<Vec<AddressBook>, DomainError>;
     async fn get_public_address_books(&self) -> Result<Vec<AddressBook>, DomainError>;
 
     // ── Contacts ─────────────────────────────────────────────────

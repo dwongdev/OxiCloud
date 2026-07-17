@@ -1,7 +1,7 @@
 use uuid::Uuid;
 
 use crate::domain::services::path_service::{
-    StoragePath, normalize_storage_name, validate_storage_name,
+    StoragePath, normalize_storage_name_owned, validate_storage_name,
 };
 
 // Re-export entity errors from the centralized module
@@ -120,7 +120,7 @@ impl Folder {
         storage_path: StoragePath,
         parent_id: Option<String>,
     ) -> FolderResult<Self> {
-        let name = normalize_storage_name(&name);
+        let name = normalize_storage_name_owned(name);
         if let Err(reason) = validate_storage_name(&name) {
             return Err(FolderError::InvalidFolderName(format!("{name}: {reason}")));
         }
@@ -130,7 +130,7 @@ impl Folder {
             .unwrap_or_default()
             .as_secs();
 
-        let path_string = storage_path.to_string();
+        let path_string = storage_path.to_path_string();
 
         Ok(Self {
             id,
@@ -221,12 +221,56 @@ impl Folder {
         created_by: Option<Uuid>,
         updated_by: Option<Uuid>,
     ) -> FolderResult<Self> {
-        let name = normalize_storage_name(&name);
+        let name = normalize_storage_name_owned(name);
         if let Err(reason) = validate_storage_name(&name) {
             return Err(FolderError::InvalidFolderName(format!("{name}: {reason}")));
         }
 
-        let path_string = storage_path.to_string();
+        let path_string = storage_path.to_path_string();
+
+        Ok(Self {
+            id,
+            name,
+            storage_path,
+            path_string,
+            parent_id,
+            drive_id,
+            created_at,
+            modified_at,
+            tree_modified_at,
+            created_by,
+            updated_by,
+        })
+    }
+
+    /// PG-row constructor: the per-listing-row hot path.
+    ///
+    /// Takes the materialized `storage.folders.path` column by value and
+    /// splits it once via [`StoragePath::from_joined`] — when the stored
+    /// path is already canonical (every row the repository writes), the
+    /// input `String` is reused as `path_string` with zero copies,
+    /// replacing the old `from_string` split + `Display` re-join pair.
+    /// The owned `name` is NFC-normalized without the always-copy of the
+    /// borrowing variant (DB rows are NFC by invariant).
+    #[allow(clippy::too_many_arguments)]
+    pub fn from_materialized_row(
+        id: String,
+        name: String,
+        path: String,
+        parent_id: Option<String>,
+        drive_id: Uuid,
+        created_at: u64,
+        modified_at: u64,
+        tree_modified_at: u64,
+        created_by: Option<Uuid>,
+        updated_by: Option<Uuid>,
+    ) -> FolderResult<Self> {
+        let name = normalize_storage_name_owned(name);
+        if let Err(reason) = validate_storage_name(&name) {
+            return Err(FolderError::InvalidFolderName(format!("{name}: {reason}")));
+        }
+
+        let (storage_path, path_string) = StoragePath::from_joined(path);
 
         Ok(Self {
             id,
@@ -411,7 +455,7 @@ impl Folder {
         // round-trips lose the real rollup signal, so callers that
         // need a freshly-rolled-up etag must reload from the
         // repository.
-        let name = normalize_storage_name(&name);
+        let name = normalize_storage_name_owned(name);
         Self {
             id,
             name,
@@ -437,7 +481,7 @@ impl Folder {
 
     /// Creates a new version of the folder with updated name
     pub fn with_name(&self, new_name: String) -> FolderResult<Self> {
-        let new_name = normalize_storage_name(&new_name);
+        let new_name = normalize_storage_name_owned(new_name);
         if let Err(reason) = validate_storage_name(&new_name) {
             return Err(FolderError::InvalidFolderName(format!(
                 "{new_name}: {reason}"
@@ -452,7 +496,7 @@ impl Folder {
         };
 
         // Update string representation
-        let new_path_string = new_storage_path.to_string();
+        let new_path_string = new_storage_path.to_path_string();
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -492,7 +536,7 @@ impl Folder {
         };
 
         // Update string representation
-        let new_path_string = new_storage_path.to_string();
+        let new_path_string = new_storage_path.to_path_string();
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

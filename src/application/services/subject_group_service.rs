@@ -44,6 +44,11 @@ pub struct SubjectGroupService {
     /// 30 s TTL. Without this, fresh group-mediated drive grants
     /// don't appear in `/api/drives` for up to 30 s after `add_member`.
     engine: Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>,
+    /// Same freshness contract for the drive repository's per-user
+    /// readable-drives cache: a membership change on a group that holds
+    /// drive grants changes every affected user's visible drive list,
+    /// so the cached lists drop alongside `user_groups_cache`.
+    drive_repo: Arc<crate::infrastructure::repositories::pg::DrivePgRepository>,
 }
 
 impl SubjectGroupService {
@@ -52,12 +57,14 @@ impl SubjectGroupService {
         pool: Arc<PgPool>,
         user_storage: Arc<UserPgRepository>,
         engine: Arc<crate::infrastructure::services::pg_acl_engine::PgAclEngine>,
+        drive_repo: Arc<crate::infrastructure::repositories::pg::DrivePgRepository>,
     ) -> Self {
         Self {
             repo,
             pool,
             user_storage,
             engine,
+            drive_repo,
         }
     }
 
@@ -426,6 +433,7 @@ impl SubjectGroupService {
         // call for up to 30 s.
         for uid in self.invalidation_targets(member).await? {
             self.engine.invalidate_user_groups_cache(uid).await;
+            self.drive_repo.invalidate_readable_for_user(uid).await;
         }
 
         tracing::info!(
@@ -525,6 +533,7 @@ impl SubjectGroupService {
         // for up to 30 s, surfacing grants they no longer have.
         for uid in self.invalidation_targets(member).await? {
             self.engine.invalidate_user_groups_cache(uid).await;
+            self.drive_repo.invalidate_readable_for_user(uid).await;
         }
 
         tracing::info!(
@@ -634,7 +643,9 @@ mod integration_tests {
         // future test starts exercising real authz lookups.
         let engine =
             Arc::new(crate::infrastructure::services::pg_acl_engine::PgAclEngine::new_stub());
-        SubjectGroupService::new(repo, pool, user_storage, engine)
+        let drive_repo =
+            Arc::new(crate::infrastructure::repositories::pg::DrivePgRepository::new(pool.clone()));
+        SubjectGroupService::new(repo, pool, user_storage, engine, drive_repo)
     }
 
     async fn first_admin(pool: &sqlx::PgPool) -> Uuid {

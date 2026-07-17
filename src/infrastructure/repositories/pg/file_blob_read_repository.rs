@@ -413,14 +413,6 @@ impl FileBlobReadRepository {
         }
     }
 
-    /// Build a `StoragePath` from the materialized folder path + file name.
-    fn make_file_path(folder_path: Option<&str>, file_name: &str) -> StoragePath {
-        match folder_path {
-            Some(fp) if !fp.is_empty() => StoragePath::from_string(&format!("{fp}/{file_name}")),
-            _ => StoragePath::from_string(file_name),
-        }
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn row_to_file(
         id: String,
@@ -435,11 +427,10 @@ impl FileBlobReadRepository {
         created_by: Option<Uuid>,
         updated_by: Option<Uuid>,
     ) -> Result<File, DomainError> {
-        let storage_path = Self::make_file_path(folder_path.as_deref(), &name);
-        File::with_timestamps_blob_hash_and_provenance(
+        File::from_materialized_row(
             id,
             name,
-            storage_path,
+            folder_path.as_deref(),
             size as u64,
             mime_type,
             folder_id,
@@ -930,7 +921,7 @@ impl FileReadPort for FileBlobReadRepository {
         .map_err(|e| DomainError::internal_error("FileBlobRead", format!("path: {e}")))?
         .ok_or_else(|| DomainError::not_found("File", id))?;
 
-        Ok(Self::make_file_path(row.1.as_deref(), &row.0))
+        Ok(StoragePath::from_folder_and_name(row.1.as_deref(), &row.0).0)
     }
 
     async fn get_parent_folder_id(

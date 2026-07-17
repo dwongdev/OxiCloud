@@ -41,6 +41,27 @@ pub struct DrivePgRepository {
     /// provisioning idempotency check (`NotFound` → create) always sees
     /// the live table.
     default_drive_cache: Cache<Uuid, DriveWithRootName>,
+    /// caller_id → every drive the caller can read (the full
+    /// role_grants ⋈ drives ⋈ folders join of [`list_readable_by`],
+    /// including the transitive-group expansion).
+    ///
+    /// Re-resolved before this cache existed on EVERY native `/webdav`
+    /// request that names an explicit drive selector (all verbs; MOVE
+    /// and COPY twice), plus per-request in search, trash listing and
+    /// the `GET /api/drives` picker — the heaviest per-request query
+    /// left on the DAV path after CHROOT-CACHE. Concurrent misses are
+    /// coalesced (`try_get_with`), errors are never cached.
+    ///
+    /// Freshness: every membership/lifecycle mutation that flows
+    /// through this repository or `DriveManagementService` invalidates
+    /// explicitly (per-user when the subject is a User, whole cache for
+    /// Group subjects, whose transitive membership is not resolvable
+    /// here). Residual staleness — a root-folder rename or a grant
+    /// written by a path that can't reach this cache — is bounded by
+    /// the same 30 s TTL the sibling caches accept; actual permission
+    /// enforcement is unaffected (the ACL engine re-checks per
+    /// operation with its own invalidation).
+    readable_cache: Cache<Uuid, Arc<Vec<DriveWithRootName>>>,
 }
 
 impl DrivePgRepository {
@@ -51,7 +72,25 @@ impl DrivePgRepository {
                 .max_capacity(DEFAULT_DRIVE_CACHE_CAPACITY)
                 .time_to_live(DEFAULT_DRIVE_CACHE_TTL)
                 .build(),
+            readable_cache: Cache::builder()
+                .max_capacity(DEFAULT_DRIVE_CACHE_CAPACITY)
+                .time_to_live(DEFAULT_DRIVE_CACHE_TTL)
+                .build(),
         }
+    }
+
+    /// Drop the cached readable-drive list for one user (their grant set
+    /// changed: membership write, personal-drive provisioning, …).
+    pub async fn invalidate_readable_for_user(&self, user_id: Uuid) {
+        self.readable_cache.invalidate(&user_id).await;
+    }
+
+    /// Drop every cached readable-drive list. Used when the affected
+    /// user set is unknown at this layer: group-subject grants, drive
+    /// deletion, policy edits. All are admin-rare; repopulation costs
+    /// one join per active caller.
+    pub fn invalidate_readable_all(&self) {
+        self.readable_cache.invalidate_all();
     }
 
     fn map_sqlx_err(context: &'static str, e: sqlx::Error) -> DriveRepositoryError {
@@ -111,6 +150,63 @@ impl DrivePgRepository {
         let role_str: Option<String> = row.try_get("caller_role").ok();
         dwr.caller_role = role_str.as_deref().and_then(Role::parse);
         Ok(dwr)
+    }
+
+    /// The uncached grants join behind [`DriveRepository::list_readable_by`].
+    ///
+    /// Joining role_grants → drives → folders returns every drive the
+    /// caller can read, paired with its display name. Group
+    /// memberships (direct + transitive) are expanded inline by
+    /// `storage.caller_group_ids($caller)` — no Rust-side ceremony.
+    ///
+    /// ORDER BY puts default drives first (so the picker UI doesn't
+    /// need a follow-up sort), then alphabetical by name. GROUP BY
+    /// collapses duplicate role_grants on the same drive (direct +
+    /// group-mediated) and sidesteps PostgreSQL's "ORDER BY
+    /// expression must appear in select list" rule that SELECT
+    /// DISTINCT imposes.
+    /// `MIN(g.role)` picks the caller's strongest role on each drive:
+    /// `storage.grant_role` is declared `owner → viewer` (strongest →
+    /// weakest), so MIN returns the strongest. Cast `::text` matches
+    /// the codebase convention for reading enum columns into Rust
+    /// (see `pg_acl_engine.rs`); `Role::parse` handles the trip back.
+    async fn query_readable_by(
+        &self,
+        caller_id: Uuid,
+    ) -> Result<Vec<DriveWithRootName>, DriveRepositoryError> {
+        let rows = sqlx::query(
+            r#"
+            SELECT d.id, d.kind, d.default_for_user, d.root_folder_id,
+                   d.quota_bytes, d.used_bytes, d.policies,
+                   d.created_at, d.updated_at,
+                   f.name AS root_folder_name,
+                   MIN(g.role)::text AS caller_role
+              FROM storage.drives d
+              JOIN storage.folders f ON f.id = d.root_folder_id
+              JOIN storage.role_grants g
+                ON g.resource_type = 'drive'
+               AND g.resource_id   = d.id
+             WHERE (
+                     (g.subject_type = 'user'  AND g.subject_id = $1)
+                  OR (g.subject_type = 'group' AND g.subject_id IN
+                          (SELECT storage.caller_group_ids($1)))
+                   )
+               AND (g.expires_at IS NULL OR g.expires_at > NOW())
+             GROUP BY d.id, d.kind, d.default_for_user, d.root_folder_id,
+                      d.quota_bytes, d.used_bytes, d.policies,
+                      d.created_at, d.updated_at, f.name
+             ORDER BY (d.default_for_user IS NULL) ASC,
+                      LOWER(f.name) ASC
+            "#,
+        )
+        .bind(caller_id)
+        .fetch_all(self.pool.as_ref())
+        .await
+        .map_err(|e| Self::map_sqlx_err("list_readable_by", e))?;
+
+        rows.iter()
+            .map(Self::row_to_drive_with_name_and_role)
+            .collect()
     }
 }
 
@@ -239,6 +335,8 @@ impl DriveRepository for DrivePgRepository {
         // Drop any cached default-drive resolution for this user (a stale
         // NotFound is never cached, but be explicit about the write path).
         self.default_drive_cache.invalidate(&owner_id).await;
+        // The owner gained a drive — their readable list changed too.
+        self.invalidate_readable_for_user(owner_id).await;
 
         Self::row_to_drive_with_name(&row)
     }
@@ -347,6 +445,16 @@ impl DriveRepository for DrivePgRepository {
             .await
             .map_err(|e| Self::map_sqlx_err("create_shared_drive_atomic.commit", e))?;
 
+        // The owner grant written above changes the grantee's readable
+        // list. User subjects invalidate precisely; Group subjects fall
+        // back to a full clear (transitive members unknown here).
+        match owner_subject {
+            crate::domain::services::authorization::Subject::User(uid) => {
+                self.invalidate_readable_for_user(uid).await;
+            }
+            _ => self.invalidate_readable_all(),
+        }
+
         Self::row_to_drive_with_name(&row)
     }
 
@@ -425,10 +533,11 @@ impl DriveRepository for DrivePgRepository {
         tx.commit()
             .await
             .map_err(|e| Self::map_sqlx_err("delete_atomic.commit", e))?;
-        // We only have the drive id here; the cache is keyed by user.
-        // Deletion is rare — clearing the whole cache is the simple,
+        // We only have the drive id here; the caches are keyed by user.
+        // Deletion is rare — clearing them whole is the simple,
         // always-correct move (repopulates at one query per active user).
         self.default_drive_cache.invalidate_all();
+        self.invalidate_readable_all();
         Ok(())
     }
 
@@ -513,55 +622,21 @@ impl DriveRepository for DrivePgRepository {
         &self,
         caller_id: Uuid,
     ) -> Result<Vec<DriveWithRootName>, DriveRepositoryError> {
-        // Joining role_grants → drives → folders returns every drive the
-        // caller can read, paired with its display name. Group
-        // memberships (direct + transitive) are expanded inline by
-        // `storage.caller_group_ids($caller)` — no Rust-side ceremony.
-        //
-        // ORDER BY puts default drives first (so the picker UI doesn't
-        // need a follow-up sort), then alphabetical by name. GROUP BY
-        // collapses duplicate role_grants on the same drive (direct +
-        // group-mediated) and sidesteps PostgreSQL's "ORDER BY
-        // expression must appear in select list" rule that SELECT
-        // DISTINCT imposes.
-        // `MIN(g.role)` picks the caller's strongest role on each drive:
-        // `storage.grant_role` is declared `owner → viewer` (strongest →
-        // weakest), so MIN returns the strongest. Cast `::text` matches
-        // the codebase convention for reading enum columns into Rust
-        // (see `pg_acl_engine.rs`); `Role::parse` handles the trip back.
-        let rows = sqlx::query(
-            r#"
-            SELECT d.id, d.kind, d.default_for_user, d.root_folder_id,
-                   d.quota_bytes, d.used_bytes, d.policies,
-                   d.created_at, d.updated_at,
-                   f.name AS root_folder_name,
-                   MIN(g.role)::text AS caller_role
-              FROM storage.drives d
-              JOIN storage.folders f ON f.id = d.root_folder_id
-              JOIN storage.role_grants g
-                ON g.resource_type = 'drive'
-               AND g.resource_id   = d.id
-             WHERE (
-                     (g.subject_type = 'user'  AND g.subject_id = $1)
-                  OR (g.subject_type = 'group' AND g.subject_id IN
-                          (SELECT storage.caller_group_ids($1)))
-                   )
-               AND (g.expires_at IS NULL OR g.expires_at > NOW())
-             GROUP BY d.id, d.kind, d.default_for_user, d.root_folder_id,
-                      d.quota_bytes, d.used_bytes, d.policies,
-                      d.created_at, d.updated_at, f.name
-             ORDER BY (d.default_for_user IS NULL) ASC,
-                      LOWER(f.name) ASC
-            "#,
-        )
-        .bind(caller_id)
-        .fetch_all(self.pool.as_ref())
-        .await
-        .map_err(|e| Self::map_sqlx_err("list_readable_by", e))?;
-
-        rows.iter()
-            .map(Self::row_to_drive_with_name_and_role)
-            .collect()
+        // Serve from the per-user cache; concurrent misses for the same
+        // caller are coalesced into one join (`try_get_with`), and errors
+        // are never cached. See the `readable_cache` field docs for the
+        // freshness/invalidation contract.
+        let cached = self
+            .readable_cache
+            .try_get_with(caller_id, async move {
+                self.query_readable_by(caller_id).await.map(Arc::new)
+            })
+            .await
+            .map_err(|e: Arc<DriveRepositoryError>| {
+                Arc::try_unwrap(e)
+                    .unwrap_or_else(|shared| DriveRepositoryError::StorageError(shared.to_string()))
+            })?;
+        Ok((*cached).clone())
     }
 
     async fn list_all(&self) -> Result<Vec<DriveWithRootName>, DriveRepositoryError> {
@@ -717,9 +792,10 @@ impl DriveRepository for DrivePgRepository {
             .ok_or_else(|| DriveRepositoryError::NotFound(drive_id.to_string()))?
             .0;
         // Policy edits must not serve a stale `policies` bag from the
-        // default-drive cache (keyed by user, and we only have the drive
-        // id) — clear it; policy edits are admin-rare.
+        // user-keyed caches (we only have the drive id) — clear both;
+        // policy edits are admin-rare.
         self.default_drive_cache.invalidate_all();
+        self.invalidate_readable_all();
         Ok(crate::domain::entities::drive::DrivePolicies::from_value(
             &raw,
         ))

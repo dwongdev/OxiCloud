@@ -1,0 +1,256 @@
+//! Heap-free fixed-layout formatters for the hot XML/HTTP emit paths.
+//!
+//! PROPFIND writes two formatted dates, a size and a quoted etag for
+//! EVERY row of every listing; `to_rfc3339()` / `to_rfc2822()` run
+//! chrono's format-spec interpreter and allocate a `String` each, and
+//! `u64::to_string()` allocates another. These helpers render the same
+//! bytes into a caller-provided stack buffer: zero heap traffic, no
+//! interpreter.
+//!
+//! Byte-identity with chrono (for whole-second in-range UTC datetimes)
+//! is asserted by the unit tests below and by the equivalence gate in
+//! `examples/bench_propfind_xml.rs`. Out-of-range seconds (negative or
+//! year > 9999, where the fixed-width layout no longer applies) return
+//! `None` — callers keep the old chrono path as fallback, so exotic
+//! values change nothing observable.
+
+/// Seconds range rendering to a fixed-width 4-digit year: 1970-01-01
+/// through 9999-12-31 23:59:59 UTC.
+const MAX_4DIGIT_YEAR_SECS: i64 = 253_402_300_799;
+
+const MONTHS: [&[u8; 3]; 12] = [
+    b"Jan", b"Feb", b"Mar", b"Apr", b"May", b"Jun", b"Jul", b"Aug", b"Sep", b"Oct", b"Nov", b"Dec",
+];
+const WEEKDAYS: [&[u8; 3]; 7] = [b"Thu", b"Fri", b"Sat", b"Sun", b"Mon", b"Tue", b"Wed"];
+
+/// Civil date from days since 1970-01-01 (Howard Hinnant's algorithm).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097); // day-of-era [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+#[inline]
+fn push2(out: &mut [u8], pos: usize, v: u32) {
+    out[pos] = b'0' + (v / 10) as u8;
+    out[pos + 1] = b'0' + (v % 10) as u8;
+}
+
+#[inline]
+fn push4(out: &mut [u8], pos: usize, v: i64) {
+    out[pos] = b'0' + (v / 1000 % 10) as u8;
+    out[pos + 1] = b'0' + (v / 100 % 10) as u8;
+    out[pos + 2] = b'0' + (v / 10 % 10) as u8;
+    out[pos + 3] = b'0' + (v % 10) as u8;
+}
+
+/// Split epoch seconds into (days, y, m, d, hh, mm, ss).
+#[inline]
+fn split(secs: i64) -> (i64, i64, u32, u32, u32, u32, u32) {
+    let days = secs.div_euclid(86_400);
+    let sod = secs.rem_euclid(86_400);
+    let (y, m, d) = civil_from_days(days);
+    (
+        days,
+        y,
+        m,
+        d,
+        (sod / 3600) as u32,
+        (sod / 60 % 60) as u32,
+        (sod % 60) as u32,
+    )
+}
+
+/// `chrono::DateTime<Utc>::to_rfc3339()` for a whole-second timestamp:
+/// `2026-07-17T11:47:14+00:00` (25 bytes) written into `buf`.
+///
+/// Returns `None` when `secs` is outside the fixed-width range —
+/// callers fall back to chrono.
+pub fn rfc3339_utc(buf: &mut [u8; 25], secs: i64) -> Option<&str> {
+    if !(0..=MAX_4DIGIT_YEAR_SECS).contains(&secs) {
+        return None;
+    }
+    let (_days, y, m, d, hh, mm, ss) = split(secs);
+    push4(buf, 0, y);
+    buf[4] = b'-';
+    push2(buf, 5, m);
+    buf[7] = b'-';
+    push2(buf, 8, d);
+    buf[10] = b'T';
+    push2(buf, 11, hh);
+    buf[13] = b':';
+    push2(buf, 14, mm);
+    buf[16] = b':';
+    push2(buf, 17, ss);
+    buf[19..25].copy_from_slice(b"+00:00");
+    // SAFETY-free: every byte written above is ASCII.
+    Some(std::str::from_utf8(&buf[..]).expect("ascii"))
+}
+
+/// `chrono::DateTime<Utc>::to_rfc2822()` for a whole-second timestamp:
+/// `Fri, 17 Jul 2026 11:47:14 +0000` written into `buf`.
+///
+/// chrono does NOT zero-pad the day (`Thu, 1 Jan 1970 …`), so the
+/// rendered length is 30 or 31 bytes — the round-4 PROPFIND equivalence
+/// gate caught an early padded version of this function; the sweep test
+/// below pins parity byte-for-byte across 60 years.
+pub fn rfc2822_utc(buf: &mut [u8; 31], secs: i64) -> Option<&str> {
+    if !(0..=MAX_4DIGIT_YEAR_SECS).contains(&secs) {
+        return None;
+    }
+    let (days, y, m, d, hh, mm, ss) = split(secs);
+    let weekday = WEEKDAYS[days.rem_euclid(7) as usize];
+    buf[0..3].copy_from_slice(weekday);
+    buf[3] = b',';
+    buf[4] = b' ';
+    let mut p = 5;
+    if d >= 10 {
+        buf[p] = b'0' + (d / 10) as u8;
+        p += 1;
+    }
+    buf[p] = b'0' + (d % 10) as u8;
+    p += 1;
+    buf[p] = b' ';
+    p += 1;
+    buf[p..p + 3].copy_from_slice(MONTHS[(m - 1) as usize]);
+    p += 3;
+    buf[p] = b' ';
+    p += 1;
+    push4(buf, p, y);
+    p += 4;
+    buf[p] = b' ';
+    p += 1;
+    push2(buf, p, hh);
+    p += 2;
+    buf[p] = b':';
+    p += 1;
+    push2(buf, p, mm);
+    p += 2;
+    buf[p] = b':';
+    p += 1;
+    push2(buf, p, ss);
+    p += 2;
+    buf[p..p + 6].copy_from_slice(b" +0000");
+    p += 6;
+    Some(std::str::from_utf8(&buf[..p]).expect("ascii"))
+}
+
+/// `u64::to_string()` without the heap `String`: renders into `buf`,
+/// returns the populated tail slice.
+pub fn u64_str(buf: &mut [u8; 20], mut v: u64) -> &str {
+    let mut pos = buf.len();
+    loop {
+        pos -= 1;
+        buf[pos] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
+    std::str::from_utf8(&buf[pos..]).expect("ascii")
+}
+
+/// `i64::to_string()` without the heap `String` (quota bytes are `i64`).
+pub fn i64_str(buf: &mut [u8; 21], v: i64) -> &str {
+    let mut u = [0u8; 20];
+    let digits = u64_str(&mut u, v.unsigned_abs());
+    let neg = v < 0;
+    let start = 21 - digits.len() - usize::from(neg);
+    if neg {
+        buf[start] = b'-';
+    }
+    buf[start + usize::from(neg)..].copy_from_slice(digits.as_bytes());
+    std::str::from_utf8(&buf[start..]).expect("ascii")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{TimeZone, Utc};
+
+    /// Edge-heavy corpus: epoch, single-digit day (padding!), leap day,
+    /// end-of-year, DST-irrelevant midsummer, far future, max in-range.
+    const CASES: [i64; 12] = [
+        0,
+        1,
+        86_399,
+        86_400,
+        951_782_400,   // 2000-02-29 (leap)
+        1_120_176_000, // 2005-07-01 (day < 10 → chrono pads)
+        1_752_753_434,
+        2_147_483_647,
+        4_102_444_799, // 2099-12-31 23:59:59
+        7_258_118_400,
+        250_000_000_000,
+        MAX_4DIGIT_YEAR_SECS,
+    ];
+
+    #[test]
+    fn rfc3339_matches_chrono() {
+        for &secs in &CASES {
+            let dt = Utc.timestamp_opt(secs, 0).unwrap();
+            let mut buf = [0u8; 25];
+            assert_eq!(
+                rfc3339_utc(&mut buf, secs).expect("in range"),
+                dt.to_rfc3339(),
+                "secs={secs}"
+            );
+        }
+    }
+
+    #[test]
+    fn rfc2822_matches_chrono() {
+        for &secs in &CASES {
+            let dt = Utc.timestamp_opt(secs, 0).unwrap();
+            let mut buf = [0u8; 31];
+            assert_eq!(
+                rfc2822_utc(&mut buf, secs).expect("in range"),
+                dt.to_rfc2822(),
+                "secs={secs}"
+            );
+        }
+    }
+
+    #[test]
+    fn out_of_range_falls_back() {
+        let mut b3 = [0u8; 25];
+        let mut b2 = [0u8; 31];
+        assert!(rfc3339_utc(&mut b3, -1).is_none());
+        assert!(rfc2822_utc(&mut b2, -1).is_none());
+        assert!(rfc3339_utc(&mut b3, MAX_4DIGIT_YEAR_SECS + 1).is_none());
+    }
+
+    #[test]
+    fn ints_match_std() {
+        let mut b = [0u8; 20];
+        for v in [0u64, 1, 9, 10, 42, 1024, u64::MAX] {
+            assert_eq!(u64_str(&mut b, v), v.to_string());
+        }
+        let mut b = [0u8; 21];
+        for v in [0i64, -1, 42, -1024, i64::MIN, i64::MAX] {
+            assert_eq!(i64_str(&mut b, v), v.to_string());
+        }
+    }
+
+    /// Exhaustive-ish sweep: every 6h13m across 60 years — catches any
+    /// weekday / month-boundary drift against chrono.
+    #[test]
+    fn sweep_matches_chrono() {
+        let mut secs: i64 = 0;
+        while secs < 60 * 366 * 86_400 {
+            let dt = Utc.timestamp_opt(secs, 0).unwrap();
+            let mut b3 = [0u8; 25];
+            let mut b2 = [0u8; 31];
+            assert_eq!(rfc3339_utc(&mut b3, secs).unwrap(), dt.to_rfc3339());
+            assert_eq!(rfc2822_utc(&mut b2, secs).unwrap(), dt.to_rfc2822());
+            secs += 22_380; // 6h13m — walks through all times of day + weekdays
+        }
+    }
+}

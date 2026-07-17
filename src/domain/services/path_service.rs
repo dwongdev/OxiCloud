@@ -40,6 +40,22 @@ pub fn normalize_storage_name(name: &str) -> String {
     name.nfc().collect()
 }
 
+/// Owned-input sibling of [`normalize_storage_name`].
+///
+/// The borrowing variant must always allocate a fresh `String` even when
+/// the input is already NFC — which is every name loaded back from
+/// PostgreSQL (DB invariant) and every ASCII name. Callers that own the
+/// `String` (entity constructors receive `name: String` by value) were
+/// paying that copy only to drop the original immediately. This variant
+/// returns the input unchanged on the fast path: zero allocations per
+/// row on every listing (PROPFIND, photos timeline, search).
+pub fn normalize_storage_name_owned(name: String) -> String {
+    if is_nfc_quick(name.chars()) == IsNormalized::Yes {
+        return name;
+    }
+    name.nfc().collect()
+}
+
 /// Validates a single file or folder name component.
 ///
 /// Returns `Err` with a human-readable reason if the name is rejected.
@@ -102,6 +118,88 @@ impl StoragePath {
         Self { segments }
     }
 
+    /// One-pass builder for PG listing rows: materialized folder path +
+    /// file name → `(StoragePath, path_string)`.
+    ///
+    /// Replaces the old per-row chain
+    /// `StoragePath::from_string(&format!("{fp}/{name}"))` +
+    /// `storage_path.to_string()`, which allocated a joined temporary,
+    /// split it back into per-segment `String`s, and then re-joined those
+    /// segments (via `join` + `write!`) into the `path_string` the DTOs
+    /// actually serve. Here both representations are built in a single
+    /// pass with exactly one `String` for the joined form and no
+    /// intermediate temporaries.
+    ///
+    /// Byte-equivalence with the old chain holds because concatenating
+    /// with a `/` separator distributes over `split('/')`:
+    /// `(fp + "/" + name).split('/') == fp.split('/') ⧺ name.split('/')`,
+    /// and the joined form is exactly `Display`'s `/`-prefixed rendering
+    /// of the surviving segments (root renders as `"/"`).
+    pub fn from_folder_and_name(folder_path: Option<&str>, file_name: &str) -> (Self, String) {
+        let fp = folder_path.unwrap_or("");
+        // Upper bounds: every byte of both inputs survives at most once,
+        // plus one leading '/' per segment (≤ segment count) — sizing to
+        // input length + 2 covers the worst case without a second scan.
+        let mut joined = String::with_capacity(fp.len() + file_name.len() + 2);
+        let mut segments: Vec<String> =
+            Vec::with_capacity(fp.bytes().filter(|&b| b == b'/').count() + 2);
+        for seg in fp
+            .split('/')
+            .chain(file_name.split('/'))
+            .filter(|s| Self::is_safe_segment(s))
+        {
+            joined.push('/');
+            joined.push_str(seg);
+            segments.push(seg.to_string());
+        }
+        if segments.is_empty() {
+            joined.push('/');
+        }
+        (Self { segments }, joined)
+    }
+
+    /// One-pass splitter for a pre-joined materialized path (the
+    /// `storage.folders.path` column) → `(StoragePath, path_string)`.
+    ///
+    /// When the input is already in canonical joined form (leading `/`,
+    /// no empty/`.`/`..` segments, no trailing `/`) — which is every row
+    /// the repository writes — the input `String` is reused as the
+    /// `path_string` with zero copies. Non-canonical inputs fall back to
+    /// the filtering rebuild and produce exactly what
+    /// `from_string(&path).to_string()` used to.
+    pub fn from_joined(path: String) -> (Self, String) {
+        if Self::is_canonical_joined(&path) {
+            let segments: Vec<String> = if path.len() == 1 {
+                Vec::new()
+            } else {
+                path[1..].split('/').map(str::to_string).collect()
+            };
+            return (Self { segments }, path);
+        }
+        // Fallback: identical to the old from_string + to_string pair.
+        let segments: Vec<String> = path
+            .split('/')
+            .filter(|s| Self::is_safe_segment(s))
+            .map(str::to_string)
+            .collect();
+        let sp = Self { segments };
+        let joined = sp.to_path_string();
+        (sp, joined)
+    }
+
+    /// `true` when `path` is exactly `Display`'s canonical rendering of
+    /// its own segments: `"/"` alone, or `/seg(/seg)*` where every
+    /// segment is safe. One scan, no allocations.
+    fn is_canonical_joined(path: &str) -> bool {
+        if path == "/" {
+            return true;
+        }
+        if !path.starts_with('/') || path.ends_with('/') {
+            return false;
+        }
+        path[1..].split('/').all(Self::is_safe_segment)
+    }
+
     /// Creates a path from a PathBuf
     pub fn from(path_buf: PathBuf) -> Self {
         let segments = path_buf
@@ -152,14 +250,40 @@ impl StoragePath {
 impl std::fmt::Display for StoragePath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if self.segments.is_empty() {
-            write!(f, "/")
-        } else {
-            write!(f, "/{}", self.segments.join("/"))
+            return f.write_str("/");
         }
+        // Write segments directly — the old `self.segments.join("/")`
+        // allocated a full joined temporary inside every `format!`/
+        // `to_string` of a path.
+        for seg in &self.segments {
+            f.write_str("/")?;
+            f.write_str(seg)?;
+        }
+        Ok(())
     }
 }
 
 impl StoragePath {
+    /// The canonical joined form (`Display`'s output) in exactly one
+    /// pre-sized allocation.
+    ///
+    /// `to_string()` routes through `Display` into an unsized `String`
+    /// that grows geometrically (multiple reallocs + copies for typical
+    /// path lengths). Entity constructors call this once per row on
+    /// every listing, so the sized single-alloc variant is the default
+    /// there.
+    pub fn to_path_string(&self) -> String {
+        if self.segments.is_empty() {
+            return "/".to_string();
+        }
+        let mut s = String::with_capacity(self.segments.iter().map(|seg| seg.len() + 1).sum());
+        for seg in &self.segments {
+            s.push('/');
+            s.push_str(seg);
+        }
+        s
+    }
+
     /// Returns the path representation as a string
     pub fn as_str(&self) -> &str {
         // Note: The implementation should really store the string,

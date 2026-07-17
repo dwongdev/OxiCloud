@@ -17,7 +17,6 @@ use crate::application::dtos::display_helpers::category_order_for;
 use crate::application::ports::storage_ports::{CopyFolderTreeResult, FileWritePort};
 use crate::common::errors::DomainError;
 use crate::domain::entities::file::File;
-use crate::domain::services::path_service::StoragePath;
 
 use super::transaction_utils::retry_on_deadlock;
 use crate::infrastructure::services::dedup_service::DedupService;
@@ -61,14 +60,6 @@ impl FileBlobWriteRepository {
         }
     }
 
-    /// Build a `StoragePath` from the materialized folder path + file name.
-    fn make_file_path(folder_path: Option<&str>, file_name: &str) -> StoragePath {
-        match folder_path {
-            Some(fp) if !fp.is_empty() => StoragePath::from_string(&format!("{fp}/{file_name}")),
-            _ => StoragePath::from_string(file_name),
-        }
-    }
-
     /// Look up the materialized folder path. O(1) — no recursive CTE.
     async fn lookup_folder_path(
         &self,
@@ -108,11 +99,10 @@ impl FileBlobWriteRepository {
         created_by: Option<Uuid>,
         updated_by: Option<Uuid>,
     ) -> Result<File, DomainError> {
-        let storage_path = Self::make_file_path(folder_path.as_deref(), &name);
-        File::with_timestamps_blob_hash_and_provenance(
+        File::from_materialized_row(
             id,
             name,
-            storage_path,
+            folder_path.as_deref(),
             size as u64,
             mime_type,
             folder_id,

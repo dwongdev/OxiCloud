@@ -142,11 +142,10 @@ impl FolderDbRepository {
         created_by: Option<Uuid>,
         updated_by: Option<Uuid>,
     ) -> Result<Folder, DomainError> {
-        let storage_path = StoragePath::from_string(&path);
-        Folder::with_timestamps_tree_and_provenance(
+        Folder::from_materialized_row(
             id,
             name,
-            storage_path,
+            path,
             parent_id,
             drive_id,
             created_at as u64,

@@ -494,12 +494,14 @@ impl AddressBookUseCase for ContactService {
 
         let mut address_book_map = std::collections::HashMap::new();
 
-        for id in book_ids {
-            // Missing rows (deleted / trashed race) drop out silently
-            // — matches the calendar-listing carve-out.
-            if let Ok(Some(book)) = self.contact_storage.get_address_book_by_id(&id).await {
-                address_book_map.insert(*book.id(), book);
-            }
+        // Hydrate in ONE `= ANY` round-trip (was one point SELECT per
+        // accessible book — K serial round-trips on every CardDAV
+        // discovery poll). Missing rows (deleted / trashed race) drop
+        // out of the result set — matches the calendar-listing
+        // carve-out.
+        let ids: Vec<Uuid> = book_ids.into_iter().collect();
+        for book in self.contact_storage.get_address_books_by_ids(&ids).await? {
+            address_book_map.insert(*book.id(), book);
         }
 
         // Public address books surface for every authenticated caller

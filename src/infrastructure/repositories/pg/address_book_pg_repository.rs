@@ -110,6 +110,45 @@ impl AddressBookRepository for AddressBookPgRepository {
         Ok(())
     }
 
+    async fn get_address_books_by_ids(
+        &self,
+        ids: &[Uuid],
+    ) -> AddressBookRepositoryResult<Vec<AddressBook>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            r#"
+            SELECT id, name, owner_id, description, color, is_public, created_at, updated_at
+            FROM carddav.address_books
+            WHERE id = ANY($1)
+            "#,
+        )
+        .bind(ids)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| {
+            DomainError::database_error(format!("Failed to get address books by ids: {}", e))
+        })?;
+
+        Ok(rows
+            .iter()
+            .map(|row| {
+                let owner_id: Uuid = row.get("owner_id");
+                AddressBook::from_raw(
+                    row.get("id"),
+                    row.get("name"),
+                    owner_id.to_string(),
+                    row.get("description"),
+                    row.get("color"),
+                    row.get("is_public"),
+                    row.get("created_at"),
+                    row.get("updated_at"),
+                )
+            })
+            .collect())
+    }
+
     async fn get_address_book_by_id(
         &self,
         id: &Uuid,

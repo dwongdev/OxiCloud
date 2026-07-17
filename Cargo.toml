@@ -283,6 +283,57 @@ name = "bench_owner_cache"
 path = "examples/bench_owner_cache.rs"
 required-features = ["bench"]
 
+# Round-4 battery ─────────────────────────────────────────────────────────────
+
+# PG row → entity path materialization — the per-listing-row make_file_path
+# split→rejoin + NFC copy chain vs the one-pass builders. No Postgres.
+[[example]]
+name = "bench_row_path"
+path = "examples/bench_row_path.rs"
+required-features = ["bench"]
+
+# WebDAV drive-selector resolution — the per-request list_readable_by grants
+# join vs the per-user readable_cache (needs the dev Postgres up).
+[[example]]
+name = "bench_drive_selector"
+path = "examples/bench_drive_selector.rs"
+required-features = ["bench"]
+
+# CalDAV parse path — from_ical's 8×-reparse vs single parse, per-event
+# uppercase copies on REPORT/GET, UID clone churn. No Postgres.
+[[example]]
+name = "bench_caldav_parse"
+path = "examples/bench_caldav_parse.rs"
+required-features = ["bench"]
+
+# PROPFIND per-row XML emit — partition Vec churn + chrono format-interpreter
+# dates vs single-pass + stack-rendered fields. No Postgres.
+[[example]]
+name = "bench_propfind_xml"
+path = "examples/bench_propfind_xml.rs"
+required-features = ["bench"]
+
+# Grant-listing hydration N+1 (calendars / address books / playlists) +
+# user-flags cold-cache herd (needs the dev Postgres up).
+[[example]]
+name = "bench_n1_hydration"
+path = "examples/bench_n1_hydration.rs"
+required-features = ["bench"]
+
+# Face-indexing fan-out — unbounded per-image spawn vs core-count semaphore;
+# peak-live-heap + wall on the bench_support photo corpus. No Postgres.
+[[example]]
+name = "bench_faces_bound"
+path = "examples/bench_faces_bound.rs"
+required-features = ["bench"]
+
+# Azure download path — whole-blob collect vs streamed pages, TTFB + peak
+# live heap against a local Azure-GET stub (endpoint_url hook). No Postgres.
+[[example]]
+name = "bench_azure_stream"
+path = "examples/bench_azure_stream.rs"
+required-features = ["bench"]
+
 # Round-3 battery ─────────────────────────────────────────────────────────────
 
 # Web-UI folder listing — whole-folder rescan + top-N sort per page vs keyset

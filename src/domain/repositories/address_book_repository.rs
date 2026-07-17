@@ -24,6 +24,14 @@ pub trait AddressBookRepository: Send + Sync + 'static {
         address_book: AddressBook,
     ) -> AddressBookRepositoryResult<AddressBook>;
     async fn delete_address_book(&self, id: &Uuid) -> AddressBookRepositoryResult<()>;
+    /// Batch sibling of `get_address_book_by_id`: one `= ANY($1)`
+    /// round-trip for a page of grant-derived ids. Missing ids drop
+    /// out; ordering is not guaranteed.
+    async fn get_address_books_by_ids(
+        &self,
+        ids: &[Uuid],
+    ) -> AddressBookRepositoryResult<Vec<AddressBook>>;
+
     async fn get_address_book_by_id(
         &self,
         id: &Uuid,

@@ -84,6 +84,15 @@ impl ContactStoragePort for ContactStorageAdapter {
             .await
     }
 
+    async fn get_address_books_by_ids(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<Vec<AddressBook>, DomainError> {
+        self.address_book_repository
+            .get_address_books_by_ids(ids)
+            .await
+    }
+
     async fn get_public_address_books(&self) -> Result<Vec<AddressBook>, DomainError> {
         self.address_book_repository
             .get_public_address_books()

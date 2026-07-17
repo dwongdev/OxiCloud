@@ -250,25 +250,36 @@ impl CalendarEvent {
      * @return Result containing the new CalendarEvent or a domain error
      */
     pub fn from_ical(calendar_id: Uuid, ical_data: String) -> Result<Self> {
-        // This implementation would require a proper iCalendar parser
-        // For brevity, we're using a simplified version here
+        // Parse the body ONCE and read every property from the parsed
+        // component. The previous shape funnelled each of the 8 property
+        // lookups below through `extract_ical_property[_with_params]`,
+        // which re-ran the full `IcalParser` (line unfolding + component
+        // tree build) per property — 8 complete parses per VEVENT on
+        // every CalDAV PUT / import. A missing-or-unparseable body maps
+        // to the same "Missing SUMMARY" error the old first lookup
+        // produced, preserving error parity.
+        let event = Self::parse_first_vevent(&ical_data);
 
-        // Extract required fields from iCalendar data
-        let summary = Self::extract_ical_property(&ical_data, "SUMMARY").ok_or_else(|| {
-            DomainError::new(
-                ErrorKind::InvalidInput,
-                "CalendarEvent",
-                "Missing SUMMARY in iCalendar data",
-            )
-        })?;
+        // Extract required fields from the parsed component
+        let summary = event
+            .as_ref()
+            .and_then(|e| Self::prop_value(e, "SUMMARY"))
+            .ok_or_else(|| {
+                DomainError::new(
+                    ErrorKind::InvalidInput,
+                    "CalendarEvent",
+                    "Missing SUMMARY in iCalendar data",
+                )
+            })?;
+        let event = event.expect("prop_value returned Some, so the parse succeeded");
 
         // DTSTART / DTEND: use the params-aware extractor so we can
         // detect `VALUE=DATE` (all-day) from the property parameters
         // rather than scanning the raw property line. The pre-parser-
         // rewrite substring scan couldn't see param-carrying lines at
         // all — see #528.
-        let (dtstart_value, dtstart_params) =
-            Self::extract_ical_property_with_params(&ical_data, "DTSTART").ok_or_else(|| {
+        let (dtstart_value, dtstart_params) = Self::prop_with_params(&event, "DTSTART")
+            .ok_or_else(|| {
                 DomainError::new(
                     ErrorKind::InvalidInput,
                     "CalendarEvent",
@@ -277,7 +288,7 @@ impl CalendarEvent {
             })?;
 
         let (dtend_value, _dtend_params) =
-            Self::extract_ical_property_with_params(&ical_data, "DTEND").ok_or_else(|| {
+            Self::prop_with_params(&event, "DTEND").ok_or_else(|| {
                 DomainError::new(
                     ErrorKind::InvalidInput,
                     "CalendarEvent",
@@ -313,13 +324,13 @@ impl CalendarEvent {
         })?;
 
         // Extract optional fields
-        let description = Self::extract_ical_property(&ical_data, "DESCRIPTION");
-        let location = Self::extract_ical_property(&ical_data, "LOCATION");
-        let rrule = Self::extract_ical_property(&ical_data, "RRULE");
+        let description = Self::prop_value(&event, "DESCRIPTION");
+        let location = Self::prop_value(&event, "LOCATION");
+        let rrule = Self::prop_value(&event, "RRULE");
 
         // Extract UID or generate a new one
-        let ical_uid = Self::extract_ical_property(&ical_data, "UID")
-            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let ical_uid =
+            Self::prop_value(&event, "UID").unwrap_or_else(|| Uuid::new_v4().to_string());
 
         // RECURRENCE-ID (RFC 5545 §3.8.4.4). When present, this VEVENT
         // is an override for a specific occurrence of a recurring
@@ -329,17 +340,16 @@ impl CalendarEvent {
         // gets stored, just as a plain event (worst case a client sync
         // treats it as a new master, which the DB uniqueness will
         // refuse; better a persistence error than a silent split).
-        let recurrence_id =
-            match Self::extract_ical_property_with_params(&ical_data, "RECURRENCE-ID") {
-                Some((value, params)) => {
-                    let is_date = params
-                        .get("VALUE")
-                        .map(|vs| vs.iter().any(|v| v.eq_ignore_ascii_case("DATE")))
-                        .unwrap_or(false);
-                    Self::parse_ical_datetime(&value, is_date).ok()
-                }
-                None => None,
-            };
+        let recurrence_id = match Self::prop_with_params(&event, "RECURRENCE-ID") {
+            Some((value, params)) => {
+                let is_date = params
+                    .get("VALUE")
+                    .map(|vs| vs.iter().any(|v| v.eq_ignore_ascii_case("DATE")))
+                    .unwrap_or(false);
+                Self::parse_ical_datetime(&value, is_date).ok()
+            }
+            None => None,
+        };
 
         let now = Utc::now();
 
@@ -627,18 +637,28 @@ impl CalendarEvent {
             ));
         }
 
-        // Extract and update properties from iCalendar data
-        if let Some(summary) = Self::extract_ical_property(&ical_data, "SUMMARY") {
+        // Parse the body ONCE and update every property from the parsed
+        // component (same 8-parses→1 collapse as `from_ical`). An
+        // unparseable body behaves exactly like the old per-property
+        // lookups all returning `None`: optional fields clear, required
+        // fields keep their previous values.
+        let event = Self::parse_first_vevent(&ical_data);
+
+        if let Some(summary) = event.as_ref().and_then(|e| Self::prop_value(e, "SUMMARY")) {
             self.summary = summary;
         }
 
-        self.description = Self::extract_ical_property(&ical_data, "DESCRIPTION");
-        self.location = Self::extract_ical_property(&ical_data, "LOCATION");
+        self.description = event
+            .as_ref()
+            .and_then(|e| Self::prop_value(e, "DESCRIPTION"));
+        self.location = event.as_ref().and_then(|e| Self::prop_value(e, "LOCATION"));
 
         // Extract DTSTART with parameters — needed for the all-day
         // detection below AND for the DTSTART/DTEND datetime parsers
         // (they need to know whether the value is a date or a datetime).
-        let dtstart_pair = Self::extract_ical_property_with_params(&ical_data, "DTSTART");
+        let dtstart_pair = event
+            .as_ref()
+            .and_then(|e| Self::prop_with_params(e, "DTSTART"));
         let all_day = dtstart_pair
             .as_ref()
             .and_then(|(_v, params)| params.get("VALUE"))
@@ -652,15 +672,17 @@ impl CalendarEvent {
             self.start_time = start_time;
         }
 
-        if let Some((value, _params)) = Self::extract_ical_property_with_params(&ical_data, "DTEND")
+        if let Some((value, _params)) = event
+            .as_ref()
+            .and_then(|e| Self::prop_with_params(e, "DTEND"))
             && let Ok(end_time) = Self::parse_ical_datetime(&value, all_day)
         {
             self.end_time = end_time;
         }
 
-        self.rrule = Self::extract_ical_property(&ical_data, "RRULE");
+        self.rrule = event.as_ref().and_then(|e| Self::prop_value(e, "RRULE"));
 
-        if let Some(uid) = Self::extract_ical_property(&ical_data, "UID") {
+        if let Some(uid) = event.as_ref().and_then(|e| Self::prop_value(e, "UID")) {
             self.ical_uid = uid;
         }
 
@@ -756,43 +778,74 @@ impl CalendarEvent {
      * @param property_name The name of the property to extract
      * @return Option containing the property value if found
      */
+    #[cfg(test)]
     fn extract_ical_property(ical_data: &str, property_name: &str) -> Option<String> {
-        Self::extract_ical_property_with_params(ical_data, property_name).map(|(v, _p)| v)
+        Self::prop_value(&Self::parse_first_vevent(ical_data)?, property_name)
     }
 
-    /// Extract a property's value AND parameter map. Same lookup rules
-    /// as `extract_ical_property`; the second element is a map keyed by
-    /// parameter name (`"VALUE"`, `"TZID"`, `"CN"`, …) whose value is
-    /// the list of parameter values (parameters can be multi-valued —
-    /// `MEMBER="mailto:a@x","mailto:b@x"` — hence the `Vec<String>`
-    /// per key).
-    ///
-    /// Callers that only need the value should use `extract_ical_property`;
-    /// this variant is for DTSTART / DTEND / RECURRENCE-ID which need
-    /// `VALUE=DATE` detection to distinguish all-day from timed events.
+    /// Test-only sibling of [`Self::prop_with_params`] that parses the
+    /// raw body first. Production callers (`from_ical`,
+    /// `update_ical_data`) parse ONCE and use the by-reference helpers.
+    #[cfg(test)]
     fn extract_ical_property_with_params(
         ical_data: &str,
         property_name: &str,
     ) -> Option<(String, std::collections::HashMap<String, Vec<String>>)> {
-        let event = Self::parse_first_vevent(ical_data)?;
+        Self::prop_with_params(&Self::parse_first_vevent(ical_data)?, property_name)
+    }
+
+    /// Read a property's trimmed value from an already-parsed VEVENT.
+    ///
+    /// Value-only lookups skip the parameter-map build entirely; use
+    /// [`Self::prop_with_params`] for DTSTART / DTEND / RECURRENCE-ID
+    /// which need `VALUE=DATE` detection.
+    ///
+    /// Returns `None` when the property is missing or its value is
+    /// empty after trimming — the same rules the old per-property
+    /// full-parse extractors applied.
+    fn prop_value(
+        event: &ical::parser::ical::component::IcalEvent,
+        property_name: &str,
+    ) -> Option<String> {
         let prop = event
             .properties
-            .into_iter()
+            .iter()
             .find(|p| p.name.eq_ignore_ascii_case(property_name))?;
-        let value = prop.value?;
-        if value.trim().is_empty() {
+        let trimmed = prop.value.as_deref()?.trim();
+        if trimmed.is_empty() {
+            return None;
+        }
+        Some(trimmed.to_string())
+    }
+
+    /// Read a property's trimmed value AND parameter map from an
+    /// already-parsed VEVENT. The map is keyed by parameter name
+    /// (`"VALUE"`, `"TZID"`, `"CN"`, …) whose value is the list of
+    /// parameter values (parameters can be multi-valued —
+    /// `MEMBER="mailto:a@x","mailto:b@x"` — hence the `Vec<String>`
+    /// per key).
+    fn prop_with_params(
+        event: &ical::parser::ical::component::IcalEvent,
+        property_name: &str,
+    ) -> Option<(String, std::collections::HashMap<String, Vec<String>>)> {
+        let prop = event
+            .properties
+            .iter()
+            .find(|p| p.name.eq_ignore_ascii_case(property_name))?;
+        let trimmed = prop.value.as_deref()?.trim();
+        if trimmed.is_empty() {
             return None;
         }
         let mut params: std::collections::HashMap<String, Vec<String>> =
             std::collections::HashMap::new();
-        if let Some(param_list) = prop.params {
+        if let Some(param_list) = &prop.params {
             for (name, values) in param_list {
                 // RFC 5545 property parameter names are ASCII case-insensitive.
                 // Normalise to UPPER so callers key on a canonical form.
-                params.insert(name.to_ascii_uppercase(), values);
+                params.insert(name.to_ascii_uppercase(), values.clone());
             }
         }
-        Some((value.trim().to_string(), params))
+        Some((trimmed.to_string(), params))
     }
 
     /// Parse a VCALENDAR body containing one or more VEVENT components
@@ -847,6 +900,18 @@ impl CalendarEvent {
         let mut in_event = false;
         let mut current = String::new();
 
+        // Allocation-free case-insensitive prefix test. `to_ascii_uppercase`
+        // maps ASCII bytes in place and leaves multi-byte chars untouched,
+        // so "first N bytes uppercased equal TAG" ⇔ "first N bytes
+        // ASCII-case-insensitively equal TAG"; `get(..N)` returning `None`
+        // (char straddling the boundary) implies the prefix can't be the
+        // all-ASCII tag. The old per-line `to_ascii_uppercase()` allocated
+        // a String for every line of every uploaded body.
+        fn starts_with_ci(line: &str, tag: &str) -> bool {
+            line.get(..tag.len())
+                .is_some_and(|p| p.eq_ignore_ascii_case(tag))
+        }
+
         for raw_line in ical_data.split('\n') {
             let line = raw_line.trim_end_matches('\r');
             // Match the tag ignoring case, allowing surrounding
@@ -854,9 +919,9 @@ impl CalendarEvent {
             // continuations — the raw-line scan sees those but they
             // won't start with BEGIN/END so they slot through as
             // in-event content, which is correct).
-            let upper = line.trim_start().to_ascii_uppercase();
+            let tag_area = line.trim_start();
 
-            if upper.starts_with("BEGIN:VEVENT") {
+            if starts_with_ci(tag_area, "BEGIN:VEVENT") {
                 in_event = true;
                 current.clear();
             }
@@ -866,7 +931,7 @@ impl CalendarEvent {
                 current.push_str("\r\n");
             }
 
-            if in_event && upper.starts_with("END:VEVENT") {
+            if in_event && starts_with_ci(tag_area, "END:VEVENT") {
                 blocks.push(std::mem::take(&mut current));
                 in_event = false;
             }
