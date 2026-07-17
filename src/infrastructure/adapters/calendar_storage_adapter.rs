@@ -115,6 +115,11 @@ impl CalendarStoragePort for CalendarStorageAdapter {
         Ok(CalendarDto::from(calendar))
     }
 
+    async fn get_calendars_by_ids(&self, ids: &[Uuid]) -> Result<Vec<CalendarDto>, DomainError> {
+        let calendars = self.calendar_repository.find_calendars_by_ids(ids).await?;
+        Ok(calendars.into_iter().map(CalendarDto::from).collect())
+    }
+
     async fn list_calendars_by_owner(
         &self,
         owner_id: Uuid,

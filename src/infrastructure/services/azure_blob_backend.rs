@@ -9,7 +9,7 @@ use std::pin::Pin;
 use azure_storage::StorageCredentials;
 use azure_storage_blobs::prelude::*;
 use bytes::Bytes;
-use futures::StreamExt;
+use futures::{StreamExt, TryStreamExt};
 use tokio::fs;
 
 use crate::application::ports::blob_storage_ports::{
@@ -33,8 +33,21 @@ impl AzureBlobBackend {
             StorageCredentials::access_key(&config.account_name, config.account_key.clone())
         };
 
-        let container_client = ClientBuilder::new(&config.account_name, credentials)
-            .container_client(&config.container);
+        // Custom endpoint (Azurite emulator / private deployment /
+        // benches) mirrors S3's `endpoint_url`; default is the public
+        // cloud URL derived from the account name.
+        let container_client = match &config.endpoint_url {
+            Some(uri) => ClientBuilder::with_location(
+                azure_storage::CloudLocation::Custom {
+                    account: config.account_name.clone(),
+                    uri: uri.trim_end_matches('/').to_string(),
+                },
+                credentials,
+            )
+            .container_client(&config.container),
+            None => ClientBuilder::new(&config.account_name, credentials)
+                .container_client(&config.container),
+        };
 
         Self {
             container_client,
@@ -169,29 +182,46 @@ impl BlobStorageBackend for AzureBlobBackend {
         Box::pin(async move {
             let client = self.blob_client(&hash);
 
-            let mut result_data: Vec<u8> = Vec::new();
-            let mut stream = client.get().into_stream();
-
-            while let Some(response) = stream.next().await {
-                let response = response.map_err(|e| {
-                    DomainError::new(
+            // The old implementation drained the ENTIRE blob into one
+            // `Vec<u8>` before yielding a single mega-chunk — whole-blob
+            // RAM residency per reader, and with `read_prefetch() = 8`
+            // up to 8 entire chunk-blobs resident at once during CDC
+            // reassembly. Now the SDK's page/body streams forward
+            // directly. The FIRST page is still awaited eagerly so a
+            // missing blob surfaces as the same up-front NotFound the
+            // old code produced; later pages/chunks map to io::Error
+            // items like every other backend's stream.
+            let mut pages = client.get().into_stream();
+            let first = match pages.next().await {
+                Some(Ok(response)) => response,
+                Some(Err(e)) => {
+                    return Err(DomainError::new(
                         ErrorKind::NotFound,
                         "Azure",
                         format!("Failed to get blob {hash}: {e}"),
-                    )
-                })?;
-                let mut body = response.data;
-                while let Some(chunk) = body.next().await {
-                    let chunk = chunk.map_err(|e| {
-                        DomainError::internal_error("Azure", format!("Stream read error: {e}"))
-                    })?;
-                    result_data.extend_from_slice(&chunk);
+                    ));
                 }
-            }
+                None => {
+                    let empty: BlobStream =
+                        Box::pin(futures::stream::once(async move { Ok(Bytes::new()) }));
+                    return Ok(empty);
+                }
+            };
 
-            let stream: BlobStream = Box::pin(futures::stream::once(async move {
-                Ok(Bytes::from(result_data))
-            }));
+            let first_body = first.data.map(|chunk| {
+                chunk.map_err(|e| std::io::Error::other(format!("Stream read error: {e}")))
+            });
+            let tail = pages
+                .map(|page| match page {
+                    Ok(response) => Ok(response.data.map(|chunk| {
+                        chunk.map_err(|e| std::io::Error::other(format!("Stream read error: {e}")))
+                    })),
+                    Err(e) => Err(std::io::Error::other(format!(
+                        "Failed to get blob page: {e}"
+                    ))),
+                })
+                .try_flatten();
+            let stream: BlobStream = Box::pin(first_body.chain(tail));
             Ok(stream)
         })
     }
@@ -212,32 +242,42 @@ impl BlobStorageBackend for AzureBlobBackend {
                 None => azure_core::request_options::Range::new(start, u64::MAX),
             };
 
-            let mut result_data: Vec<u8> = Vec::new();
-            let mut stream = client.get().range(range).into_stream();
-
-            while let Some(response) = stream.next().await {
-                let response = response.map_err(|e| {
-                    DomainError::new(
+            // Same forwarding shape as `get_blob_stream` — a ranged read
+            // doubly so: the caller explicitly asked NOT to pay for the
+            // whole blob, yet the old code buffered the full range.
+            let mut pages = client.get().range(range).into_stream();
+            let first = match pages.next().await {
+                Some(Ok(response)) => response,
+                Some(Err(e)) => {
+                    return Err(DomainError::new(
                         ErrorKind::NotFound,
                         "Azure",
                         format!("Failed to get blob range {hash}: {e}"),
-                    )
-                })?;
-                let mut body = response.data;
-                while let Some(chunk) = body.next().await {
-                    let chunk = chunk.map_err(|e| {
-                        DomainError::internal_error(
-                            "Azure",
-                            format!("Stream range read error: {e}"),
-                        )
-                    })?;
-                    result_data.extend_from_slice(&chunk);
+                    ));
                 }
-            }
+                None => {
+                    let empty: BlobStream =
+                        Box::pin(futures::stream::once(async move { Ok(Bytes::new()) }));
+                    return Ok(empty);
+                }
+            };
 
-            let stream: BlobStream = Box::pin(futures::stream::once(async move {
-                Ok(Bytes::from(result_data))
-            }));
+            let first_body = first.data.map(|chunk| {
+                chunk.map_err(|e| std::io::Error::other(format!("Stream range read error: {e}")))
+            });
+            let tail = pages
+                .map(|page| match page {
+                    Ok(response) => Ok(response.data.map(|chunk| {
+                        chunk.map_err(|e| {
+                            std::io::Error::other(format!("Stream range read error: {e}"))
+                        })
+                    })),
+                    Err(e) => Err(std::io::Error::other(format!(
+                        "Failed to get blob range page: {e}"
+                    ))),
+                })
+                .try_flatten();
+            let stream: BlobStream = Box::pin(first_body.chain(tail));
             Ok(stream)
         })
     }

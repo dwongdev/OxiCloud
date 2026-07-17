@@ -263,6 +263,12 @@ impl DriveManagementService {
         self.authz
             .invalidate_drive_role_cache_for_drive(drive_id)
             .await;
+        // Same freshness contract for the repo's readable-drives cache:
+        // the subject's drive list changed with this grant.
+        match subject {
+            Subject::User(uid) => self.drive_repo.invalidate_readable_for_user(uid).await,
+            _ => self.drive_repo.invalidate_readable_all(),
+        }
 
         // D6 §11: canonical `drive.member_added` audit event covers
         // every successful membership write (add + role-refresh, since
@@ -335,6 +341,12 @@ impl DriveManagementService {
         self.authz
             .invalidate_drive_role_cache_for_drive(drive_id)
             .await;
+        // And the repo's readable-drives cache: the drive must vanish
+        // from the removed subject's list immediately.
+        match subject {
+            Subject::User(uid) => self.drive_repo.invalidate_readable_for_user(uid).await,
+            _ => self.drive_repo.invalidate_readable_all(),
+        }
 
         // D6 §11: canonical `drive.member_removed` audit event covers
         // every successful removal (owner-driven or admin bypass).

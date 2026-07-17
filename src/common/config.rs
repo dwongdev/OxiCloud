@@ -310,6 +310,10 @@ pub struct AzureStorageConfig {
     pub container: String,
     /// Optional SAS token (alternative to account key).
     pub sas_token: Option<String>,
+    /// Optional custom endpoint (Azurite emulator, private deployments,
+    /// benches). `None` = the public cloud URL derived from the account
+    /// name. Mirrors S3's `endpoint_url`.
+    pub endpoint_url: Option<String>,
 }
 
 /// LRU local disk cache configuration for remote blob backends.
@@ -2140,6 +2144,7 @@ impl AppConfig {
                 account_key: env::var("OXICLOUD_AZURE_ACCOUNT_KEY").unwrap_or_default(),
                 container,
                 sas_token: env::var("OXICLOUD_AZURE_SAS_TOKEN").ok(),
+                endpoint_url: env::var("OXICLOUD_AZURE_ENDPOINT_URL").ok(),
             });
         }
 

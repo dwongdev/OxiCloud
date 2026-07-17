@@ -1682,6 +1682,7 @@ impl AppServiceFactory {
                         ),
                     ),
                     authorization.clone(),
+                    drive_repo.clone(),
                 ),
             )),
             email_sender: None,                   // populated below

@@ -627,17 +627,19 @@ impl WebDavAdapter {
                 // RFC 4918 §9.2: known props → 200 propstat; unknown → 404 propstat.
                 // Props found in the dead store are returned in the dead 200 propstat,
                 // so exclude them from the 404 propstat to avoid duplicate reporting.
-                let (known, unknown): (Vec<_>, Vec<_>) = props
+                // Single pass: the requested-props writer skips unknown
+                // names itself (its match arms mirror
+                // `folder_prop_is_known` exactly), so only the usually
+                // empty 404 list needs materialising — the old
+                // `partition` built two throwaway Vecs per row.
+                let truly_unknown: Vec<_> = props
                     .iter()
-                    .partition(|p| Self::folder_prop_is_known(p, quota));
-                let truly_unknown: Vec<_> = unknown
-                    .into_iter()
-                    .filter(|p| !dead_name_set.contains(*p))
+                    .filter(|p| !Self::folder_prop_is_known(p, quota) && !dead_name_set.contains(p))
                     .collect();
 
                 xml_writer.write_event(Event::Start(BytesStart::new("D:propstat")))?;
                 xml_writer.write_event(Event::Start(BytesStart::new("D:prop")))?;
-                Self::write_folder_requested_props(xml_writer, folder, &known, quota)?;
+                Self::write_folder_requested_props(xml_writer, folder, props, quota)?;
                 xml_writer.write_event(Event::End(BytesEnd::new("D:prop")))?;
                 xml_writer.write_event(Event::Start(BytesStart::new("D:status")))?;
                 xml_writer.write_event(Event::Text(BytesText::new("HTTP/1.1 200 OK")))?;
@@ -714,16 +716,19 @@ impl WebDavAdapter {
                 // RFC 4918 §9.2: known props → 200 propstat; unknown → 404 propstat.
                 // Props found in the dead store are returned in the dead 200 propstat,
                 // so exclude them from the 404 propstat to avoid duplicate reporting.
-                let (known, unknown): (Vec<_>, Vec<_>) =
-                    props.iter().partition(|p| Self::file_prop_is_known(p));
-                let truly_unknown: Vec<_> = unknown
-                    .into_iter()
-                    .filter(|p| !dead_name_set.contains(*p))
+                // Single pass: the requested-props writer skips unknown
+                // names itself (its match arms mirror `file_prop_is_known`
+                // exactly), so only the usually empty 404 list needs
+                // materialising — the old `partition` built two throwaway
+                // Vecs per row.
+                let truly_unknown: Vec<_> = props
+                    .iter()
+                    .filter(|p| !Self::file_prop_is_known(p) && !dead_name_set.contains(p))
                     .collect();
 
                 xml_writer.write_event(Event::Start(BytesStart::new("D:propstat")))?;
                 xml_writer.write_event(Event::Start(BytesStart::new("D:prop")))?;
-                Self::write_file_requested_props(xml_writer, file, &known)?;
+                Self::write_file_requested_props(xml_writer, file, props)?;
                 xml_writer.write_event(Event::End(BytesEnd::new("D:prop")))?;
                 xml_writer.write_event(Event::Start(BytesStart::new("D:status")))?;
                 xml_writer.write_event(Event::Text(BytesText::new("HTTP/1.1 200 OK")))?;
@@ -759,6 +764,71 @@ impl WebDavAdapter {
         Ok(())
     }
 
+    // ── Per-row formatted-value writers (stack-rendered) ─────────────
+    //
+    // PROPFIND emits two formatted dates, a size and a quoted etag for
+    // EVERY row of every listing. `to_rfc3339()`/`to_rfc2822()` ran
+    // chrono's format-spec interpreter and allocated a String each;
+    // `to_string()`/`format!` added two more. These render the same
+    // bytes from stack buffers (`common::fmt`); out-of-range timestamps
+    // keep the old chrono path as a byte-identical fallback.
+
+    fn write_creationdate<W: Write>(xml_writer: &mut Writer<W>, secs: u64) -> Result<()> {
+        xml_writer.write_event(Event::Start(BytesStart::new("D:creationdate")))?;
+        let secs = secs as i64;
+        let mut buf = [0u8; 25];
+        match crate::common::fmt::rfc3339_utc(&mut buf, secs) {
+            Some(s) => xml_writer.write_event(Event::Text(BytesText::new(s)))?,
+            None => {
+                let s = chrono::DateTime::<Utc>::from_timestamp(secs, 0)
+                    .unwrap_or_else(Utc::now)
+                    .to_rfc3339();
+                xml_writer.write_event(Event::Text(BytesText::new(&s)))?;
+            }
+        }
+        xml_writer.write_event(Event::End(BytesEnd::new("D:creationdate")))?;
+        Ok(())
+    }
+
+    fn write_lastmodified<W: Write>(xml_writer: &mut Writer<W>, secs: u64) -> Result<()> {
+        xml_writer.write_event(Event::Start(BytesStart::new("D:getlastmodified")))?;
+        let secs = secs as i64;
+        let mut buf = [0u8; 31];
+        match crate::common::fmt::rfc2822_utc(&mut buf, secs) {
+            Some(s) => xml_writer.write_event(Event::Text(BytesText::new(s)))?,
+            None => {
+                let s = chrono::DateTime::<Utc>::from_timestamp(secs, 0)
+                    .unwrap_or_else(Utc::now)
+                    .to_rfc2822();
+                xml_writer.write_event(Event::Text(BytesText::new(&s)))?;
+            }
+        }
+        xml_writer.write_event(Event::End(BytesEnd::new("D:getlastmodified")))?;
+        Ok(())
+    }
+
+    fn write_etag_quoted<W: Write>(xml_writer: &mut Writer<W>, etag: &str) -> Result<()> {
+        xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
+        // One exactly-sized allocation instead of format!'s grow-from-empty.
+        let mut quoted = String::with_capacity(etag.len() + 2);
+        quoted.push('"');
+        quoted.push_str(etag);
+        quoted.push('"');
+        xml_writer.write_event(Event::Text(BytesText::new(&quoted)))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
+        Ok(())
+    }
+
+    fn write_contentlength<W: Write>(xml_writer: &mut Writer<W>, size: u64) -> Result<()> {
+        xml_writer.write_event(Event::Start(BytesStart::new("D:getcontentlength")))?;
+        let mut buf = [0u8; 20];
+        xml_writer.write_event(Event::Text(BytesText::new(crate::common::fmt::u64_str(
+            &mut buf, size,
+        ))))?;
+        xml_writer.write_event(Event::End(BytesEnd::new("D:getcontentlength")))?;
+        Ok(())
+    }
+
     /// Write standard folder properties
     fn write_folder_standard_props<W: Write>(
         xml_writer: &mut Writer<W>,
@@ -776,31 +846,15 @@ impl WebDavAdapter {
         xml_writer.write_event(Event::End(BytesEnd::new("D:displayname")))?;
 
         // Creation date
-        xml_writer.write_event(Event::Start(BytesStart::new("D:creationdate")))?;
-
-        // Convert u64 timestamp to DateTime
-        let created_at = chrono::DateTime::<Utc>::from_timestamp(folder.created_at as i64, 0)
-            .unwrap_or_else(Utc::now);
-
-        xml_writer.write_event(Event::Text(BytesText::new(&created_at.to_rfc3339())))?;
-        xml_writer.write_event(Event::End(BytesEnd::new("D:creationdate")))?;
+        Self::write_creationdate(xml_writer, folder.created_at)?;
 
         // Last modified
-        xml_writer.write_event(Event::Start(BytesStart::new("D:getlastmodified")))?;
-
-        // Convert u64 timestamp to DateTime
-        let modified_at = chrono::DateTime::<Utc>::from_timestamp(folder.modified_at as i64, 0)
-            .unwrap_or_else(Utc::now);
-
-        xml_writer.write_event(Event::Text(BytesText::new(&modified_at.to_rfc2822())))?;
-        xml_writer.write_event(Event::End(BytesEnd::new("D:getlastmodified")))?;
+        Self::write_lastmodified(xml_writer, folder.modified_at)?;
 
         // ETag — routes through `FolderDto::etag` (= `Folder::etag()`)
         // so every WebDAV emitter and HEAD response agree on a single
         // value for the same folder.
-        xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-        xml_writer.write_event(Event::Text(BytesText::new(&format!("\"{}\"", folder.etag))))?;
-        xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
+        Self::write_etag_quoted(xml_writer, &folder.etag)?;
 
         // Content length (0 for directories)
         xml_writer.write_event(Event::Start(BytesStart::new("D:getcontentlength")))?;
@@ -829,13 +883,19 @@ impl WebDavAdapter {
         used_bytes: i64,
         available_bytes: Option<i64>,
     ) -> Result<()> {
+        let mut buf = [0u8; 21];
         xml_writer.write_event(Event::Start(BytesStart::new("D:quota-used-bytes")))?;
-        xml_writer.write_event(Event::Text(BytesText::new(&used_bytes.to_string())))?;
+        xml_writer.write_event(Event::Text(BytesText::new(crate::common::fmt::i64_str(
+            &mut buf, used_bytes,
+        ))))?;
         xml_writer.write_event(Event::End(BytesEnd::new("D:quota-used-bytes")))?;
 
         if let Some(available_bytes) = available_bytes {
             xml_writer.write_event(Event::Start(BytesStart::new("D:quota-available-bytes")))?;
-            xml_writer.write_event(Event::Text(BytesText::new(&available_bytes.to_string())))?;
+            xml_writer.write_event(Event::Text(BytesText::new(crate::common::fmt::i64_str(
+                &mut buf,
+                available_bytes,
+            ))))?;
             xml_writer.write_event(Event::End(BytesEnd::new("D:quota-available-bytes")))?;
         }
 
@@ -861,36 +921,18 @@ impl WebDavAdapter {
         xml_writer.write_event(Event::End(BytesEnd::new("D:getcontenttype")))?;
 
         // Content length
-        xml_writer.write_event(Event::Start(BytesStart::new("D:getcontentlength")))?;
-        xml_writer.write_event(Event::Text(BytesText::new(&file.size.to_string())))?;
-        xml_writer.write_event(Event::End(BytesEnd::new("D:getcontentlength")))?;
+        Self::write_contentlength(xml_writer, file.size)?;
 
         // Creation date
-        xml_writer.write_event(Event::Start(BytesStart::new("D:creationdate")))?;
-
-        // Convert u64 timestamp to DateTime
-        let created_at = chrono::DateTime::<Utc>::from_timestamp(file.created_at as i64, 0)
-            .unwrap_or_else(Utc::now);
-
-        xml_writer.write_event(Event::Text(BytesText::new(&created_at.to_rfc3339())))?;
-        xml_writer.write_event(Event::End(BytesEnd::new("D:creationdate")))?;
+        Self::write_creationdate(xml_writer, file.created_at)?;
 
         // Last modified
-        xml_writer.write_event(Event::Start(BytesStart::new("D:getlastmodified")))?;
-
-        // Convert u64 timestamp to DateTime
-        let modified_at = chrono::DateTime::<Utc>::from_timestamp(file.modified_at as i64, 0)
-            .unwrap_or_else(Utc::now);
-
-        xml_writer.write_event(Event::Text(BytesText::new(&modified_at.to_rfc2822())))?;
-        xml_writer.write_event(Event::End(BytesEnd::new("D:getlastmodified")))?;
+        Self::write_lastmodified(xml_writer, file.modified_at)?;
 
         // ETag — routes through `FileDto::etag` (= `File::etag()`) so
         // PROPFIND, GET, HEAD, PUT-response, and MOVE all emit
         // byte-identical values for the same file.
-        xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-        xml_writer.write_event(Event::Text(BytesText::new(&format!("\"{}\"", file.etag))))?;
-        xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
+        Self::write_etag_quoted(xml_writer, &file.etag)?;
 
         Ok(())
     }
@@ -936,7 +978,7 @@ impl WebDavAdapter {
     fn write_folder_requested_props<W: Write>(
         xml_writer: &mut Writer<W>,
         folder: &FolderDto,
-        props: &[&QualifiedName],
+        props: &[QualifiedName],
         quota: Option<(i64, Option<i64>)>,
     ) -> Result<()> {
         for prop in props {
@@ -953,37 +995,13 @@ impl WebDavAdapter {
                         xml_writer.write_event(Event::End(BytesEnd::new("D:displayname")))?;
                     }
                     "creationdate" => {
-                        xml_writer.write_event(Event::Start(BytesStart::new("D:creationdate")))?;
-
-                        // Convert u64 timestamp to DateTime
-                        let created_at =
-                            chrono::DateTime::<Utc>::from_timestamp(folder.created_at as i64, 0)
-                                .unwrap_or_else(Utc::now);
-
-                        xml_writer
-                            .write_event(Event::Text(BytesText::new(&created_at.to_rfc3339())))?;
-                        xml_writer.write_event(Event::End(BytesEnd::new("D:creationdate")))?;
+                        Self::write_creationdate(xml_writer, folder.created_at)?;
                     }
                     "getlastmodified" => {
-                        xml_writer
-                            .write_event(Event::Start(BytesStart::new("D:getlastmodified")))?;
-
-                        // Convert u64 timestamp to DateTime
-                        let modified_at =
-                            chrono::DateTime::<Utc>::from_timestamp(folder.modified_at as i64, 0)
-                                .unwrap_or_else(Utc::now);
-
-                        xml_writer
-                            .write_event(Event::Text(BytesText::new(&modified_at.to_rfc2822())))?;
-                        xml_writer.write_event(Event::End(BytesEnd::new("D:getlastmodified")))?;
+                        Self::write_lastmodified(xml_writer, folder.modified_at)?;
                     }
                     "getetag" => {
-                        xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-                        xml_writer.write_event(Event::Text(BytesText::new(&format!(
-                            "\"{}\"",
-                            folder.etag
-                        ))))?;
-                        xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
+                        Self::write_etag_quoted(xml_writer, &folder.etag)?;
                     }
                     "getcontentlength" => {
                         xml_writer
@@ -1000,21 +1018,25 @@ impl WebDavAdapter {
                     }
                     "quota-used-bytes" => {
                         if let Some((used, _)) = quota {
+                            let mut buf = [0u8; 21];
                             xml_writer
                                 .write_event(Event::Start(BytesStart::new("D:quota-used-bytes")))?;
-                            xml_writer
-                                .write_event(Event::Text(BytesText::new(&used.to_string())))?;
+                            xml_writer.write_event(Event::Text(BytesText::new(
+                                crate::common::fmt::i64_str(&mut buf, used),
+                            )))?;
                             xml_writer
                                 .write_event(Event::End(BytesEnd::new("D:quota-used-bytes")))?;
                         }
                     }
                     "quota-available-bytes" => {
                         if let Some((_, Some(available))) = quota {
+                            let mut buf = [0u8; 21];
                             xml_writer.write_event(Event::Start(BytesStart::new(
                                 "D:quota-available-bytes",
                             )))?;
-                            xml_writer
-                                .write_event(Event::Text(BytesText::new(&available.to_string())))?;
+                            xml_writer.write_event(Event::Text(BytesText::new(
+                                crate::common::fmt::i64_str(&mut buf, available),
+                            )))?;
                             xml_writer.write_event(Event::End(BytesEnd::new(
                                 "D:quota-available-bytes",
                             )))?;
@@ -1035,7 +1057,7 @@ impl WebDavAdapter {
     fn write_file_requested_props<W: Write>(
         xml_writer: &mut Writer<W>,
         file: &FileDto,
-        props: &[&QualifiedName],
+        props: &[QualifiedName],
     ) -> Result<()> {
         for prop in props {
             if prop.namespace == "DAV:" {
@@ -1055,44 +1077,16 @@ impl WebDavAdapter {
                         xml_writer.write_event(Event::End(BytesEnd::new("D:getcontenttype")))?;
                     }
                     "getcontentlength" => {
-                        xml_writer
-                            .write_event(Event::Start(BytesStart::new("D:getcontentlength")))?;
-                        xml_writer
-                            .write_event(Event::Text(BytesText::new(&file.size.to_string())))?;
-                        xml_writer.write_event(Event::End(BytesEnd::new("D:getcontentlength")))?;
+                        Self::write_contentlength(xml_writer, file.size)?;
                     }
                     "creationdate" => {
-                        xml_writer.write_event(Event::Start(BytesStart::new("D:creationdate")))?;
-
-                        // Convert u64 timestamp to DateTime
-                        let created_at =
-                            chrono::DateTime::<Utc>::from_timestamp(file.created_at as i64, 0)
-                                .unwrap_or_else(Utc::now);
-
-                        xml_writer
-                            .write_event(Event::Text(BytesText::new(&created_at.to_rfc3339())))?;
-                        xml_writer.write_event(Event::End(BytesEnd::new("D:creationdate")))?;
+                        Self::write_creationdate(xml_writer, file.created_at)?;
                     }
                     "getlastmodified" => {
-                        xml_writer
-                            .write_event(Event::Start(BytesStart::new("D:getlastmodified")))?;
-
-                        // Convert u64 timestamp to DateTime
-                        let modified_at =
-                            chrono::DateTime::<Utc>::from_timestamp(file.modified_at as i64, 0)
-                                .unwrap_or_else(Utc::now);
-
-                        xml_writer
-                            .write_event(Event::Text(BytesText::new(&modified_at.to_rfc2822())))?;
-                        xml_writer.write_event(Event::End(BytesEnd::new("D:getlastmodified")))?;
+                        Self::write_lastmodified(xml_writer, file.modified_at)?;
                     }
                     "getetag" => {
-                        xml_writer.write_event(Event::Start(BytesStart::new("D:getetag")))?;
-                        xml_writer.write_event(Event::Text(BytesText::new(&format!(
-                            "\"{}\"",
-                            file.etag
-                        ))))?;
-                        xml_writer.write_event(Event::End(BytesEnd::new("D:getetag")))?;
+                        Self::write_etag_quoted(xml_writer, &file.etag)?;
                     }
                     _ => {
                         // Unknown prop — skipped here; caller writes 404 propstat.
@@ -1584,5 +1578,38 @@ impl WebDavAdapter {
         dead_props: &[(QualifiedName, Option<String>)],
     ) -> Result<()> {
         Self::write_file_response_with_dead_props(writer, file, request, href, dead_props)
+    }
+}
+
+/// Thin public wrappers over the private per-row PROPFIND writers so
+/// `examples/bench_propfind_xml.rs` can measure them. Gated behind the
+/// `bench` feature — adds nothing to prod builds.
+#[cfg(feature = "bench")]
+pub mod bench {
+    use super::*;
+
+    pub fn write_file_propfind_row<W: Write>(
+        xml_writer: &mut Writer<W>,
+        file: &FileDto,
+        request: &PropFindRequest,
+        href: &str,
+        dead_props: &[(QualifiedName, Option<String>)],
+    ) -> Result<()> {
+        WebDavAdapter::write_file_response_with_dead_props(
+            xml_writer, file, request, href, dead_props,
+        )
+    }
+
+    pub fn write_folder_propfind_row<W: Write>(
+        xml_writer: &mut Writer<W>,
+        folder: &FolderDto,
+        request: &PropFindRequest,
+        href: &str,
+        dead_props: &[(QualifiedName, Option<String>)],
+        quota: Option<(i64, Option<i64>)>,
+    ) -> Result<()> {
+        WebDavAdapter::write_folder_response_with_dead_props(
+            xml_writer, folder, request, href, dead_props, quota,
+        )
     }
 }

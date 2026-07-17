@@ -1710,21 +1710,24 @@ pub fn write_folder_response<W: std::io::Write>(
 
     write_text_element(xml, "d:displayname", &folder.name)?;
 
-    let created_at =
-        chrono::DateTime::<Utc>::from_timestamp(timestamp_to_i64(folder.created_at), 0)
-            .unwrap_or_else(Utc::now);
-    let modified_at =
-        chrono::DateTime::<Utc>::from_timestamp(timestamp_to_i64(folder.modified_at), 0)
-            .unwrap_or_else(Utc::now);
-
-    write_text_element(xml, "d:getlastmodified", &modified_at.to_rfc2822())?;
+    write_date_element(
+        xml,
+        "d:getlastmodified",
+        timestamp_to_i64(folder.modified_at),
+        true,
+    )?;
     // Route through `FolderDto::etag` (= `Folder::etag()`: the
     // descendant-aware `{id[..16]}-{tree_modified_at}` — see the
     // entity for the formula and the async-bump freshness contract).
-    write_text_element(xml, "d:getetag", &format!("\"{}\"", folder.etag))?;
+    write_etag_element(xml, "d:getetag", &folder.etag)?;
     write_text_element(xml, "d:getcontenttype", "httpd/unix-directory")?;
     write_text_element(xml, "d:getcontentlength", "0")?;
-    write_text_element(xml, "d:creationdate", &created_at.to_rfc3339())?;
+    write_date_element(
+        xml,
+        "d:creationdate",
+        timestamp_to_i64(folder.created_at),
+        false,
+    )?;
 
     // Nextcloud/ownCloud properties
     if let Some(id) = file_id {
@@ -1805,17 +1808,28 @@ pub fn write_file_response<W: std::io::Write>(
 
     write_text_element(xml, "d:displayname", &file.name)?;
     write_text_element(xml, "d:getcontenttype", &file.mime_type)?;
-    write_text_element(xml, "d:getcontentlength", &file.size.to_string())?;
+    {
+        let mut buf = [0u8; 20];
+        write_text_element(
+            xml,
+            "d:getcontentlength",
+            crate::common::fmt::u64_str(&mut buf, file.size),
+        )?;
+    }
 
-    let created_at = chrono::DateTime::<Utc>::from_timestamp(timestamp_to_i64(file.created_at), 0)
-        .unwrap_or_else(Utc::now);
-    let modified_at =
-        chrono::DateTime::<Utc>::from_timestamp(timestamp_to_i64(file.modified_at), 0)
-            .unwrap_or_else(Utc::now);
-
-    write_text_element(xml, "d:getlastmodified", &modified_at.to_rfc2822())?;
-    write_text_element(xml, "d:getetag", &format!("\"{}\"", file.etag))?;
-    write_text_element(xml, "d:creationdate", &created_at.to_rfc3339())?;
+    write_date_element(
+        xml,
+        "d:getlastmodified",
+        timestamp_to_i64(file.modified_at),
+        true,
+    )?;
+    write_etag_element(xml, "d:getetag", &file.etag)?;
+    write_date_element(
+        xml,
+        "d:creationdate",
+        timestamp_to_i64(file.created_at),
+        false,
+    )?;
 
     // Nextcloud/ownCloud properties
     if let Some(id) = file_id {
@@ -1827,7 +1841,14 @@ pub fn write_file_response<W: std::io::Write>(
     write_text_element(xml, "oc:permissions", "RGDNVW")?;
     // Numeric share-permissions bitmask: Read=1 + Update=2 + Delete=8 + Share=16 = 27
     write_text_element(xml, "ocs:share-permissions", "27")?;
-    write_text_element(xml, "oc:size", &file.size.to_string())?;
+    {
+        let mut buf = [0u8; 20];
+        write_text_element(
+            xml,
+            "oc:size",
+            crate::common::fmt::u64_str(&mut buf, file.size),
+        )?;
+    }
     write_text_element(xml, "oc:owner-id", owner)?;
     write_text_element(xml, "oc:owner-display-name", owner)?;
 
@@ -1869,6 +1890,47 @@ pub fn write_file_response<W: std::io::Write>(
         .xml_err()?;
 
     Ok(())
+}
+
+/// Stack-rendered `d:getlastmodified` / `d:creationdate` bodies
+/// (`common::fmt`) — the old per-row `to_rfc2822()` / `to_rfc3339()`
+/// ran chrono's format interpreter and allocated a String each.
+/// Out-of-range timestamps keep the chrono path, byte-identical.
+fn write_date_element<W: std::io::Write>(
+    xml: &mut Writer<W>,
+    tag: &str,
+    secs: i64,
+    rfc2822: bool,
+) -> Result<(), String> {
+    if rfc2822 {
+        let mut buf = [0u8; 31];
+        if let Some(s) = crate::common::fmt::rfc2822_utc(&mut buf, secs) {
+            return write_text_element(xml, tag, s);
+        }
+        let dt = chrono::DateTime::<Utc>::from_timestamp(secs, 0).unwrap_or_else(Utc::now);
+        write_text_element(xml, tag, &dt.to_rfc2822())
+    } else {
+        let mut buf = [0u8; 25];
+        if let Some(s) = crate::common::fmt::rfc3339_utc(&mut buf, secs) {
+            return write_text_element(xml, tag, s);
+        }
+        let dt = chrono::DateTime::<Utc>::from_timestamp(secs, 0).unwrap_or_else(Utc::now);
+        write_text_element(xml, tag, &dt.to_rfc3339())
+    }
+}
+
+/// `d:getetag` with the HTTP quoting — one exactly-sized allocation
+/// instead of `format!`'s grow-from-empty.
+fn write_etag_element<W: std::io::Write>(
+    xml: &mut Writer<W>,
+    tag: &str,
+    etag: &str,
+) -> Result<(), String> {
+    let mut quoted = String::with_capacity(etag.len() + 2);
+    quoted.push('"');
+    quoted.push_str(etag);
+    quoted.push('"');
+    write_text_element(xml, tag, &quoted)
 }
 
 pub fn write_text_element<W: std::io::Write>(

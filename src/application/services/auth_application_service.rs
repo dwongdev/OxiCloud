@@ -147,8 +147,12 @@ pub struct AuthApplicationService {
     /// request. The short TTL keeps the "role changes apply without token
     /// rotation" property within seconds while removing one DB round-trip
     /// per request; the known mutation paths (`change_user_role`,
-    /// `set_user_active`) also invalidate eagerly.
-    user_flags_cache: Cache<Uuid, UserFlags>,
+    /// `set_user_active`) also invalidate eagerly. `moka::future` so
+    /// concurrent misses for one user coalesce into a single DB lookup
+    /// (`try_get_with` single-flight) — every authenticated request
+    /// calls this, so each 30 s TTL expiry used to fan out one SELECT
+    /// per in-flight request of that user.
+    user_flags_cache: moka::future::Cache<Uuid, UserFlags>,
     /// Self-service auth-method allowlist (mirrors
     /// `AuthConfig::allowed_auth_methods`). Empty = both methods
     /// allowed. Consulted by login / register / magic-link handlers via
@@ -198,7 +202,7 @@ impl AuthApplicationService {
                 .time_to_live(Duration::from_secs(120))
                 .build(),
             magic_link_repo: None,
-            user_flags_cache: Cache::builder()
+            user_flags_cache: moka::future::Cache::builder()
                 .max_capacity(10_000)
                 .time_to_live(USER_FLAGS_CACHE_TTL)
                 .build(),
@@ -1363,7 +1367,7 @@ impl AuthApplicationService {
         // Invalidate the flags cache so subsequent per-request guards
         // observe the new `is_external=false` without waiting for the
         // 30-second TTL. Same pattern as `change_user_role`.
-        self.user_flags_cache.invalidate(&caller_id);
+        self.user_flags_cache.invalidate(&caller_id).await;
 
         // Dispatch — home-drive provisioning happens here. Log-and-
         // continue: a provisioning failure leaves the row updated and
@@ -1508,12 +1512,20 @@ impl AuthApplicationService {
     /// Staleness is bounded by [`USER_FLAGS_CACHE_TTL`]; role and active
     /// changes made through this service invalidate the entry eagerly.
     pub async fn get_user_flags(&self, user_id: Uuid) -> Result<UserFlags, DomainError> {
-        if let Some(flags) = self.user_flags_cache.get(&user_id) {
-            return Ok(flags);
-        }
-        let flags = self.user_storage.get_user_flags(user_id).await?;
-        self.user_flags_cache.insert(user_id, flags);
-        Ok(flags)
+        // Single-flight: concurrent misses for the same user coalesce
+        // into ONE storage lookup; errors are never cached (same herd
+        // shape ROUND3 fixed for basic-auth, minus the Argon2 cost).
+        self.user_flags_cache
+            .try_get_with(user_id, async {
+                Ok::<_, DomainError>(self.user_storage.get_user_flags(user_id).await?)
+            })
+            .await
+            // try_get_with hands back `Arc<DomainError>` shared by all
+            // waiters; DomainError isn't Clone, so rebuild a fresh one
+            // preserving the kind / entity / message.
+            .map_err(|shared: std::sync::Arc<DomainError>| {
+                DomainError::new(shared.kind, shared.entity_type, shared.message.clone())
+            })
     }
 
     /// Apply a profile update on behalf of the calling user (PR 24).
@@ -2226,7 +2238,7 @@ impl AuthApplicationService {
         self.user_storage
             .set_user_active_status(user_id, active)
             .await?;
-        self.user_flags_cache.invalidate(&user_id);
+        self.user_flags_cache.invalidate(&user_id).await;
         Ok(())
     }
 
@@ -2240,7 +2252,7 @@ impl AuthApplicationService {
             ));
         }
         self.user_storage.change_role(user_id, role).await?;
-        self.user_flags_cache.invalidate(&user_id);
+        self.user_flags_cache.invalidate(&user_id).await;
         Ok(())
     }
 

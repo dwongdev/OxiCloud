@@ -189,17 +189,13 @@ impl CalendarUseCase for CalendarService {
             })
             .collect();
 
-        // Hydrate DTOs. `get_calendar` misses on trashed / deleted
-        // calendars — those are dropped from the listing rather than
-        // erroring, so a lifecycle-race doesn't turn a PROPFIND into
-        // a 5xx.
-        let mut out = Vec::with_capacity(calendar_ids.len());
-        for id in calendar_ids {
-            if let Ok(dto) = self.calendar_storage.get_calendar(&id.to_string()).await {
-                out.push(dto);
-            }
-        }
-        Ok(out)
+        // Hydrate DTOs in ONE `= ANY` round-trip (was one point SELECT
+        // per accessible calendar — K serial round-trips on every
+        // CalDAV discovery poll). Missing rows (deleted/trashed race)
+        // drop out of the result set instead of erroring, so a
+        // lifecycle-race still doesn't turn a PROPFIND into a 5xx.
+        let ids: Vec<Uuid> = calendar_ids.into_iter().collect();
+        self.calendar_storage.get_calendars_by_ids(&ids).await
     }
 
     async fn list_public_calendars(

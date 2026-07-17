@@ -180,6 +180,35 @@ impl PlaylistRepository for PlaylistPgRepository {
         .map_err(|e| DomainError::new(ErrorKind::InternalError, "Playlist", e.to_string()))
     }
 
+    async fn find_playlists_by_ids(&self, ids: &[Uuid]) -> PlaylistRepositoryResult<Vec<Playlist>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, PlaylistRow>(
+            "SELECT id, name, description, owner_id, is_public, cover_file_id, created_at, updated_at FROM audio.playlists WHERE id = ANY($1)",
+        )
+        .bind(ids)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(|e| DomainError::database_error(format!("Failed to find playlists: {}", e)))?;
+
+        rows.into_iter()
+            .map(|row| {
+                Playlist::with_id(
+                    row.id,
+                    row.name,
+                    row.description,
+                    row.owner_id,
+                    row.is_public,
+                    row.cover_file_id,
+                    row.created_at,
+                    row.updated_at,
+                )
+                .map_err(|e| DomainError::new(ErrorKind::InternalError, "Playlist", e.to_string()))
+            })
+            .collect()
+    }
+
     async fn list_playlists_by_owner(
         &self,
         owner_id: Uuid,

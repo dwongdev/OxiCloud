@@ -34,6 +34,12 @@ pub trait CalendarStoragePort: Send + Sync + 'static {
     ) -> Result<CalendarDto, DomainError>;
     async fn delete_calendar(&self, calendar_id: &str) -> Result<(), DomainError>;
     async fn get_calendar(&self, calendar_id: &str) -> Result<CalendarDto, DomainError>;
+
+    /// Batch sibling of [`Self::get_calendar`]: hydrate a page of
+    /// grant-derived calendar ids in ONE storage round-trip. Missing
+    /// rows (deleted/trashed race) drop out silently; ordering is not
+    /// guaranteed.
+    async fn get_calendars_by_ids(&self, ids: &[Uuid]) -> Result<Vec<CalendarDto>, DomainError>;
     async fn list_calendars_by_owner(
         &self,
         owner_id: Uuid,

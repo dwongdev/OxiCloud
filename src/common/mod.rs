@@ -1,6 +1,7 @@
 pub mod config;
 pub mod di;
 pub mod errors;
+pub mod fmt;
 pub mod locale;
 pub mod mime_detect;
 pub mod runtime;
