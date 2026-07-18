@@ -62,6 +62,7 @@
 		typeLabel
 	} from '$lib/stores/files.svelte';
 	import { formatBytes } from '$lib/utils/format';
+	import { replaceSet } from '$lib/utils/sets';
 	import { formatDate, iconNameFromClass, fileIconKindClass } from '$lib/utils/display';
 	import { gridColumns } from '$lib/utils/grid';
 	import {
@@ -166,8 +167,11 @@
 	// Favorite + shared badge sets for the current folder, seeded directly from
 	// the listing response (server-computed, scoped to these items — no extra
 	// per-navigation fetch) and updated optimistically on mutation.
-	let favoriteIds = $state<Set<string>>(new Set());
-	let sharedIds = $state<Set<string>>(new Set());
+	// `SvelteSet` mutated in place: a toggle costs O(1) instead of copying
+	// the whole set, and every other present-key `.has()` reader is spared
+	// (measured in selectionPatterns.bench.test.ts).
+	const favoriteIds = new SvelteSet<string>();
+	const sharedIds = new SvelteSet<string>();
 
 	function openMove(kind: ItemType, id: string, name: string) {
 		actionTarget = { id, name, kind };
@@ -189,19 +193,15 @@
 	async function toggleFavorite(kind: ItemType, id: string) {
 		const isFav = favoriteIds.has(id);
 		// Optimistic toggle, reverted on failure.
-		const next = new SvelteSet(favoriteIds);
-		if (isFav) next.delete(id);
-		else next.add(id);
-		favoriteIds = next;
+		if (isFav) favoriteIds.delete(id);
+		else favoriteIds.add(id);
 		try {
 			if (isFav) await removeFavorite(kind, id);
 			else await addFavorite(kind, id);
 		} catch (e) {
 			errorToast(e);
-			const reverted = new SvelteSet(favoriteIds);
-			if (isFav) reverted.add(id);
-			else reverted.delete(id);
-			favoriteIds = reverted;
+			if (isFav) favoriteIds.add(id);
+			else favoriteIds.delete(id);
 		}
 	}
 
@@ -229,8 +229,8 @@
 
 	function applyListing(data: FolderListing) {
 		listing = data;
-		favoriteIds = new Set(data.favoriteIds);
-		sharedIds = new Set(data.sharedIds);
+		replaceSet(favoriteIds, data.favoriteIds);
+		replaceSet(sharedIds, data.sharedIds);
 	}
 
 	async function load() {
@@ -881,19 +881,20 @@
 	}
 
 	// ── Multi-select + batch ────────────────────────────────────────────────
-	let selected = $state<Set<string>>(new Set());
+	// In-place `SvelteSet`: a toggle is O(1) (no full-set copy) and spares
+	// the other selected rows' `has()` readers — decisive when refining a
+	// select-all (selectionPatterns.bench.test.ts).
+	const selected = new SvelteSet<string>();
 	// Anchor row id for shift-click range selection.
 	let selectionAnchor = $state<string | null>(null);
 
 	function toggleSelected(id: string) {
-		const next = new SvelteSet(selected);
-		if (next.has(id)) next.delete(id);
-		else next.add(id);
-		selected = next;
+		if (selected.has(id)) selected.delete(id);
+		else selected.add(id);
 		selectionAnchor = id;
 	}
 	function clearSelection() {
-		selected = new Set();
+		selected.clear();
 		selectionAnchor = null;
 	}
 
@@ -911,7 +912,7 @@
 			const b = orderedIds.indexOf(id);
 			if (a !== -1 && b !== -1) {
 				const [lo, hi] = a < b ? [a, b] : [b, a];
-				selected = new Set([...selected, ...orderedIds.slice(lo, hi + 1)]);
+				for (let i = lo; i <= hi; i++) selected.add(orderedIds[i]);
 			}
 			return true;
 		}
@@ -927,11 +928,16 @@
 	const totalCount = $derived(visibleFolders.length + visibleFiles.length);
 
 	function toggleSelectAll() {
-		if (selected.size === totalCount) clearSelection();
-		// Select-all only picks what the user can see — dotfiles hidden
-		// by the current filter are excluded so "select all → delete"
-		// can't accidentally sweep up hidden files the user never saw.
-		else selected = new Set([...visibleFolders, ...visibleFiles].map((i) => i.id));
+		if (selected.size === totalCount) {
+			clearSelection();
+		} else {
+			// Select-all only picks what the user can see — dotfiles hidden
+			// by the current filter are excluded so "select all → delete"
+			// can't accidentally sweep up hidden files the user never saw.
+			selected.clear();
+			for (const i of visibleFolders) selected.add(i.id);
+			for (const i of visibleFiles) selected.add(i.id);
+		}
 	}
 
 	/**
@@ -948,9 +954,12 @@
 	async function batchDownload() {
 		const fileIds: string[] = [];
 		const folderIds: string[] = [];
+		// One O(M) pass over the listing instead of an O(N·M) `some` per id.
+		const folderIdSet = new Set(listing.folders.map((f) => f.id));
+		const fileIdSet = new Set(listing.files.map((f) => f.id));
 		for (const id of selected) {
-			if (listing.folders.some((f) => f.id === id)) folderIds.push(id);
-			else if (listing.files.some((f) => f.id === id)) fileIds.push(id);
+			if (folderIdSet.has(id)) folderIds.push(id);
+			else if (fileIdSet.has(id)) fileIds.push(id);
 		}
 		if (fileIds.length === 0 && folderIds.length === 0) return;
 
@@ -1009,7 +1018,7 @@
 				})
 			});
 			if (!res.ok) throw new Error(`Server returned ${res.status}`);
-			favoriteIds = new Set([...favoriteIds, ...items.map((it) => it.id)]);
+			for (const it of items) favoriteIds.add(it.id);
 			ui.notify(t('files.added_favorites', 'Added to favorites'), 'success');
 			clearSelection();
 		} catch (e) {
@@ -1018,13 +1027,14 @@
 	}
 
 	function selectionTargets(): ActionTarget[] {
+		// One O(M) index build instead of an O(N·M) `find` per selected id.
+		// Folders win id collisions, matching the old folder-first probe.
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- ephemeral local index, discarded before any reactive read
+		const byId = new Map<string, ActionTarget>();
+		for (const f of listing.files) byId.set(f.id, { id: f.id, name: f.name, kind: 'file' });
+		for (const f of listing.folders) byId.set(f.id, { id: f.id, name: f.name, kind: 'folder' });
 		return [...selected]
-			.map((id) => {
-				const folder = listing.folders.find((f) => f.id === id);
-				if (folder) return { id, name: folder.name, kind: 'folder' as ItemType };
-				const file = listing.files.find((f) => f.id === id);
-				return file ? { id, name: file.name, kind: 'file' as ItemType } : null;
-			})
+			.map((id) => byId.get(id) ?? null)
 			.filter((x): x is ActionTarget => x !== null);
 	}
 
@@ -1070,15 +1080,19 @@
 			danger: true
 		});
 		if (!ok) return;
-		for (const id of ids) {
-			const folder = listing.folders.find((f) => f.id === id);
+		// Bounded fan-out instead of a serial await per item: 100 deletes at
+		// ~30 ms RTT collapse from ~3 s of waterfall to a few round-trip
+		// windows. Failures toast individually and the rest still proceed,
+		// exactly like the old serial loop.
+		const folderIdSet = new Set(listing.folders.map((f) => f.id));
+		await mapLimit(ids, 6, async (id) => {
 			try {
-				if (folder) await deleteFolder(id);
+				if (folderIdSet.has(id)) await deleteFolder(id);
 				else await deleteFile(id);
 			} catch (e) {
 				errorToast(e);
 			}
-		}
+		});
 		clearSelection();
 		await reload();
 		void session.refresh();
@@ -1185,16 +1199,26 @@
 	async function moveInto(targetFolderId: string, e: DragEvent) {
 		const items = dragPayload(e).filter((it) => it.id !== targetFolderId);
 		if (items.length === 0) return;
-		try {
-			for (const it of items) {
-				if (it.kind === 'file') await moveFile(it.id, targetFolderId);
-				else await moveFolder(it.id, targetFolderId);
-			}
-			clearSelection();
-			await reload();
-		} catch (err) {
-			errorToast(err);
+		// Bounded fan-out (was a serial await per item). Every item is
+		// attempted; on any failure the first error is surfaced and the
+		// selection is kept so the drop can be retried, like the old loop.
+		const failures = (
+			await mapLimit(items, 6, async (it) => {
+				try {
+					if (it.kind === 'file') await moveFile(it.id, targetFolderId);
+					else await moveFolder(it.id, targetFolderId);
+					return null;
+				} catch (err) {
+					return err ?? new Error('move failed');
+				}
+			})
+		).filter((err) => err !== null);
+		if (failures.length > 0) {
+			errorToast(failures[0]);
+			return;
 		}
+		clearSelection();
+		await reload();
 	}
 
 	function onFolderDrop(e: DragEvent, folder: FolderItem) {
@@ -2244,11 +2268,7 @@
 {/if}
 {#if shareDialog.component}
 	{@const ShareDialog = shareDialog.component}
-	<ShareDialog
-		bind:open={shareOpen}
-		item={actionTarget}
-		onshared={(id) => (sharedIds = new SvelteSet(sharedIds).add(id))}
-	/>
+	<ShareDialog bind:open={shareOpen} item={actionTarget} onshared={(id) => sharedIds.add(id)} />
 {/if}
 {#if fileViewer.component}
 	{@const FileViewer = fileViewer.component}

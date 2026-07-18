@@ -28,6 +28,7 @@
 	import { confirmDialog, promptDialog } from '$lib/stores/dialogs.svelte';
 	import { preferences } from '$lib/stores/preferences.svelte';
 	import { filterDotfiles } from '$lib/utils/dotfileFilter';
+	import { replaceSet } from '$lib/utils/sets';
 	import { t } from '$lib/i18n/index.svelte';
 
 	let raw = $state<RecentResourceItem[]>([]);
@@ -37,7 +38,9 @@
 	let groupBy = $state('');
 	let reversed = $state(false);
 	const owners = useOwnerCache(resolveOwnerName);
-	let favoriteIds = $state<Set<string>>(new Set());
+	// In-place reactive set — a star toggle skips the full-set copy and
+	// spares the other favorited rows' readers.
+	const favoriteIds = new SvelteSet<string>();
 
 	const byId = $derived(new Map(raw.map((it) => [it.resource.id, it])));
 
@@ -109,7 +112,10 @@
 	async function loadFavoriteIds() {
 		try {
 			const favs = await fetchFavoritesPage({ resourceTypes: ['file', 'folder'] });
-			favoriteIds = new Set(favs.items.map((f) => f.resource.id));
+			replaceSet(
+				favoriteIds,
+				favs.items.map((f) => f.resource.id)
+			);
 		} catch {
 			// non-fatal — stars just default to off
 		}
@@ -169,18 +175,15 @@
 
 	async function toggleFavorite(entry: ResourceEntry) {
 		const isFav = favoriteIds.has(entry.id);
-		const next = new SvelteSet(favoriteIds);
-		if (isFav) next.delete(entry.id);
-		else next.add(entry.id);
-		favoriteIds = next;
+		// Optimistic in-place toggle, reverted on failure.
+		if (isFav) favoriteIds.delete(entry.id);
+		else favoriteIds.add(entry.id);
 		try {
 			if (isFav) await removeFavorite(entry.kind, entry.id);
 			else await addFavorite(entry.kind, entry.id);
 		} catch (e) {
-			// revert on failure
-			favoriteIds = isFav
-				? new Set([...favoriteIds, entry.id])
-				: new Set([...favoriteIds].filter((id) => id !== entry.id));
+			if (isFav) favoriteIds.add(entry.id);
+			else favoriteIds.delete(entry.id);
 			errorToast(e);
 		}
 	}
