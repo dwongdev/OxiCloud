@@ -11,9 +11,9 @@
 /// Post-D7-step-6: `storage.files.user_id` dropped, so it's no
 /// longer projected.
 type MediaFileRow = (
-    String,         // id
+    Uuid,           // id (binary decode; benches/ROUND6.md §10)
     String,         // name
-    Option<String>, // folder_id
+    Option<Uuid>,   // folder_id
     Option<String>, // folder path
     i64,            // size
     String,         // mime_type
@@ -83,9 +83,9 @@ const CALLER_CAN_READ_DRIVE: &str = "EXISTS (\
 /// longer part of the tuple; `row_to_file` populates the entity's
 /// legacy `user_id` field with `None`.
 type FileRow = (
+    Uuid,
     String,
-    String,
-    Option<String>,
+    Option<Uuid>,
     Option<String>,
     i64,
     String,
@@ -269,7 +269,7 @@ impl FileBlobReadRepository {
 
         let where_clause = conditions.join(" AND ");
         let sql = format!(
-            "SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path, \
+            "SELECT fi.id, fi.name, fi.folder_id, fo.path, \
                     fi.size, fi.mime_type, \
                     EXTRACT(EPOCH FROM fi.created_at)::bigint, \
                     EXTRACT(EPOCH FROM fi.updated_at)::bigint, \
@@ -319,7 +319,7 @@ impl FileBlobReadRepository {
         }
 
         let rows = sqlx::query_as::<_, FileRow>(
-            "SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path, \
+            "SELECT fi.id, fi.name, fi.folder_id, fo.path, \
                     fi.size, fi.mime_type, \
                     EXTRACT(EPOCH FROM fi.created_at)::bigint, \
                     EXTRACT(EPOCH FROM fi.updated_at)::bigint, \
@@ -415,9 +415,9 @@ impl FileBlobReadRepository {
 
     #[allow(clippy::too_many_arguments)]
     fn row_to_file(
-        id: String,
+        id: Uuid,
         name: String,
-        folder_id: Option<String>,
+        folder_id: Option<Uuid>,
         folder_path: Option<String>,
         size: i64,
         mime_type: String,
@@ -428,12 +428,12 @@ impl FileBlobReadRepository {
         updated_by: Option<Uuid>,
     ) -> Result<File, DomainError> {
         File::from_materialized_row(
-            id,
+            id.to_string(),
             name,
             folder_path.as_deref(),
             size as u64,
             mime_type,
-            folder_id,
+            folder_id.map(|u| u.to_string()),
             created_at as u64,
             modified_at as u64,
             blob_hash,
@@ -550,7 +550,7 @@ impl FileBlobReadRepository {
                    AND (g.expires_at IS NULL OR g.expires_at > NOW())
                    AND (d.policies->>'include_in_photo_index')::boolean = true
             )
-            SELECT top.id::text, top.name, top.folder_id::text, fo.path,
+            SELECT top.id, top.name, top.folder_id, fo.path,
                    top.size, top.mime_type,
                    EXTRACT(EPOCH FROM top.created_at)::bigint,
                    EXTRACT(EPOCH FROM top.updated_at)::bigint,
@@ -679,9 +679,9 @@ impl FileReadPort for FileBlobReadRepository {
         let row = sqlx::query_as::<
             _,
             (
-                String,         // id
+                Uuid,           // id (binary decode)
                 String,         // name
-                Option<String>, // folder_id
+                Option<Uuid>,   // folder_id
                 Option<String>, // folder path
                 i64,            // size
                 String,         // mime_type
@@ -693,7 +693,7 @@ impl FileReadPort for FileBlobReadRepository {
             ),
         >(
             r#"
-            SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
+            SELECT fi.id, fi.name, fi.folder_id, fo.path,
                    fi.size, fi.mime_type,
                    EXTRACT(EPOCH FROM fi.created_at)::bigint,
                    EXTRACT(EPOCH FROM fi.updated_at)::bigint,
@@ -726,9 +726,9 @@ impl FileReadPort for FileBlobReadRepository {
         let row = sqlx::query_as::<
             _,
             (
+                Uuid,
                 String,
-                String,
-                Option<String>,
+                Option<Uuid>,
                 Option<String>,
                 i64,
                 String,
@@ -740,7 +740,7 @@ impl FileReadPort for FileBlobReadRepository {
             ),
         >(
             r#"
-            SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
+            SELECT fi.id, fi.name, fi.folder_id, fo.path,
                    fi.size, fi.mime_type,
                    EXTRACT(EPOCH FROM fi.created_at)::bigint,
                    EXTRACT(EPOCH FROM fi.updated_at)::bigint,
@@ -768,7 +768,7 @@ impl FileReadPort for FileBlobReadRepository {
         let rows: Vec<FileRow> = if let Some(fid) = folder_id {
             sqlx::query_as(
                 r#"
-                SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
+                SELECT fi.id, fi.name, fi.folder_id, fo.path,
                        fi.size, fi.mime_type,
                        EXTRACT(EPOCH FROM fi.created_at)::bigint,
                        EXTRACT(EPOCH FROM fi.updated_at)::bigint,
@@ -787,7 +787,7 @@ impl FileReadPort for FileBlobReadRepository {
         } else {
             sqlx::query_as(
                 r#"
-                SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
+                SELECT fi.id, fi.name, fi.folder_id, fo.path,
                        fi.size, fi.mime_type,
                        EXTRACT(EPOCH FROM fi.created_at)::bigint,
                        EXTRACT(EPOCH FROM fi.updated_at)::bigint,
@@ -848,7 +848,7 @@ impl FileReadPort for FileBlobReadRepository {
         };
         let sql = format!(
             r#"
-            SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
+            SELECT fi.id, fi.name, fi.folder_id, fo.path,
                    fi.size, fi.mime_type,
                    EXTRACT(EPOCH FROM fi.created_at)::bigint,
                    EXTRACT(EPOCH FROM fi.updated_at)::bigint,
@@ -1014,9 +1014,9 @@ impl FileReadPort for FileBlobReadRepository {
             sqlx::query_as::<
                 _,
                 (
+                    Uuid,
                     String,
-                    String,
-                    Option<String>,
+                    Option<Uuid>,
                     Option<String>,
                     i64,
                     String,
@@ -1028,7 +1028,7 @@ impl FileReadPort for FileBlobReadRepository {
                 ),
             >(
                 r#"
-                SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
+                SELECT fi.id, fi.name, fi.folder_id, fo.path,
                        fi.size, fi.mime_type,
                        EXTRACT(EPOCH FROM fi.created_at)::bigint,
                        EXTRACT(EPOCH FROM fi.updated_at)::bigint,
@@ -1052,9 +1052,9 @@ impl FileReadPort for FileBlobReadRepository {
             sqlx::query_as::<
                 _,
                 (
+                    Uuid,
                     String,
-                    String,
-                    Option<String>,
+                    Option<Uuid>,
                     Option<String>,
                     i64,
                     String,
@@ -1066,7 +1066,7 @@ impl FileReadPort for FileBlobReadRepository {
                 ),
             >(
                 r#"
-                SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
+                SELECT fi.id, fi.name, fi.folder_id, fo.path,
                        fi.size, fi.mime_type,
                        EXTRACT(EPOCH FROM fi.created_at)::bigint,
                        EXTRACT(EPOCH FROM fi.updated_at)::bigint,
@@ -1107,12 +1107,12 @@ impl FileReadPort for FileBlobReadRepository {
 
         let stream = async_stream::try_stream! {
             let mut row_stream = sqlx::query_as::<_, (
-                String, String, Option<String>, Option<String>,
+                Uuid, String, Option<Uuid>, Option<String>,
                 i64, String, i64, i64, String,
                 Option<Uuid>, Option<Uuid>, // created_by, updated_by (§14)
             )>(
                 r#"
-                SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
+                SELECT fi.id, fi.name, fi.folder_id, fo.path,
                        fi.size, fi.mime_type,
                        EXTRACT(EPOCH FROM fi.created_at)::bigint,
                        EXTRACT(EPOCH FROM fi.updated_at)::bigint,
@@ -1195,7 +1195,7 @@ impl FileReadPort for FileBlobReadRepository {
         let offset_bind = bind_idx + 2;
 
         let sql = format!(
-            "SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path, \
+            "SELECT fi.id, fi.name, fi.folder_id, fo.path, \
                     fi.size, fi.mime_type, \
                     EXTRACT(EPOCH FROM fi.created_at)::bigint, \
                     EXTRACT(EPOCH FROM fi.updated_at)::bigint, \
@@ -1214,9 +1214,9 @@ impl FileReadPort for FileBlobReadRepository {
         let mut query = sqlx::query_as::<
             _,
             (
+                Uuid,
                 String,
-                String,
-                Option<String>,
+                Option<Uuid>,
                 Option<String>,
                 i64,
                 String,
@@ -1327,7 +1327,7 @@ impl FileReadPort for FileBlobReadRepository {
 
         // ── Single query with COUNT(*) OVER() ──
         let sql = format!(
-            "SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path, \
+            "SELECT fi.id, fi.name, fi.folder_id, fo.path, \
                     fi.size, fi.mime_type, \
                     EXTRACT(EPOCH FROM fi.created_at)::bigint, \
                     EXTRACT(EPOCH FROM fi.updated_at)::bigint, \
@@ -1346,9 +1346,9 @@ impl FileReadPort for FileBlobReadRepository {
         let mut query = sqlx::query_as::<
             _,
             (
+                Uuid,
                 String,
-                String,
-                Option<String>,
+                Option<Uuid>,
                 Option<String>,
                 i64,
                 String,
@@ -1420,7 +1420,7 @@ impl FileReadPort for FileBlobReadRepository {
         let rows: Vec<FileRow> = if let Some(fid) = folder_id {
             sqlx::query_as(
                 r#"
-                SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
+                SELECT fi.id, fi.name, fi.folder_id, fo.path,
                        fi.size, fi.mime_type,
                        EXTRACT(EPOCH FROM fi.created_at)::bigint,
                        EXTRACT(EPOCH FROM fi.updated_at)::bigint,
@@ -1450,7 +1450,7 @@ impl FileReadPort for FileBlobReadRepository {
         } else {
             sqlx::query_as(
                 r#"
-                SELECT fi.id::text, fi.name, fi.folder_id::text, fo.path,
+                SELECT fi.id, fi.name, fi.folder_id, fo.path,
                        fi.size, fi.mime_type,
                        EXTRACT(EPOCH FROM fi.created_at)::bigint,
                        EXTRACT(EPOCH FROM fi.updated_at)::bigint,

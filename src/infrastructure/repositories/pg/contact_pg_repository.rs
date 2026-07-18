@@ -278,6 +278,45 @@ impl ContactRepository for ContactPgRepository {
         Ok(contacts)
     }
 
+    fn stream_contacts_by_book(
+        &self,
+        address_book_id: Uuid,
+    ) -> futures::stream::BoxStream<'static, ContactRepositoryResult<Contact>> {
+        // ONE ordered scan served through a PG cursor — the CardDAV
+        // multistatus emitters page over this stream so only a page of
+        // contacts is resident (same design as the CalDAV round-5
+        // cursor; contacts have no master/exception bundling, so pages
+        // can cut anywhere).
+        let pool = self.pool.clone();
+        let stream: futures::stream::BoxStream<'static, ContactRepositoryResult<Contact>> =
+            Box::pin(async_stream::try_stream! {
+                let mut conn = pool.acquire().await.map_err(|e| {
+                    DomainError::database_error(format!("Failed to acquire connection: {}", e))
+                })?;
+                let mut rows = sqlx::query(
+                    r#"
+                    SELECT
+                        id, address_book_id, uid, full_name, first_name, last_name, nickname,
+                        email, phone, address, organization, title, notes, photo_url,
+                        birthday, anniversary, vcard, etag, created_at, updated_at
+                    FROM carddav.contacts
+                    WHERE address_book_id = $1
+                    ORDER BY full_name, first_name, last_name
+                    "#,
+                )
+                .bind(address_book_id)
+                .fetch(&mut *conn);
+
+                use futures::TryStreamExt;
+                while let Some(row) = rows.try_next().await.map_err(|e| {
+                    DomainError::database_error(format!("Failed to stream contacts: {}", e))
+                })? {
+                    yield Self::row_to_contact(&row)?;
+                }
+            });
+        stream
+    }
+
     async fn get_contacts_by_address_book(
         &self,
         address_book_id: &Uuid,

@@ -278,6 +278,27 @@ impl CardDavAdapter {
     ) -> Result<()> {
         let mut xml_writer = Writer::new(writer);
 
+        Self::write_collection_head(&mut xml_writer, address_book, request, base_href)?;
+
+        // Write contacts if depth > 0
+        if depth != "0" {
+            Self::write_collection_contact_page(&mut xml_writer, contacts, base_href)?;
+        }
+
+        Self::write_carddav_multistatus_end(&mut xml_writer)
+    }
+
+    /// Multistatus opening (DAV + CardDAV + CalendarServer namespaces)
+    /// plus the address book's own `D:response` — the head of a depth-1
+    /// collection PROPFIND. Streaming emitters call this once, then
+    /// [`Self::write_collection_contact_page`] per cursor page, then
+    /// [`Self::write_carddav_multistatus_end`].
+    pub fn write_collection_head<W: Write>(
+        xml_writer: &mut Writer<W>,
+        address_book: &AddressBookDto,
+        request: &PropFindRequest,
+        base_href: &str,
+    ) -> Result<()> {
         xml_writer.write_event(Event::Start(
             BytesStart::new("D:multistatus").with_attributes([
                 ("xmlns:D", "DAV:"),
@@ -285,19 +306,25 @@ impl CardDavAdapter {
                 ("xmlns:CS", "http://calendarserver.org/ns/"),
             ]),
         ))?;
+        Self::write_addressbook_response(xml_writer, address_book, request, base_href)
+    }
 
-        // Write the address book itself
-        Self::write_addressbook_response(&mut xml_writer, address_book, request, base_href)?;
-
-        // Write contacts if depth > 0
-        if depth != "0" {
-            for contact in contacts {
-                let contact_href = format!("{}{}.vcf", base_href, contact.uid);
-                Self::write_contact_response(&mut xml_writer, contact, &[], &contact_href)?;
-            }
+    /// One depth-1 collection page of contact entries (standard props;
+    /// href buffer reused across the page).
+    pub fn write_collection_contact_page<W: Write>(
+        xml_writer: &mut Writer<W>,
+        contacts: &[ContactDto],
+        base_href: &str,
+    ) -> Result<()> {
+        let mut href = String::with_capacity(base_href.len() + 48);
+        for contact in contacts {
+            href.clear();
+            let _ = std::fmt::Write::write_fmt(
+                &mut href,
+                format_args!("{}{}.vcf", base_href, contact.uid),
+            );
+            Self::write_contact_response(xml_writer, contact, &[], &href)?;
         }
-
-        xml_writer.write_event(Event::End(BytesEnd::new("D:multistatus")))?;
         Ok(())
     }
 
@@ -648,32 +675,39 @@ impl CardDavAdapter {
     }
 
     /// Generate response for contacts (for REPORT)
-    pub fn generate_contacts_response<W: Write>(
-        writer: W,
-        contacts: &[ContactDto],
-        report: &CardDavReportType,
-        base_href: &str,
-    ) -> Result<()> {
-        let mut xml_writer = Writer::new(writer);
-
+    /// REPORT `<D:multistatus>` opening tag (DAV + CardDAV namespaces).
+    /// Streaming emitters call this once, then
+    /// [`Self::write_contacts_report_page`] per cursor page, then
+    /// [`Self::write_carddav_multistatus_end`].
+    pub fn write_report_multistatus_start<W: Write>(xml_writer: &mut Writer<W>) -> Result<()> {
         xml_writer.write_event(Event::Start(
             BytesStart::new("D:multistatus").with_attributes([
                 ("xmlns:D", "DAV:"),
                 ("xmlns:CR", "urn:ietf:params:xml:ns:carddav"),
             ]),
         ))?;
+        Ok(())
+    }
 
-        // Borrowed straight out of the request — the old `clone()` copied
-        // the whole Vec of owned QualifiedName strings per REPORT (same
-        // fix the CalDAV surface got in ROUND4).
+    /// Close a multistatus opened by either start writer.
+    pub fn write_carddav_multistatus_end<W: Write>(xml_writer: &mut Writer<W>) -> Result<()> {
+        xml_writer.write_event(Event::End(BytesEnd::new("D:multistatus")))?;
+        Ok(())
+    }
+
+    /// One REPORT page of contact responses. Props are borrowed from
+    /// the request; one href buffer is reused across the page.
+    pub fn write_contacts_report_page<W: Write>(
+        xml_writer: &mut Writer<W>,
+        contacts: &[ContactDto],
+        report: &CardDavReportType,
+        base_href: &str,
+    ) -> Result<()> {
         let props = match report {
             CardDavReportType::AddressbookQuery { props } => props,
             CardDavReportType::AddressbookMultiget { props, .. } => props,
             CardDavReportType::SyncCollection { props, .. } => props,
         };
-
-        // One reused href buffer for the whole listing instead of a
-        // fresh String per contact.
         let mut href = String::with_capacity(base_href.len() + 48);
         for contact in contacts {
             href.clear();
@@ -683,11 +717,21 @@ impl CardDavAdapter {
             );
             // `write_contact_response` generates the vCard on demand when (and
             // only when) address-data is actually requested.
-            Self::write_contact_response(&mut xml_writer, contact, props, &href)?;
+            Self::write_contact_response(xml_writer, contact, props, &href)?;
         }
-
-        xml_writer.write_event(Event::End(BytesEnd::new("D:multistatus")))?;
         Ok(())
+    }
+
+    pub fn generate_contacts_response<W: Write>(
+        writer: W,
+        contacts: &[ContactDto],
+        report: &CardDavReportType,
+        base_href: &str,
+    ) -> Result<()> {
+        let mut xml_writer = Writer::new(writer);
+        Self::write_report_multistatus_start(&mut xml_writer)?;
+        Self::write_contacts_report_page(&mut xml_writer, contacts, report, base_href)?;
+        Self::write_carddav_multistatus_end(&mut xml_writer)
     }
 
     /// Write a single contact response element

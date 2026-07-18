@@ -411,8 +411,8 @@ pub async fn handle_search(
 
     // Pre-resolve numeric ids for every file result in a single batch query
     // (was one INSERT round-trip per result).
-    let file_uuids: Vec<String> = results.files.iter().map(|f| f.id.clone()).collect();
-    let file_id_map: HashMap<String, i64> = match file_id_svc {
+    let file_uuids: Vec<&str> = results.files.iter().map(|f| f.id.as_str()).collect();
+    let file_id_map: HashMap<uuid::Uuid, i64> = match file_id_svc {
         Some(svc) => svc
             .get_or_create_file_ids(&file_uuids)
             .await
@@ -435,7 +435,8 @@ pub async fn handle_search(
             crate::interfaces::nextcloud::webdav_handler::strip_drive_root_segment(&file.path);
         let display_path = format!("/{}", display_path);
 
-        let numeric_id = file_id_map.get(&file.id).copied();
+        let numeric_id =
+            crate::interfaces::nextcloud::webdav_handler::nc_id_of(&file_id_map, &file.id);
 
         let thumbnail_url = match numeric_id {
             Some(nid) => format!("/index.php/core/preview?fileId={}&x=32&y=32", nid),

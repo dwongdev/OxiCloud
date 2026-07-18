@@ -170,10 +170,42 @@ pub fn i64_str(buf: &mut [u8; 21], v: i64) -> &str {
     std::str::from_utf8(&buf[start..]).expect("ascii")
 }
 
+/// Lower-case hex of `bytes` into one preallocated `String`.
+///
+/// Replaces the `.map(|b| format!("{b:02x}")).collect()` shape, which heap-
+/// allocates a 2-byte `String` per digest byte (16 for MD5, 32 for SHA-256)
+/// before collect concatenates them.
+pub fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        out.push(HEX[(b >> 4) as usize] as char);
+        out.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::{TimeZone, Utc};
+
+    /// `hex_lower` must match the `format!("{b:02x}")`-per-byte shape it
+    /// replaced, byte for byte.
+    #[test]
+    fn hex_lower_matches_format() {
+        let cases: [&[u8]; 5] = [
+            &[],
+            &[0x00],
+            &[0xff, 0x00, 0xab],
+            &(0u8..=255).collect::<Vec<u8>>(),
+            b"The quick brown fox",
+        ];
+        for bytes in cases {
+            let reference: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            assert_eq!(hex_lower(bytes), reference);
+        }
+    }
 
     /// Edge-heavy corpus: epoch, single-digit day (padding!), leap day,
     /// end-of-year, DST-irrelevant midsummer, far future, max in-range.

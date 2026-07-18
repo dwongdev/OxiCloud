@@ -825,6 +825,25 @@ impl ContactUseCase for ContactService {
         Ok(contacts.into_iter().map(ContactDto::from).collect())
     }
 
+    async fn stream_contacts_by_book(
+        &self,
+        address_book_id: &str,
+        user_id: Uuid,
+    ) -> Result<futures::stream::BoxStream<'static, Result<ContactDto, DomainError>>, DomainError>
+    {
+        use futures::StreamExt;
+        let id = Uuid::parse_str(address_book_id)
+            .map_err(|_| DomainError::validation_error("Invalid address book ID format"))?;
+        // Same Read gate as `list_contacts`, once, before the cursor.
+        self.require_address_book_read_or_public(&id, &user_id)
+            .await?;
+        Ok(Box::pin(
+            self.contact_storage
+                .stream_contacts_by_book(id)
+                .map(|r| r.map(ContactDto::from)),
+        ))
+    }
+
     async fn list_contacts(
         &self,
         address_book_id: &str,

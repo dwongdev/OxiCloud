@@ -22,7 +22,8 @@ use axum::{
     http::{HeaderName, Request, StatusCode, header},
     response::Response,
 };
-use bytes::Buf;
+use bytes::{Buf, Bytes};
+use quick_xml::Writer;
 use std::sync::Arc;
 
 use crate::application::adapters::carddav_adapter::{
@@ -31,7 +32,7 @@ use crate::application::adapters::carddav_adapter::{
 use crate::application::adapters::uid_from_multiget_href;
 use crate::application::adapters::webdav_adapter::{PropFindRequest, PropFindType};
 use crate::application::dtos::address_book_dto::{CreateAddressBookDto, UpdateAddressBookDto};
-use crate::application::dtos::contact_dto::CreateContactVCardDto;
+use crate::application::dtos::contact_dto::{ContactDto, CreateContactVCardDto};
 use crate::application::ports::carddav_ports::{AddressBookUseCase, ContactUseCase};
 use crate::application::services::contact_service::ContactService;
 use crate::common::di::AppState;
@@ -187,6 +188,164 @@ fn get_addressbook_service(state: &AppState) -> Result<&Arc<ContactService>, App
     })
 }
 
+/// Rows per emitted page for the streaming CardDAV emitters — contacts
+/// carry no master/exception bundling, so pages cut anywhere.
+const CARDDAV_STREAM_PAGE_CONTACTS: usize = 500;
+
+/// Streamed multistatus REPORT: header, one chunk per cursor page,
+/// footer. Byte-compatible with the buffered
+/// `generate_contacts_response` output; TTFB becomes the first page and
+/// the whole-book DTO Vec is never materialised.
+fn build_streaming_contacts_report(
+    contact_svc: Arc<ContactService>,
+    address_book_id: String,
+    report: CardDavReportType,
+    base_href: String,
+    user_id: uuid::Uuid,
+) -> Response<Body> {
+    let stream = async_stream::try_stream! {
+        let mut buf = Vec::with_capacity(160);
+        {
+            let mut w = Writer::new(&mut buf);
+            CardDavAdapter::write_report_multistatus_start(&mut w)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        yield Bytes::from(buf);
+
+        {
+            use futures::TryStreamExt;
+            let mut rows = contact_svc
+                .stream_contacts_by_book(&address_book_id, user_id)
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let mut page: Vec<ContactDto> =
+                Vec::with_capacity(CARDDAV_STREAM_PAGE_CONTACTS);
+            loop {
+                let next = rows
+                    .try_next()
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                let flush = match &next {
+                    Some(_) => page.len() >= CARDDAV_STREAM_PAGE_CONTACTS,
+                    None => !page.is_empty(),
+                };
+                if flush {
+                    let mut chunk = Vec::with_capacity(page.len() * 256 + 64);
+                    {
+                        let mut w = Writer::new(&mut chunk);
+                        CardDavAdapter::write_contacts_report_page(
+                            &mut w, &page, &report, &base_href,
+                        )
+                        .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    }
+                    page.clear();
+                    yield Bytes::from(chunk);
+                }
+                match next {
+                    Some(c) => page.push(c),
+                    None => break,
+                }
+            }
+        }
+
+        let mut buf = Vec::with_capacity(32);
+        {
+            let mut w = Writer::new(&mut buf);
+            CardDavAdapter::write_carddav_multistatus_end(&mut w)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        yield Bytes::from(buf);
+    };
+
+    use futures::TryStreamExt;
+    let stream = stream
+        .map_err(|e: std::io::Error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) });
+
+    Response::builder()
+        .status(StatusCode::MULTI_STATUS)
+        .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
+        .body(Body::from_stream(stream))
+        .unwrap()
+}
+
+/// Streamed depth-1 address-book PROPFIND: head (multistatus + the
+/// book's own response), one chunk per cursor page, footer.
+fn build_streaming_book_propfind(
+    contact_svc: Arc<ContactService>,
+    address_book: crate::application::dtos::address_book_dto::AddressBookDto,
+    propfind_request: PropFindRequest,
+    address_book_id: String,
+    base_href: String,
+    user_id: uuid::Uuid,
+) -> Response<Body> {
+    let stream = async_stream::try_stream! {
+        let mut buf = Vec::with_capacity(2048);
+        {
+            let mut w = Writer::new(&mut buf);
+            CardDavAdapter::write_collection_head(
+                &mut w,
+                &address_book,
+                &propfind_request,
+                &base_href,
+            )
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        yield Bytes::from(buf);
+
+        {
+            use futures::TryStreamExt;
+            let mut rows = contact_svc
+                .stream_contacts_by_book(&address_book_id, user_id)
+                .await
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let mut page: Vec<ContactDto> =
+                Vec::with_capacity(CARDDAV_STREAM_PAGE_CONTACTS);
+            loop {
+                let next = rows
+                    .try_next()
+                    .await
+                    .map_err(|e| std::io::Error::other(e.to_string()))?;
+                let flush = match &next {
+                    Some(_) => page.len() >= CARDDAV_STREAM_PAGE_CONTACTS,
+                    None => !page.is_empty(),
+                };
+                if flush {
+                    let mut chunk = Vec::with_capacity(page.len() * 512 + 64);
+                    {
+                        let mut w = Writer::new(&mut chunk);
+                        CardDavAdapter::write_collection_contact_page(&mut w, &page, &base_href)
+                            .map_err(|e| std::io::Error::other(e.to_string()))?;
+                    }
+                    page.clear();
+                    yield Bytes::from(chunk);
+                }
+                match next {
+                    Some(c) => page.push(c),
+                    None => break,
+                }
+            }
+        }
+
+        let mut buf = Vec::with_capacity(32);
+        {
+            let mut w = Writer::new(&mut buf);
+            CardDavAdapter::write_carddav_multistatus_end(&mut w)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+        yield Bytes::from(buf);
+    };
+
+    use futures::TryStreamExt;
+    let stream = stream
+        .map_err(|e: std::io::Error| -> Box<dyn std::error::Error + Send + Sync> { Box::new(e) });
+
+    Response::builder()
+        .status(StatusCode::MULTI_STATUS)
+        .header(header::CONTENT_TYPE, "application/xml; charset=utf-8")
+        .body(Body::from_stream(stream))
+        .unwrap()
+}
+
 fn get_contact_service(state: &AppState) -> Result<&Arc<ContactService>, AppError> {
     state.contact_use_case.as_ref().ok_or_else(|| {
         AppError::new(
@@ -334,14 +493,19 @@ async fn handle_propfind(
                 .await
                 .map_err(|e| AppError::not_found(format!("Address book not found: {}", e)))?;
 
-            let contacts = if depth != "0" {
-                contact_svc
-                    .list_contacts(address_book_id, None, None, user.id)
-                    .await
-                    .unwrap_or_default()
-            } else {
-                vec![]
-            };
+            // Depth-1 streams the contact listing page by page; depth-0
+            // has no contact section and keeps the tiny buffered path.
+            if depth != "0" {
+                let base_href = format!("/carddav/{}/", address_book_id);
+                return Ok(build_streaming_book_propfind(
+                    contact_svc.clone(),
+                    address_book,
+                    propfind_request,
+                    address_book_id.to_string(),
+                    base_href,
+                    user.id,
+                ));
+            }
 
             let base_href = &format!("/carddav/{}/", address_book_id);
             let mut response_body = Vec::new();
@@ -349,7 +513,7 @@ async fn handle_propfind(
             CardDavAdapter::generate_addressbook_collection_propfind(
                 &mut response_body,
                 &address_book,
-                &contacts,
+                &[],
                 &propfind_request,
                 base_href,
                 &depth,
@@ -423,11 +587,25 @@ async fn handle_report(
         return Err(AppError::bad_request("Address book ID required in path"));
     }
 
+    // Whole-book shapes stream; bounded multiget keeps the buffered path.
+    if matches!(
+        &report,
+        CardDavReportType::AddressbookQuery { .. } | CardDavReportType::SyncCollection { .. }
+    ) {
+        let base_href = format!("/carddav/{}/", address_book_id);
+        return Ok(build_streaming_contacts_report(
+            contact_svc.clone(),
+            address_book_id.to_string(),
+            report,
+            base_href,
+            user.id,
+        ));
+    }
+
     let contacts = match &report {
-        CardDavReportType::AddressbookQuery { .. } => contact_svc
-            .list_contacts(address_book_id, None, None, user.id)
-            .await
-            .map_err(AppError::from)?,
+        CardDavReportType::AddressbookQuery { .. } => {
+            unreachable!("addressbook-query streams above")
+        }
         CardDavReportType::AddressbookMultiget { hrefs, .. } => {
             // Indexed batch lookup (`uid = ANY(...)`) — a multiget for a
             // handful of contacts must not pay for listing the whole
@@ -442,10 +620,9 @@ async fn handle_report(
                 .await
                 .map_err(AppError::from)?
         }
-        CardDavReportType::SyncCollection { .. } => contact_svc
-            .list_contacts(address_book_id, None, None, user.id)
-            .await
-            .map_err(AppError::from)?,
+        CardDavReportType::SyncCollection { .. } => {
+            unreachable!("sync-collection streams above")
+        }
     };
 
     let base_href = &format!("/carddav/{}/", address_book_id);

@@ -259,8 +259,9 @@ impl FavoritesRepositoryPort for FavoritesPgRepository {
             return Ok(HashSet::new());
         }
 
-        // Collect just the IDs for the IN clause
-        let ids: Vec<String> = item_ids.iter().map(|(id, _)| id.to_string()).collect();
+        // Collect just the IDs for the IN clause — sqlx binds `&[&str]` as
+        // text[], so no per-id String is needed.
+        let ids: Vec<&str> = item_ids.iter().map(|(id, _)| *id).collect();
 
         let rows = sqlx::query(
             "SELECT item_id FROM auth.user_favorites WHERE user_id = $1 AND item_id = ANY($2)",

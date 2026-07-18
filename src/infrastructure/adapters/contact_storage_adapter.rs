@@ -146,6 +146,14 @@ impl ContactStoragePort for ContactStorageAdapter {
             .await
     }
 
+    fn stream_contacts_by_book(
+        &self,
+        address_book_id: Uuid,
+    ) -> futures::stream::BoxStream<'static, Result<Contact, DomainError>> {
+        self.contact_repository
+            .stream_contacts_by_book(address_book_id)
+    }
+
     async fn get_contacts_by_address_book_paginated(
         &self,
         address_book_id: &Uuid,
