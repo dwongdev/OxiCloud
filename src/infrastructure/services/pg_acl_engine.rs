@@ -116,6 +116,15 @@ const CASCADE_GRANT_CACHE_CAPACITY: u64 = 100_000;
 /// invalidation tree". Short enough that any such change takes effect in <1 min.
 const CASCADE_GRANT_CACHE_TTL: Duration = Duration::from_secs(30);
 
+/// `file_parent_cache` bound/TTL: `file_id → Option<folder_id>` point rows
+/// (~50 B each) resolved on the file-cascade path so an N-file album pays
+/// ONE folder-cascade query instead of N (ROUND9). Parentage changes only
+/// on move — an indirect path the cascade cache already self-heals via TTL,
+/// so the same 30 s window applies (grant writes don't alter parentage and
+/// need no flush here).
+const FILE_PARENT_CACHE_CAPACITY: u64 = 100_000;
+const FILE_PARENT_CACHE_TTL: Duration = Duration::from_secs(30);
+
 pub struct PgAclEngine {
     pool: Arc<PgPool>,
     folder_repo: Arc<FolderDbRepository>,
@@ -202,6 +211,13 @@ pub struct PgAclEngine {
     /// only positively-or-negatively for at most the TTL. A revoke via
     /// `clear_role` flushes immediately; anything missed self-heals in ≤30 s.
     cascade_grant_cache: Cache<(Subject, Resource, Permission), bool>,
+    /// `file_id → Option<parent folder_id>` memo for the file-cascade
+    /// decomposition (see `cascade_grant_cached`): resolving the parent lets
+    /// a whole folder's files share ONE folder-cascade decision, so a shared
+    /// album's first view runs one ltree query instead of one per file.
+    /// Grant writes don't affect parentage — only the TTL applies (moves are
+    /// an indirect path, same self-heal contract as `cascade_grant_cache`).
+    file_parent_cache: Cache<Uuid, Option<Uuid>>,
 }
 
 impl PgAclEngine {
@@ -242,6 +258,10 @@ impl PgAclEngine {
             cascade_grant_cache: Cache::builder()
                 .max_capacity(CASCADE_GRANT_CACHE_CAPACITY)
                 .time_to_live(CASCADE_GRANT_CACHE_TTL)
+                .build(),
+            file_parent_cache: Cache::builder()
+                .max_capacity(FILE_PARENT_CACHE_CAPACITY)
+                .time_to_live(FILE_PARENT_CACHE_TTL)
                 .build(),
         }
     }
@@ -314,6 +334,10 @@ impl PgAclEngine {
                 .time_to_live(Duration::from_secs(1))
                 .build(),
             cascade_grant_cache: Cache::builder()
+                .max_capacity(1)
+                .time_to_live(Duration::from_secs(1))
+                .build(),
+            file_parent_cache: Cache::builder()
                 .max_capacity(1)
                 .time_to_live(Duration::from_secs(1))
                 .build(),
@@ -718,11 +742,11 @@ impl PgAclEngine {
         Ok(exists.is_some())
     }
 
-    /// Cascading check for files: either a direct file grant OR a grant on
-    /// any ancestor folder of the file's containing folder. See
-    /// `folder_cascade_grant_exists` for the meaning of `subject_types` /
-    /// `subject_ids` and the D-Prep role-array migration.
-    async fn file_cascade_grant_exists(
+    /// Direct file grant only — the first branch of the historical file
+    /// cascade UNION, split out so `cascade_grant_cached` can amortize the
+    /// ancestor-folder branch per FOLDER (see the `Resource::File` arm).
+    /// A plain indexed `role_grants` point lookup, no ltree join.
+    async fn file_direct_grant_exists(
         &self,
         subject_types: &[&str],
         subject_ids: &[Uuid],
@@ -735,30 +759,12 @@ impl PgAclEngine {
         let exists: Option<i32> = sqlx::query_scalar(
             r#"
             SELECT 1
-              FROM (
-                -- direct file grant
-                SELECT 1
-                  FROM storage.role_grants
-                 WHERE subject_type = ANY($1)
-                   AND subject_id   = ANY($2)
-                   AND role         = ANY($3::storage.grant_role[])
-                   AND resource_type = 'file' AND resource_id = $4
-                   AND (expires_at IS NULL OR expires_at > NOW())
-                UNION ALL
-                -- cascading from any ancestor folder of the file's containing folder
-                SELECT 1
-                  FROM storage.role_grants g
-                  JOIN storage.folders gf     ON gf.id = g.resource_id
-                  JOIN storage.files target_f ON target_f.id = $4
-                 WHERE g.subject_type  = ANY($1)
-                   AND g.subject_id    = ANY($2)
-                   AND g.role          = ANY($3::storage.grant_role[])
-                   AND g.resource_type = 'folder'
-                   AND (g.expires_at IS NULL OR g.expires_at > NOW())
-                   AND target_f.folder_id IS NOT NULL
-                   AND gf.lpath @> (SELECT lpath FROM storage.folders
-                                     WHERE id = target_f.folder_id)
-              ) any_match
+              FROM storage.role_grants
+             WHERE subject_type = ANY($1)
+               AND subject_id   = ANY($2)
+               AND role         = ANY($3::storage.grant_role[])
+               AND resource_type = 'file' AND resource_id = $4
+               AND (expires_at IS NULL OR expires_at > NOW())
              LIMIT 1
             "#,
         )
@@ -768,9 +774,34 @@ impl PgAclEngine {
         .bind(file_id)
         .fetch_optional(self.pool.as_ref())
         .await
-        .map_err(|e| DomainError::internal_error("PgAcl", format!("file cascade: {e}")))?;
+        .map_err(|e| DomainError::internal_error("PgAcl", format!("file direct grant: {e}")))?;
 
         Ok(exists.is_some())
+    }
+
+    /// Memoised `file_id → Option<parent folder_id>` point read backing the
+    /// file-cascade decomposition. `None` covers both a missing row and a
+    /// NULL `folder_id` — in either case only the direct-file-grant branch
+    /// can match (mirroring the historical UNION's `folder_id IS NOT NULL`
+    /// guard).
+    async fn file_parent_folder_cached(
+        &self,
+        file_id: Uuid,
+        counters: &QueryCounters,
+    ) -> Result<Option<Uuid>, DomainError> {
+        if let Some(parent) = self.file_parent_cache.get(&file_id).await {
+            return Ok(parent);
+        }
+        counters.sql_queries.fetch_add(1, Ordering::Relaxed);
+        let parent: Option<Option<Uuid>> =
+            sqlx::query_scalar("SELECT folder_id FROM storage.files WHERE id = $1")
+                .bind(file_id)
+                .fetch_optional(self.pool.as_ref())
+                .await
+                .map_err(|e| DomainError::internal_error("PgAcl", format!("file parent: {e}")))?;
+        let parent = parent.flatten();
+        self.file_parent_cache.insert(file_id, parent).await;
+        Ok(parent)
     }
 
     /// Cache-aware wrapper over the File/Folder grant cascade. Serves the
@@ -780,10 +811,23 @@ impl PgAclEngine {
     /// precheck fails, so it never caches a decision a drive grant would have
     /// satisfied — a later drive grant short-circuits above this cache.
     ///
+    /// **File decomposition (ROUND9).** The historical file query was one
+    /// UNION: `direct file grant ∨ grant on any ancestor of the parent
+    /// folder` — one ltree join per file, so a shared N-photo album's FIRST
+    /// view ran N near-identical ancestor queries (round 8 memoised only the
+    /// per-file result, covering revalidation). The arm now resolves the
+    /// file's parent (memoised point read) and recurses into the FOLDER arm
+    /// for the ancestor half — one ltree query per folder, shared by every
+    /// sibling — falling back to the direct-file-grant lookup only when the
+    /// folder half denies. The decomposition is exactly the UNION split in
+    /// two: no decision changes, including the parentless edge (the UNION's
+    /// `folder_id IS NOT NULL` guard ≡ the direct-only fallback).
+    ///
     /// The result is a pure function of the subject's group expansion + the
     /// resource's grants + folder ancestry; `invalidate_cascade_grant_cache_all`
-    /// (on File/Folder grant writes) and the 30 s TTL (indirect changes) keep
-    /// it fresh. See the `cascade_grant_cache` field doc.
+    /// (on File/Folder grant writes — it holds file AND folder decisions in
+    /// the same map) and the 30 s TTL (indirect changes, incl. moves for the
+    /// parent memo) keep it fresh. See the `cascade_grant_cache` field doc.
     async fn cascade_grant_cached(
         &self,
         subject: Subject,
@@ -799,9 +843,10 @@ impl PgAclEngine {
             counters.cache_hit.fetch_add(1, Ordering::Relaxed);
             return Ok(allowed);
         }
-        let (subject_types, subject_ids) = self.subject_match_set(subject, counters).await?;
         let allowed = match resource {
             Resource::Folder(id) => {
+                let (subject_types, subject_ids) =
+                    self.subject_match_set(subject, counters).await?;
                 self.folder_cascade_grant_exists(
                     &subject_types,
                     &subject_ids,
@@ -812,14 +857,34 @@ impl PgAclEngine {
                 .await?
             }
             Resource::File(id) => {
-                self.file_cascade_grant_exists(
-                    &subject_types,
-                    &subject_ids,
-                    permission,
-                    id,
-                    counters,
-                )
-                .await?
+                // Ancestor half first — amortized to one query per FOLDER
+                // via the recursive Folder arm (its own cache entry).
+                let folder_allowed = match self.file_parent_folder_cached(id, counters).await? {
+                    Some(parent) => {
+                        Box::pin(self.cascade_grant_cached(
+                            subject,
+                            Resource::Folder(parent),
+                            permission,
+                            counters,
+                        ))
+                        .await?
+                    }
+                    None => false,
+                };
+                if folder_allowed {
+                    true
+                } else {
+                    let (subject_types, subject_ids) =
+                        self.subject_match_set(subject, counters).await?;
+                    self.file_direct_grant_exists(
+                        &subject_types,
+                        &subject_ids,
+                        permission,
+                        id,
+                        counters,
+                    )
+                    .await?
+                }
             }
             // Only File/Folder reach this helper (see `check_inner`).
             _ => return Ok(false),

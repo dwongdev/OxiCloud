@@ -256,6 +256,11 @@
 
 	// Drop selection ids that are no longer present after a reload.
 	$effect(() => {
+		// With nothing selected (the common case) every infinite-scroll page
+		// re-fired this effect and built a throwaway O(N) id Set for a loop
+		// that never runs — skip straight out. `selected.size` is reactive,
+		// so the effect re-fires when a selection appears.
+		if (selected.size === 0) return;
 		const ids = new Set(items.map((i) => i.id));
 		let changed = false;
 		for (const id of selected) {

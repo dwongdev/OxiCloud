@@ -214,7 +214,7 @@ pub async fn list_recent_resources(
                     // Path is only shown to the owner; non-owners see ""
                     // to avoid leaking another user's folder hierarchy.
                     let path = if row.is_owner {
-                        row.path.clone().unwrap_or_default()
+                        row.path.unwrap_or_default()
                     } else {
                         String::new()
                     };
@@ -224,7 +224,7 @@ pub async fn list_recent_resources(
                         let dto = FolderDto {
                             etag: resource_id.clone(),
                             id: resource_id,
-                            name: row.name.clone(),
+                            name: row.name,
                             path,
                             parent_id: row.parent_id.map(|u| u.to_string()),
                             drive_id: row.drive_id,
@@ -253,26 +253,30 @@ pub async fn list_recent_resources(
                         // listing matches GET/HEAD/PROPFIND byte-for-byte
                         // for the same file.
                         let modified_at_u = row.modified_at.timestamp() as u64;
-                        let content_hash = row.blob_hash.clone().unwrap_or_default();
+                        let content_hash = row.blob_hash.unwrap_or_default();
                         let etag = if content_hash.is_empty() {
                             String::new()
                         } else {
                             File::compute_etag(&content_hash, modified_at_u)
                         };
+                        // Name-derived display classes borrow `row.name`;
+                        // compute them before the name moves into the DTO.
+                        let icon_class = intern_display(icon_class_for(&row.name, mime));
+                        let icon_special_class =
+                            intern_display(icon_special_class_for(&row.name, mime));
+                        let category = intern_display(category_for(&row.name, mime));
                         let dto = FileDto {
                             id: row.resource_id.to_string(),
-                            name: row.name.clone(),
+                            name: row.name,
                             path,
                             size: size_bytes,
                             mime_type: intern_mime(mime),
                             folder_id: row.parent_id.map(|u| u.to_string()),
                             created_at: row.resource_created_at.timestamp() as u64,
                             modified_at: modified_at_u,
-                            icon_class: intern_display(icon_class_for(&row.name, mime)),
-                            icon_special_class: intern_display(icon_special_class_for(
-                                &row.name, mime,
-                            )),
-                            category: intern_display(category_for(&row.name, mime)),
+                            icon_class,
+                            icon_special_class,
+                            category,
                             size_formatted: format_file_size(size_bytes),
                             sort_date: None,
                             content_hash,

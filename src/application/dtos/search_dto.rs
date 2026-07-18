@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use utoipa::ToSchema;
 
 /**
@@ -109,8 +110,10 @@ pub struct SearchFileResultDto {
     pub path: String,
     /// Size in bytes
     pub size: u64,
-    /// MIME type
-    pub mime_type: String,
+    /// MIME type — `Arc<str>` so enrichment reuses `FileDto`'s interned
+    /// value (an atomic increment) instead of allocating per result row.
+    #[schema(value_type = String)]
+    pub mime_type: Arc<str>,
     /// Parent folder ID
     pub folder_id: Option<String>,
     /// Creation timestamp
@@ -122,11 +125,14 @@ pub struct SearchFileResultDto {
     /// Human-readable file size (e.g., "2.5 MB")
     pub size_formatted: String,
     /// CSS icon class for the file type (e.g., "fas fa-file-pdf")
-    pub icon_class: String,
+    #[schema(value_type = String)]
+    pub icon_class: Arc<str>,
     /// Extra CSS class for icon styling (e.g., "pdf-icon", "code-icon js-icon")
-    pub icon_special_class: String,
+    #[schema(value_type = String)]
+    pub icon_special_class: Arc<str>,
     /// Content category: "document", "image", "video", "audio", "archive", "code", "other"
-    pub category: String,
+    #[schema(value_type = String)]
+    pub category: Arc<str>,
     /// Raw BLAKE3 content hash. Feeds `FileDto::content_hash` and
     /// `File::compute_etag` when search results are converted to
     /// `FileDto` (NC REPORT/SEARCH response). Defaults to `String::new()`
@@ -267,9 +273,11 @@ pub struct SearchSuggestionItem {
     /// Path for context
     pub path: String,
     /// CSS icon class
-    pub icon_class: String,
+    #[schema(value_type = String)]
+    pub icon_class: Arc<str>,
     /// Extra CSS class for icon styling
-    pub icon_special_class: String,
+    #[schema(value_type = String)]
+    pub icon_special_class: Arc<str>,
     /// Relevance score
     pub relevance_score: u32,
 }

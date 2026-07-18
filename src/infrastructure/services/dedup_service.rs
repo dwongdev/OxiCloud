@@ -1747,18 +1747,24 @@ impl DedupService {
     /// remote object stores where overlapping fetches hide per-chunk latency).
     /// Shared by [`Self::read_blob_stream`] and [`Self::read_blob_bytes`] so both
     /// build the chunk stream identically from a manifest's `chunk_hashes`.
+    /// Takes the shared manifest `Arc` and iterates its hashes by index —
+    /// the old `Vec<String>` signature forced every read to deep-clone the
+    /// whole hash list out of the cached manifest before the first byte
+    /// (N ~64-B String allocs per read of an N-chunk file); the per-chunk
+    /// `Arc` bump here is a single atomic increment.
     fn stream_chunks(
         &self,
-        chunk_hashes: Vec<String>,
+        manifest: Arc<ChunkManifest>,
     ) -> Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>> {
         let prefetch = self.backend.read_prefetch().max(1);
         let backend = self.backend.clone();
-        let chunk_stream = stream::iter(chunk_hashes)
-            .map(move |chunk_hash| {
+        let chunk_stream = stream::iter(0..manifest.chunk_hashes.len())
+            .map(move |i| {
                 let backend = backend.clone();
+                let manifest = manifest.clone();
                 async move {
                     backend
-                        .get_blob_stream(&chunk_hash)
+                        .get_blob_stream(&manifest.chunk_hashes[i])
                         .await
                         .map_err(|e| std::io::Error::other(e.to_string()))
                 }
@@ -1771,31 +1777,56 @@ impl DedupService {
     /// Cached manifest fetch for the read path (see the `manifest_cache`
     /// field docs). `None` = legacy whole-file blob — never cached, so a
     /// background rechunk that creates a manifest is honoured immediately.
+    ///
+    /// Misses are single-flighted through `try_get_with`: K concurrent cold
+    /// readers of one newly-hot file (e.g. parallel Range probes on a big
+    /// video) coalesce onto ONE manifest SELECT instead of K. The
+    /// positive-only contract is preserved by routing "no manifest row" and
+    /// DB failures through the loader's error channel, which moka never
+    /// caches. The zero-alloc `get` fast path stays in front so warm reads
+    /// don't pay the owned-key clone `try_get_with` requires.
     async fn manifest_cached(&self, hash: &str) -> Result<Option<Arc<ChunkManifest>>, DomainError> {
         if let Some(m) = self.manifest_cache.get(hash).await {
             return Ok(Some(m));
         }
-        let row = sqlx::query_as::<_, (Vec<String>, Vec<i64>, i64)>(
-            "SELECT chunk_hashes, chunk_sizes, total_size
-             FROM storage.chunk_manifests WHERE file_hash = $1",
-        )
-        .bind(hash)
-        .fetch_optional(self.pool.as_ref())
-        .await
-        .map_err(|e| DomainError::internal_error("Dedup", format!("Manifest lookup: {}", e)))?;
-        match row {
-            Some((chunk_hashes, chunk_sizes, total_size)) => {
-                let m = Arc::new(ChunkManifest {
-                    chunk_hashes,
-                    chunk_sizes,
-                    total_size,
-                });
-                self.manifest_cache
-                    .insert(hash.to_string(), m.clone())
-                    .await;
-                Ok(Some(m))
-            }
-            None => Ok(None),
+
+        enum MissKind {
+            Legacy,
+            Db(String),
+        }
+
+        let pool = self.pool.clone();
+        let query_hash = hash.to_string();
+        let result = self
+            .manifest_cache
+            .try_get_with(hash.to_string(), async move {
+                let row = sqlx::query_as::<_, (Vec<String>, Vec<i64>, i64)>(
+                    "SELECT chunk_hashes, chunk_sizes, total_size
+                     FROM storage.chunk_manifests WHERE file_hash = $1",
+                )
+                .bind(&query_hash)
+                .fetch_optional(pool.as_ref())
+                .await
+                .map_err(|e| MissKind::Db(e.to_string()))?;
+                match row {
+                    Some((chunk_hashes, chunk_sizes, total_size)) => Ok(Arc::new(ChunkManifest {
+                        chunk_hashes,
+                        chunk_sizes,
+                        total_size,
+                    })),
+                    None => Err(MissKind::Legacy),
+                }
+            })
+            .await;
+        match result {
+            Ok(m) => Ok(Some(m)),
+            Err(miss) => match &*miss {
+                MissKind::Legacy => Ok(None),
+                MissKind::Db(msg) => Err(DomainError::internal_error(
+                    "Dedup",
+                    format!("Manifest lookup: {}", msg),
+                )),
+            },
         }
     }
 
@@ -1810,7 +1841,7 @@ impl DedupService {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>, DomainError>
     {
         match self.manifest_cached(hash).await? {
-            Some(m) => Ok(self.stream_chunks(m.chunk_hashes.clone())),
+            Some(m) => Ok(self.stream_chunks(m)),
             // Legacy whole-file blob
             None => self.backend.get_blob_stream(hash).await,
         }
@@ -1829,10 +1860,10 @@ impl DedupService {
     /// every full-blob read (e.g. 2N queries for an N-image gallery cold load).
     pub async fn read_blob_bytes(&self, hash: &str) -> Result<Bytes, DomainError> {
         let (mut stream, expected_size) = match self.manifest_cached(hash).await? {
-            Some(m) => (
-                self.stream_chunks(m.chunk_hashes.clone()),
-                m.total_size.max(0) as usize,
-            ),
+            Some(m) => {
+                let expected = m.total_size.max(0) as usize;
+                (self.stream_chunks(m), expected)
+            }
             None => {
                 // Legacy whole-file blob: size + stream straight from the backend.
                 let size = self.backend.blob_size(hash).await? as usize;
@@ -1863,16 +1894,17 @@ impl DedupService {
     ) -> Result<Pin<Box<dyn Stream<Item = Result<Bytes, std::io::Error>> + Send>>, DomainError>
     {
         if let Some(m) = self.manifest_cached(hash).await? {
-            let (chunk_hashes, chunk_sizes, total_size) =
-                (&m.chunk_hashes, &m.chunk_sizes, m.total_size);
-            let end = end.unwrap_or(total_size as u64);
+            let end = end.unwrap_or(m.total_size as u64);
 
-            // Calculate which chunks overlap [start, end)
+            // Calculate which chunks overlap [start, end). Chunks are
+            // addressed by manifest INDEX (the hash is read through the
+            // shared `Arc` at fetch time) — a `bytes=0-` probe of an
+            // N-chunk video used to clone all N hash Strings here.
             let mut offset: u64 = 0;
-            // (chunk_hash, range_start_within_chunk, range_end_within_chunk)
-            let mut selected: Vec<(String, u64, Option<u64>)> = Vec::new();
+            // (chunk_index, range_start_within_chunk, range_end_within_chunk)
+            let mut selected: Vec<(usize, u64, Option<u64>)> = Vec::new();
 
-            for (i, &chunk_size) in chunk_sizes.iter().enumerate() {
+            for (i, &chunk_size) in m.chunk_sizes.iter().enumerate() {
                 let chunk_size = chunk_size as u64;
                 let chunk_end = offset + chunk_size;
 
@@ -1883,7 +1915,7 @@ impl DedupService {
                     } else {
                         None
                     };
-                    selected.push((chunk_hashes[i].clone(), range_start, range_end));
+                    selected.push((i, range_start, range_end));
                 }
 
                 offset += chunk_size;
@@ -1897,11 +1929,16 @@ impl DedupService {
             let prefetch = self.backend.read_prefetch().max(1);
             let backend = self.backend.clone();
             let chunk_stream = stream::iter(selected)
-                .map(move |(chunk_hash, range_start, range_end)| {
+                .map(move |(i, range_start, range_end)| {
                     let backend = backend.clone();
+                    let manifest = m.clone();
                     async move {
                         backend
-                            .get_blob_range_stream(&chunk_hash, range_start, range_end)
+                            .get_blob_range_stream(
+                                &manifest.chunk_hashes[i],
+                                range_start,
+                                range_end,
+                            )
                             .await
                             .map_err(|e| std::io::Error::other(e.to_string()))
                     }

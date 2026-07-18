@@ -32,11 +32,15 @@ use crate::domain::services::path_service::StoragePath;
 /// Post-D7-step-6: `storage.folders.user_id` dropped, so the tuple
 /// no longer carries it. The domain entity's `user_id` field is
 /// populated with `None` at `row_to_folder` construction.
+/// `id` / `parent_id` decode as binary `Uuid` (16 bytes on the wire vs 36
+/// as `::text`, and the server skips the cast); `row_to_folder` renders
+/// them to `String` once app-side — the round-6 `row_to_file` shape
+/// (benches/ROUND6.md §10) applied to the folder listings.
 type FolderRow = (
+    Uuid,
     String,
     String,
-    String,
-    Option<String>,
+    Option<Uuid>,
     Uuid,
     i64,
     i64,
@@ -49,10 +53,10 @@ type FolderRow = (
 /// the last element after the §14 provenance columns). Same
 /// column set as [`FolderRow`] plus the trailing count.
 type FolderRowPaginated = (
+    Uuid,
     String,
     String,
-    String,
-    Option<String>,
+    Option<Uuid>,
     Uuid,
     i64,
     i64,
@@ -131,10 +135,10 @@ impl FolderDbRepository {
     /// `Option<Uuid>` because the FK is `ON DELETE SET NULL`.
     #[allow(clippy::too_many_arguments)]
     fn row_to_folder(
-        id: String,
+        id: Uuid,
         name: String,
         path: String,
-        parent_id: Option<String>,
+        parent_id: Option<Uuid>,
         drive_id: Uuid,
         created_at: i64,
         modified_at: i64,
@@ -143,10 +147,10 @@ impl FolderDbRepository {
         updated_by: Option<Uuid>,
     ) -> Result<Folder, DomainError> {
         Folder::from_materialized_row(
-            id,
+            id.to_string(),
             name,
             path,
-            parent_id,
+            parent_id.map(|u| u.to_string()),
             drive_id,
             created_at as u64,
             modified_at as u64,
@@ -170,7 +174,7 @@ impl FolderDbRepository {
 
         let rows = sqlx::query_as::<_, FolderRow>(
             r#"
-            SELECT id::text, name, path, parent_id::text, drive_id,
+            SELECT id, name, path, parent_id, drive_id,
                    EXTRACT(EPOCH FROM created_at)::bigint,
                    EXTRACT(EPOCH FROM updated_at)::bigint,
                    EXTRACT(EPOCH FROM tree_modified_at)::bigint,
@@ -235,12 +239,25 @@ impl FolderRepository for FolderDbRepository {
         //
         // RETURNING surfaces the two provenance columns so the built
         // entity / DTO carries fresh values without a re-read.
-        let row = sqlx::query_as::<_, (String, String, i64, i64, i64, Option<Uuid>, Option<Uuid>)>(
+        let row = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                Option<Uuid>,
+                String,
+                i64,
+                i64,
+                i64,
+                Option<Uuid>,
+                Option<Uuid>,
+            ),
+        >(
             r#"
             INSERT INTO storage.folders
                 (name, parent_id, drive_id, created_by, updated_by)
             VALUES ($1, $2::uuid, $3, $4, $4)
-            RETURNING id::text,
+            RETURNING id,
+                      parent_id,
                       path,
                       EXTRACT(EPOCH FROM created_at)::bigint,
                       EXTRACT(EPOCH FROM updated_at)::bigint,
@@ -268,16 +285,16 @@ impl FolderRepository for FolderDbRepository {
         })?;
 
         Self::row_to_folder(
-            row.0, name, row.1, parent_id, drive_id, row.2, row.3, row.4,
+            row.0, name, row.2, row.1, drive_id, row.3, row.4, row.5,
             // Fresh from RETURNING — caller_id was bound to both columns.
-            row.5, row.6,
+            row.6, row.7,
         )
     }
 
     async fn get_folder(&self, id: &str) -> Result<Folder, DomainError> {
         let row = sqlx::query_as::<_, FolderRow>(
             r#"
-            SELECT id::text, name, path, parent_id::text, drive_id,
+            SELECT id, name, path, parent_id, drive_id,
                    EXTRACT(EPOCH FROM created_at)::bigint,
                    EXTRACT(EPOCH FROM updated_at)::bigint,
                    EXTRACT(EPOCH FROM tree_modified_at)::bigint,
@@ -319,7 +336,7 @@ impl FolderRepository for FolderDbRepository {
         // wrapper scoping post-D0).
         let row = sqlx::query_as::<_, FolderRow>(
             r#"
-            SELECT id::text, name, path, parent_id::text, drive_id,
+            SELECT id, name, path, parent_id, drive_id,
                    EXTRACT(EPOCH FROM created_at)::bigint,
                    EXTRACT(EPOCH FROM updated_at)::bigint,
                        EXTRACT(EPOCH FROM tree_modified_at)::bigint,
@@ -345,7 +362,7 @@ impl FolderRepository for FolderDbRepository {
         let rows: Vec<FolderRow> = if let Some(pid) = parent_id {
             sqlx::query_as(
                 r#"
-                SELECT id::text, name, path, parent_id::text, drive_id,
+                SELECT id, name, path, parent_id, drive_id,
                        EXTRACT(EPOCH FROM created_at)::bigint,
                        EXTRACT(EPOCH FROM updated_at)::bigint,
                        EXTRACT(EPOCH FROM tree_modified_at)::bigint,
@@ -361,7 +378,7 @@ impl FolderRepository for FolderDbRepository {
         } else {
             sqlx::query_as(
                 r#"
-                SELECT id::text, name, path, parent_id::text, drive_id,
+                SELECT id, name, path, parent_id, drive_id,
                        EXTRACT(EPOCH FROM created_at)::bigint,
                        EXTRACT(EPOCH FROM updated_at)::bigint,
                        EXTRACT(EPOCH FROM tree_modified_at)::bigint,
@@ -404,7 +421,7 @@ impl FolderRepository for FolderDbRepository {
         // top of `folder_repository.rs`. Frontend cross-references
         // `/api/drives::caller_role` via `folder.drive_id`.
         let sql = format!(
-            "SELECT fo.id::text, fo.name, fo.path, fo.parent_id::text, \
+            "SELECT fo.id, fo.name, fo.path, fo.parent_id, \
                     fo.drive_id, \
                     EXTRACT(EPOCH FROM fo.created_at)::bigint, \
                     EXTRACT(EPOCH FROM fo.updated_at)::bigint, \
@@ -445,7 +462,7 @@ impl FolderRepository for FolderDbRepository {
         let rows: Vec<FolderRowPaginated> = if let Some(pid) = parent_id {
             sqlx::query_as(
                 r#"
-                SELECT id::text, name, path, parent_id::text, drive_id,
+                SELECT id, name, path, parent_id, drive_id,
                        EXTRACT(EPOCH FROM created_at)::bigint,
                        EXTRACT(EPOCH FROM updated_at)::bigint,
                        EXTRACT(EPOCH FROM tree_modified_at)::bigint,
@@ -465,7 +482,7 @@ impl FolderRepository for FolderDbRepository {
         } else {
             sqlx::query_as(
                 r#"
-                SELECT id::text, name, path, parent_id::text, drive_id,
+                SELECT id, name, path, parent_id, drive_id,
                        EXTRACT(EPOCH FROM created_at)::bigint,
                        EXTRACT(EPOCH FROM updated_at)::bigint,
                        EXTRACT(EPOCH FROM tree_modified_at)::bigint,
@@ -529,7 +546,7 @@ impl FolderRepository for FolderDbRepository {
             "AND $3::text IS NULL"
         };
         let sql = format!(
-            "SELECT id::text, name, path, parent_id::text, drive_id, \
+            "SELECT id, name, path, parent_id, drive_id, \
                     EXTRACT(EPOCH FROM created_at)::bigint, \
                     EXTRACT(EPOCH FROM updated_at)::bigint, \
                     EXTRACT(EPOCH FROM tree_modified_at)::bigint, \
@@ -567,7 +584,7 @@ impl FolderRepository for FolderDbRepository {
         include_total: bool,
     ) -> Result<(Vec<Folder>, Option<usize>), DomainError> {
         let sql = format!(
-            "SELECT fo.id::text, fo.name, fo.path, fo.parent_id::text, \
+            "SELECT fo.id, fo.name, fo.path, fo.parent_id, \
                     fo.drive_id, \
                     EXTRACT(EPOCH FROM fo.created_at)::bigint, \
                     EXTRACT(EPOCH FROM fo.updated_at)::bigint, \
@@ -629,7 +646,7 @@ impl FolderRepository for FolderDbRepository {
                 UPDATE storage.folders
                    SET name = $1, updated_at = NOW(), updated_by = $3
                  WHERE id = $2::uuid AND NOT is_trashed
-                RETURNING id::text, name, path, parent_id::text, drive_id,
+                RETURNING id, name, path, parent_id, drive_id,
                           EXTRACT(EPOCH FROM created_at)::bigint,
                           EXTRACT(EPOCH FROM updated_at)::bigint,
                            EXTRACT(EPOCH FROM tree_modified_at)::bigint,
@@ -690,7 +707,7 @@ impl FolderRepository for FolderDbRepository {
                        updated_at = NOW(),
                        updated_by = $3
                  WHERE f.id = $2::uuid AND NOT f.is_trashed
-                RETURNING f.id::text, f.name, f.path, f.parent_id::text, f.drive_id,
+                RETURNING f.id, f.name, f.path, f.parent_id, f.drive_id,
                           EXTRACT(EPOCH FROM f.created_at)::bigint,
                           EXTRACT(EPOCH FROM f.updated_at)::bigint,
                           EXTRACT(EPOCH FROM f.tree_modified_at)::bigint,
@@ -989,7 +1006,7 @@ impl FolderRepository for FolderDbRepository {
     /// Ordered by `fo.path` so callers can iterate in directory order.
     #[allow(clippy::type_complexity)]
     async fn list_subtree_folders(&self, folder_id: &str) -> Result<Vec<Folder>, DomainError> {
-        let sql = "SELECT fo.id::text, fo.name, fo.path, fo.parent_id::text, \
+        let sql = "SELECT fo.id, fo.name, fo.path, fo.parent_id, \
                           fo.drive_id, \
                           EXTRACT(EPOCH FROM fo.created_at)::bigint, \
                           EXTRACT(EPOCH FROM fo.updated_at)::bigint, \
@@ -1056,7 +1073,7 @@ impl FolderRepository for FolderDbRepository {
         if recursive {
             // Recursive, no folder scope → ALL folders in caller's readable drives
             let sql = format!(
-                "SELECT fo.id::text, fo.name, fo.path, fo.parent_id::text, \
+                "SELECT fo.id, fo.name, fo.path, fo.parent_id, \
                         fo.drive_id, \
                         EXTRACT(EPOCH FROM fo.created_at)::bigint, \
                         EXTRACT(EPOCH FROM fo.updated_at)::bigint, \
@@ -1095,7 +1112,7 @@ impl FolderRepository for FolderDbRepository {
         // the caller can read (parent_id already establishes the subtree).
         let sql = if parent_id.is_some() {
             format!(
-                "SELECT fo.id::text, fo.name, fo.path, fo.parent_id::text, \
+                "SELECT fo.id, fo.name, fo.path, fo.parent_id, \
                         fo.drive_id, \
                         EXTRACT(EPOCH FROM fo.created_at)::bigint, \
                         EXTRACT(EPOCH FROM fo.updated_at)::bigint, \
@@ -1115,7 +1132,7 @@ impl FolderRepository for FolderDbRepository {
                 _ => "",
             };
             format!(
-                "SELECT fo.id::text, fo.name, fo.path, fo.parent_id::text, \
+                "SELECT fo.id, fo.name, fo.path, fo.parent_id, \
                         fo.drive_id, \
                         EXTRACT(EPOCH FROM fo.created_at)::bigint, \
                         EXTRACT(EPOCH FROM fo.updated_at)::bigint, \
@@ -1188,7 +1205,7 @@ impl FolderRepository for FolderDbRepository {
         };
 
         let sql = format!(
-            "SELECT fo.id::text, fo.name, fo.path, fo.parent_id::text, \
+            "SELECT fo.id, fo.name, fo.path, fo.parent_id, \
                     fo.drive_id, \
                     EXTRACT(EPOCH FROM fo.created_at)::bigint, \
                     EXTRACT(EPOCH FROM fo.updated_at)::bigint, \
@@ -1245,7 +1262,7 @@ impl FolderRepository for FolderDbRepository {
         let rows: Vec<FolderRow> = if let Some(pid) = parent_id {
             sqlx::query_as(&format!(
                 r#"
-                SELECT fo.id::text, fo.name, fo.path, fo.parent_id::text, fo.drive_id,
+                SELECT fo.id, fo.name, fo.path, fo.parent_id, fo.drive_id,
                        EXTRACT(EPOCH FROM fo.created_at)::bigint,
                        EXTRACT(EPOCH FROM fo.updated_at)::bigint,
                        EXTRACT(EPOCH FROM fo.tree_modified_at)::bigint,
@@ -1274,7 +1291,7 @@ impl FolderRepository for FolderDbRepository {
         } else {
             sqlx::query_as(&format!(
                 r#"
-                SELECT fo.id::text, fo.name, fo.path, fo.parent_id::text, fo.drive_id,
+                SELECT fo.id, fo.name, fo.path, fo.parent_id, fo.drive_id,
                        EXTRACT(EPOCH FROM fo.created_at)::bigint,
                        EXTRACT(EPOCH FROM fo.updated_at)::bigint,
                        EXTRACT(EPOCH FROM fo.tree_modified_at)::bigint,

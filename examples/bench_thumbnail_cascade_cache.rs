@@ -13,12 +13,23 @@
 //! on any File/Folder grant write). The check still runs on every request —
 //! it is never skipped — but after the first query it resolves in-memory.
 //!
+//! Round 9 additionally decomposes the FILE decision: parent point-read
+//! (memoised) → the FOLDER cascade decision (one ltree query per folder,
+//! shared by every sibling) → direct-file-grant fallback. A shared album's
+//! COLD first view drops from one ltree UNION query per file to one ltree
+//! query per FOLDER plus cheap PK reads. The `ROUND8 cold` arm below runs
+//! the historical UNION verbatim per file for comparison.
+//!
 //! Safety gates (hard asserts, exit 1 on failure):
 //!   1. the folder-grant recipient is allowed; an outsider is denied;
 //!   2. REVOCATION — after a warm cache serves `allowed`, `clear_role` on the
 //!      shared folder makes the very next check DENY (proves the grant-write
 //!      invalidation flushes the cache; without it the stale `true` would
-//!      still serve).
+//!      still serve);
+//!   3. DIRECT-GRANT SIBLING (round 9) — a caller holding ONLY a direct
+//!      grant on one file is allowed that file and denied its siblings,
+//!      proving the folder-level decomposition neither shadows direct file
+//!      grants nor leaks a file decision to siblings.
 //!
 //! Run (needs Postgres up; reads DATABASE_URL from .env):
 //!   cargo run --release --features bench --example bench_thumbnail_cascade_cache
@@ -29,7 +40,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use oxicloud::application::ports::authorization_ports::AuthorizationEngine;
-use oxicloud::domain::services::authorization::{Permission, Resource, Role, Subject};
+use oxicloud::domain::services::authorization::{
+    Permission, Resource, Role, Subject, roles_implying,
+};
 use oxicloud::infrastructure::repositories::pg::{
     FileBlobReadRepository, FolderDbRepository, SubjectGroupPgRepository,
 };
@@ -308,6 +321,46 @@ async fn main() {
             .expect("re-grant");
     }
 
+    // ── Safety gate 3 (round 9): direct-grant sibling isolation ──
+    // The outsider gets a DIRECT grant on file[0] only (no folder/drive
+    // grant): they must be allowed file[0] — the folder half of the
+    // decomposition denies, the direct half matches — and denied file[1]
+    // even immediately after the allowed check (no sibling leak through
+    // the folder-level cache).
+    {
+        let engine = fresh_engine(&pool);
+        engine
+            .set_role(
+                s.owner,
+                Subject::User(s.outsider),
+                Role::Viewer,
+                Resource::File(s.files[0]),
+                None,
+            )
+            .await
+            .expect("direct file grant");
+        if !allowed(&engine, s.outsider, s.files[0]).await {
+            eprintln!(
+                "SAFETY GATE FAILED: direct file grant denied — the folder-level \
+                 decomposition shadowed the direct-grant branch"
+            );
+            cleanup(&pool, &s).await;
+            std::process::exit(1);
+        }
+        if allowed(&engine, s.outsider, s.files[1]).await {
+            eprintln!(
+                "SAFETY GATE FAILED: direct grant on file[0] leaked to a sibling — \
+                 a file decision must never authorize other files"
+            );
+            cleanup(&pool, &s).await;
+            std::process::exit(1);
+        }
+        engine
+            .clear_role(Subject::User(s.outsider), Resource::File(s.files[0]))
+            .await
+            .expect("clear direct grant");
+    }
+
     println!("\n#################################################################");
     println!("# shared-album thumbnail authz: folder-cascade query/thumb vs cache");
     println!("# thumbs={thumbs}  (recipient holds a folder grant, no drive membership)");
@@ -331,8 +384,66 @@ async fn main() {
         );
     }
 
-    // AFTER cold: one persistent engine — the first grid view queries once per
-    // distinct file (cache misses populate).
+    // ROUND8 cold: the historical per-file UNION (direct grant ∨ ltree
+    // ancestor join) run verbatim once per file — what a cold first view
+    // cost before the round-9 folder-level decomposition.
+    {
+        let subject_types: Vec<&str> = vec!["user", "group"];
+        let subject_ids = vec![s.recipient];
+        let roles: Vec<&str> = roles_implying(Permission::Read)
+            .iter()
+            .map(|r| r.as_str())
+            .collect();
+        let t = Instant::now();
+        for &f in &s.files {
+            let exists: Option<i32> = sqlx::query_scalar(
+                r#"
+                SELECT 1
+                  FROM (
+                    SELECT 1
+                      FROM storage.role_grants
+                     WHERE subject_type = ANY($1)
+                       AND subject_id   = ANY($2)
+                       AND role         = ANY($3::storage.grant_role[])
+                       AND resource_type = 'file' AND resource_id = $4
+                       AND (expires_at IS NULL OR expires_at > NOW())
+                    UNION ALL
+                    SELECT 1
+                      FROM storage.role_grants g
+                      JOIN storage.folders gf     ON gf.id = g.resource_id
+                      JOIN storage.files target_f ON target_f.id = $4
+                     WHERE g.subject_type  = ANY($1)
+                       AND g.subject_id    = ANY($2)
+                       AND g.role          = ANY($3::storage.grant_role[])
+                       AND g.resource_type = 'folder'
+                       AND (g.expires_at IS NULL OR g.expires_at > NOW())
+                       AND target_f.folder_id IS NOT NULL
+                       AND gf.lpath @> (SELECT lpath FROM storage.folders
+                                         WHERE id = target_f.folder_id)
+                  ) any_match
+                 LIMIT 1
+                "#,
+            )
+            .bind(&subject_types)
+            .bind(&subject_ids)
+            .bind(&roles)
+            .bind(f)
+            .fetch_optional(pool.as_ref())
+            .await
+            .expect("round8 union query");
+            assert!(exists.is_some(), "ROUND8 arm: recipient must be allowed");
+        }
+        let el = t.elapsed();
+        println!(
+            "| {:<28} | {:>10.2} | {:>12.2} |",
+            "ROUND8 cold (union/file)",
+            el.as_secs_f64() * 1e3,
+            el.as_secs_f64() * 1e6 / thumbs as f64
+        );
+    }
+
+    // AFTER cold: one persistent engine — the first grid view resolves each
+    // file's parent (PK read) and shares ONE folder-cascade decision.
     let engine = fresh_engine(&pool);
     {
         let t = Instant::now();

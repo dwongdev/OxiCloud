@@ -10,9 +10,7 @@ use quick_xml::{
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use crate::application::dtos::display_helpers::{
-    category_for, format_file_size, icon_class_for, icon_special_class_for,
-};
+use crate::application::dtos::display_helpers::format_file_size;
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
 use crate::application::dtos::search_dto::SearchCriteriaDto;
@@ -401,15 +399,16 @@ fn file_dto_from_search(fr: &crate::application::dtos::search_dto::SearchFileRes
         name: fr.name.clone(),
         path: fr.path.clone(),
         size: fr.size,
-        mime_type: fr.mime_type.clone().into(),
+        // Interned `Arc<str>` carried through from enrichment — refcount
+        // bumps; the old code re-ran all three display classifiers and
+        // re-allocated each value per converted search row.
+        mime_type: fr.mime_type.clone(),
         folder_id: fr.folder_id.clone(),
         created_at: fr.created_at,
         modified_at: fr.modified_at,
-        icon_class: icon_class_for(&fr.name, &fr.mime_type).to_string().into(),
-        icon_special_class: icon_special_class_for(&fr.name, &fr.mime_type)
-            .to_string()
-            .into(),
-        category: category_for(&fr.name, &fr.mime_type).to_string().into(),
+        icon_class: fr.icon_class.clone(),
+        icon_special_class: fr.icon_special_class.clone(),
+        category: fr.category.clone(),
         size_formatted: format_file_size(fr.size),
         sort_date: None,
         content_hash: fr.blob_hash.clone(),
@@ -418,6 +417,16 @@ fn file_dto_from_search(fr: &crate::application::dtos::search_dto::SearchFileRes
         created_by: None,
         updated_by: None,
     }
+}
+
+/// Bench-only public wrapper (feature = "bench") over the private
+/// search→FileDto conversion so `examples/bench_search_enrich.rs` can
+/// measure and equivalence-gate it.
+#[cfg(feature = "bench")]
+pub fn file_dto_from_search_for_bench(
+    fr: &crate::application::dtos::search_dto::SearchFileResultDto,
+) -> FileDto {
+    file_dto_from_search(fr)
 }
 
 /// Build a `FolderDto` from a search folder result.

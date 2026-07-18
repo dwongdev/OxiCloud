@@ -135,9 +135,15 @@ fn suggest_before(files: &[File], q: &str) -> Vec<SearchSuggestionItem> {
             item_type: "file".to_string(),
             id: file_dto.id.clone(),
             path: file_dto.path.clone(),
-            icon_class: icon_class_for(&file_dto.name, &file_dto.mime_type).to_string(),
+            // `.into()` bridges the round-9 `Arc<str>` field type; the
+            // conversion is identical on both arms so the round-5 delta
+            // this bench gates (clone vs move) is unaffected.
+            icon_class: icon_class_for(&file_dto.name, &file_dto.mime_type)
+                .to_string()
+                .into(),
             icon_special_class: icon_special_class_for(&file_dto.name, &file_dto.mime_type)
-                .to_string(),
+                .to_string()
+                .into(),
             relevance_score: score,
         });
     }
@@ -159,8 +165,9 @@ fn suggest_after(files: Vec<File>, q: &str) -> Vec<SearchSuggestionItem> {
             item_type: "file".to_string(),
             id: file_dto.id,
             path: file_dto.path,
-            icon_class,
-            icon_special_class,
+            // Same `.into()` bridge as the BEFORE arm — see note there.
+            icon_class: icon_class.into(),
+            icon_special_class: icon_special_class.into(),
             relevance_score: score,
         });
     }

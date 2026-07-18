@@ -27,7 +27,7 @@ const HEADER_DAV: HeaderName = HeaderName::from_static("dav");
 pub async fn handle_nc_trashbin(
     state: Arc<AppState>,
     req: Request<Body>,
-    session: crate::interfaces::nextcloud::session::NcSession,
+    session: crate::interfaces::nextcloud::session::SharedNcSession,
     subpath: String,
 ) -> Result<Response<Body>, AppError> {
     let method = req.method().clone();

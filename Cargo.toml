@@ -350,6 +350,57 @@ name = "bench_micro_allocs"
 path = "examples/bench_micro_allocs.rs"
 required-features = ["bench"]
 
+# Round-9 battery ─────────────────────────────────────────────────────────────
+
+# Search enrichment — borrow+clone+reclassify vs consume+carry (file/folder
+# enrich + the NC REPORT search→FileDto conversion). No Postgres.
+[[example]]
+name = "bench_search_enrich"
+path = "examples/bench_search_enrich.rs"
+required-features = ["bench"]
+
+# Storage micro-pack — local chunk write create_new, manifest Vec-clone vs
+# Arc-index, manifest miss single-flight, Content-MD5 hex. No Postgres.
+[[example]]
+name = "bench_storage_micro"
+path = "examples/bench_storage_micro.rs"
+required-features = ["bench"]
+
+# NC per-request session — extractor deep-clone vs Arc handle, chroot-cache
+# value vs Arc, session build double-clone vs shared Arc. No Postgres.
+[[example]]
+name = "bench_nc_session"
+path = "examples/bench_nc_session.rs"
+required-features = ["bench"]
+
+# OCS capabilities poll — rebuild+serialize per request vs OnceLock<Bytes>
+# memoization. No Postgres.
+[[example]]
+name = "bench_capabilities_static"
+path = "examples/bench_capabilities_static.rs"
+required-features = ["bench"]
+
+# Drive::is_empty — full-drive COUNT(*) sum vs short-circuit EXISTS
+# (needs the dev Postgres up).
+[[example]]
+name = "bench_drive_is_empty"
+path = "examples/bench_drive_is_empty.rs"
+required-features = ["bench"]
+
+# Folder-listing rows — `id::text`/`parent_id::text` casts vs binary UUID
+# decode + app-side render, the round-6 file-side port (needs Postgres).
+[[example]]
+name = "bench_folder_uuid_decode"
+path = "examples/bench_folder_uuid_decode.rs"
+required-features = ["bench"]
+
+# NC PROPFIND per-page enrichment triple — serial 3×RTT vs tokio::join!,
+# with injected-latency arms at 0/0.25/1/5 ms (needs Postgres).
+[[example]]
+name = "bench_nc_enrich_join"
+path = "examples/bench_nc_enrich_join.rs"
+required-features = ["bench"]
+
 # Round-8 battery ─────────────────────────────────────────────────────────────
 
 # Shared-album thumbnail authz — folder-grant cascade query per thumbnail vs

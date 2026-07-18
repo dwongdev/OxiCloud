@@ -2,9 +2,7 @@ use std::cmp::Reverse;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::application::dtos::display_helpers::{
-    category_for, icon_class_for, icon_special_class_for,
-};
+use crate::application::dtos::display_helpers::intern_display;
 use crate::application::dtos::file_dto::FileDto;
 use crate::application::dtos::folder_dto::FolderDto;
 use crate::application::dtos::search_dto::{
@@ -209,23 +207,6 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
-/// Get Font Awesome icon class for a file based on extension and MIME type.
-/// Delegates to the centralised `display_helpers` so every API surface is
-/// consistent.
-fn get_icon_class(name: &str, mime: &str) -> String {
-    icon_class_for(name, mime).to_string()
-}
-
-/// Get CSS special class for icon styling.
-fn get_icon_special_class(name: &str, mime: &str) -> String {
-    icon_special_class_for(name, mime).to_string()
-}
-
-/// Get category label from centralised helpers.
-fn get_category(name: &str, mime: &str) -> String {
-    category_for(name, mime).to_string()
-}
-
 // ─── SearchService implementation ───────────────────────────────────────
 
 impl SearchService {
@@ -267,8 +248,14 @@ impl SearchService {
 
     /// Enrich a FileDto → SearchFileResultDto with server-computed metadata.
     ///
+    /// Consumes the DTO: every `String` moves and the interned display
+    /// fields (`mime_type`/`icon_class`/`icon_special_class`/`category`,
+    /// already computed once in `FileDto::from`) transfer as refcount
+    /// bumps — the old borrow-based version cloned all of them AND re-ran
+    /// the three display classifiers per result row.
+    ///
     /// `query_lower` must already be lowercased (empty string when no query).
-    fn enrich_file(file: &FileDto, query_lower: &str) -> SearchFileResultDto {
+    fn enrich_file(file: FileDto, query_lower: &str) -> SearchFileResultDto {
         let relevance = if query_lower.is_empty() {
             50
         } else {
@@ -276,23 +263,23 @@ impl SearchService {
         };
 
         SearchFileResultDto {
-            id: file.id.clone(),
-            name: file.name.clone(),
-            path: file.path.clone(),
+            id: file.id,
+            name: file.name,
+            path: file.path,
             size: file.size,
-            mime_type: file.mime_type.to_string(),
-            folder_id: file.folder_id.clone(),
+            mime_type: file.mime_type,
+            folder_id: file.folder_id,
             created_at: file.created_at,
             modified_at: file.modified_at,
             relevance_score: relevance,
             size_formatted: format_bytes(file.size),
-            icon_class: get_icon_class(&file.name, &file.mime_type),
-            icon_special_class: get_icon_special_class(&file.name, &file.mime_type),
-            category: get_category(&file.name, &file.mime_type),
+            icon_class: file.icon_class,
+            icon_special_class: file.icon_special_class,
+            category: file.category,
             // Carry the content hash through so REPORT/SEARCH
             // responses on the NC surface can emit the same ETag
             // (`File::compute_etag`) as PROPFIND/GET would.
-            blob_hash: file.content_hash.clone(),
+            blob_hash: file.content_hash,
             snippet: None,
             match_source: (!query_lower.is_empty() && relevance > 0).then(|| "name".to_string()),
         }
@@ -300,8 +287,10 @@ impl SearchService {
 
     /// Enrich a FolderDto → SearchFolderResultDto with server-computed metadata.
     ///
+    /// Consumes the DTO so the owned strings move instead of cloning.
+    ///
     /// `query_lower` must already be lowercased (empty string when no query).
-    fn enrich_folder(folder: &FolderDto, query_lower: &str) -> SearchFolderResultDto {
+    fn enrich_folder(folder: FolderDto, query_lower: &str) -> SearchFolderResultDto {
         let relevance = if query_lower.is_empty() {
             50
         } else {
@@ -309,10 +298,10 @@ impl SearchService {
         };
 
         SearchFolderResultDto {
-            id: folder.id.clone(),
-            name: folder.name.clone(),
-            path: folder.path.clone(),
-            parent_id: folder.parent_id.clone(),
+            id: folder.id,
+            name: folder.name,
+            path: folder.path,
+            parent_id: folder.parent_id,
             drive_id: folder.drive_id,
             created_at: folder.created_at,
             modified_at: folder.modified_at,
@@ -481,9 +470,10 @@ impl SearchService {
             let Some(hit) = by_id.get(dto.id.as_str()) else {
                 continue;
             };
-            let mut enriched = Self::enrich_file(&dto, "");
-            enriched.relevance_score = content_relevance(hit.score, max_score);
-            enriched.snippet = hit.snippet.clone();
+            let (score, snippet) = (hit.score, hit.snippet.clone());
+            let mut enriched = Self::enrich_file(dto, "");
+            enriched.relevance_score = content_relevance(score, max_score);
+            enriched.snippet = snippet;
             enriched.match_source = Some("content".to_string());
             enriched_files.push(enriched);
             added += 1;
@@ -536,15 +526,15 @@ impl SearchService {
         for file in files {
             let file_dto = FileDto::from(file);
             let score = compute_relevance(&file_dto.name, &query_lower);
-            let icon_class = get_icon_class(&file_dto.name, &file_dto.mime_type);
-            let icon_special_class = get_icon_special_class(&file_dto.name, &file_dto.mime_type);
             suggestions.push(SearchSuggestionItem {
                 name: file_dto.name,
                 item_type: "file".to_string(),
                 id: file_dto.id,
                 path: file_dto.path,
-                icon_class,
-                icon_special_class,
+                // Interned in `FileDto::from` — reuse instead of re-running
+                // the display classifiers per keystroke suggestion.
+                icon_class: file_dto.icon_class,
+                icon_special_class: file_dto.icon_special_class,
                 relevance_score: score,
             });
         }
@@ -557,8 +547,8 @@ impl SearchService {
                 item_type: "folder".to_string(),
                 id: folder_dto.id,
                 path: folder_dto.path,
-                icon_class: "fas fa-folder".to_string(),
-                icon_special_class: "folder-icon".to_string(),
+                icon_class: intern_display("fas fa-folder"),
+                icon_special_class: intern_display("folder-icon"),
                 relevance_score: score,
             });
         }
@@ -572,6 +562,22 @@ impl SearchService {
             suggestions,
             query_time_ms: elapsed,
         })
+    }
+}
+
+// ─── Bench-only public wrappers (feature = "bench") ──────────────────────
+
+#[cfg(feature = "bench")]
+impl SearchService {
+    /// Public wrapper over the private `enrich_file` so
+    /// `examples/bench_search_enrich.rs` can measure it.
+    pub fn enrich_file_for_bench(file: FileDto, query_lower: &str) -> SearchFileResultDto {
+        Self::enrich_file(file, query_lower)
+    }
+
+    /// Public wrapper over the private `enrich_folder` for the same bench.
+    pub fn enrich_folder_for_bench(folder: FolderDto, query_lower: &str) -> SearchFolderResultDto {
+        Self::enrich_folder(folder, query_lower)
     }
 }
 
@@ -627,11 +633,11 @@ impl SearchUseCase for SearchService {
                         .search_files_paginated(criteria.folder_id.as_deref(), &criteria, user_id)
                         .await?;
 
-                    // Convert to DTOs and enrich with metadata
-                    let file_dtos: Vec<FileDto> = files.into_iter().map(FileDto::from).collect();
-                    let mut enriched_files: Vec<SearchFileResultDto> = file_dtos
-                        .iter()
-                        .map(|f| Self::enrich_file(f, &query_lower))
+                    // Convert to DTOs and enrich with metadata — one fused
+                    // pass, no intermediate Vec<FileDto> materialization.
+                    let mut enriched_files: Vec<SearchFileResultDto> = files
+                        .into_iter()
+                        .map(|f| Self::enrich_file(FileDto::from(f), &query_lower))
                         .collect();
 
                     // Get folders for this folder (non-recursive, filtered in SQL)
@@ -645,13 +651,10 @@ impl SearchUseCase for SearchService {
                         )
                         .await?;
 
-                    let filtered_folders: Vec<FolderDto> =
-                        folders.into_iter().map(FolderDto::from).collect();
-
                     // For folders, apply sorting and pagination in memory (usually fewer folders)
-                    let mut enriched_folders: Vec<SearchFolderResultDto> = filtered_folders
-                        .iter()
-                        .map(|f| Self::enrich_folder(f, &query_lower))
+                    let mut enriched_folders: Vec<SearchFolderResultDto> = folders
+                        .into_iter()
+                        .map(|f| Self::enrich_folder(FolderDto::from(f), &query_lower))
                         .collect();
 
                     // Sort folders (cached_key avoids O(N log N) temporary String allocations)
@@ -732,17 +735,15 @@ impl SearchUseCase for SearchService {
                     .await?;
 
                 // ── Convert to DTOs and enrich with server-computed metadata ──
-                let file_dtos: Vec<FileDto> = found_files.into_iter().map(FileDto::from).collect();
-                let mut enriched_files: Vec<SearchFileResultDto> = file_dtos
-                    .iter()
-                    .map(|f| Self::enrich_file(f, &query_lower))
+                // Fused single pass: no intermediate DTO Vec materialization.
+                let mut enriched_files: Vec<SearchFileResultDto> = found_files
+                    .into_iter()
+                    .map(|f| Self::enrich_file(FileDto::from(f), &query_lower))
                     .collect();
 
-                let folder_dtos: Vec<FolderDto> =
-                    found_folders.into_iter().map(FolderDto::from).collect();
-                let mut enriched_folders: Vec<SearchFolderResultDto> = folder_dtos
-                    .iter()
-                    .map(|f| Self::enrich_folder(f, &query_lower))
+                let mut enriched_folders: Vec<SearchFolderResultDto> = found_folders
+                    .into_iter()
+                    .map(|f| Self::enrich_folder(FolderDto::from(f), &query_lower))
                     .collect();
 
                 // ── Sort folders (cached_key avoids O(N log N) temporary String allocations) ──
@@ -893,15 +894,15 @@ mod tests {
             name: name.to_string(),
             path: format!("/{name}"),
             size,
-            mime_type: "text/plain".to_string(),
+            mime_type: "text/plain".into(),
             folder_id: None,
             created_at: 0,
             modified_at,
             relevance_score: relevance,
             size_formatted: String::new(),
-            icon_class: String::new(),
-            icon_special_class: String::new(),
-            category: String::new(),
+            icon_class: "".into(),
+            icon_special_class: "".into(),
+            category: "".into(),
             blob_hash: String::new(),
             snippet: None,
             match_source: None,

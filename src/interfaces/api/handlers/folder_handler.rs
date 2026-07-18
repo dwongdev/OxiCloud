@@ -510,7 +510,7 @@ pub async fn list_folder_resources(
                         // listing's `etag` byte-equals what a
                         // conditional request would compare against.
                         let modified_at_u = row.modified_at.timestamp() as u64;
-                        let content_hash = row.blob_hash.clone().unwrap_or_default();
+                        let content_hash = row.blob_hash.unwrap_or_default();
                         let etag = if content_hash.is_empty() {
                             String::new()
                         } else {

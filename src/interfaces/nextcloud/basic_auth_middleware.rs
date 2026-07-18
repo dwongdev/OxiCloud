@@ -28,12 +28,16 @@ use crate::interfaces::middleware::auth::CurrentUser;
 /// default drive root, so no per-request authorization decision is being
 /// skipped. The drive-marker branch keeps its `get_folder_with_perms`
 /// check on every request.
-static NC_CHROOT_CACHE: LazyLock<moka::sync::Cache<uuid::Uuid, FolderDto>> = LazyLock::new(|| {
-    moka::sync::Cache::builder()
-        .max_capacity(100_000)
-        .time_to_live(Duration::from_secs(30))
-        .build()
-});
+// `Arc<FolderDto>` values: a hit hands back a refcount bump instead of a
+// deep clone of the DTO's ~5 owned Strings (moka's `get` clones `V`), and
+// the same `Arc` then rides inside `NcSession` for the whole request.
+static NC_CHROOT_CACHE: LazyLock<moka::sync::Cache<uuid::Uuid, Arc<FolderDto>>> =
+    LazyLock::new(|| {
+        moka::sync::Cache::builder()
+            .max_capacity(100_000)
+            .time_to_live(Duration::from_secs(30))
+            .build()
+    });
 
 #[derive(Debug, thiserror::Error)]
 pub enum NextcloudAuthError {
@@ -184,13 +188,19 @@ pub async fn basic_auth_middleware(
             // request would appear in the logs with `user_id=-`,
             // making it harder to correlate WebDAV / OCS activity to
             // a specific principal.
-            tracing::Span::current().record("user_id", user_id.to_string());
-            let current_user = CurrentUser {
+            // `field::display` renders lazily into the subscriber's buffer —
+            // no per-request `to_string` (mirrors the JWT path since ROUND5).
+            tracing::Span::current().record("user_id", tracing::field::display(user_id));
+            // One shared identity: the same `Arc` serves the
+            // `Arc<CurrentUser>` extension AND `NcSession.user` (the old
+            // code built the struct, cloned it for the extension, then
+            // moved the original — 2-3 String allocs per request).
+            let current_user = Arc::new(CurrentUser {
                 id: user_id,
                 username: uname,
                 email,
                 role,
-            };
+            });
 
             // ── Resolve chroot from the Basic Auth drive marker ─────
             // No marker → caller's default personal drive's root folder
@@ -226,9 +236,10 @@ pub async fn basic_auth_middleware(
                                         .folder_service
                                         .get_folder(&root_id.to_string())
                                         .await
-                                        .ok();
+                                        .ok()
+                                        .map(Arc::new);
                                     if let Some(f) = &fetched {
-                                        NC_CHROOT_CACHE.insert(root_id, f.clone());
+                                        NC_CHROOT_CACHE.insert(root_id, Arc::clone(f));
                                     }
                                     fetched
                                 }
@@ -242,7 +253,8 @@ pub async fn basic_auth_middleware(
                     .folder_service
                     .get_folder_with_perms(folder_id, current_user.id)
                     .await
-                    .ok(),
+                    .ok()
+                    .map(Arc::new),
             };
             if chroot.is_none() {
                 tracing::warn!(
@@ -253,25 +265,20 @@ pub async fn basic_auth_middleware(
                 return Err(NextcloudAuthError::Unauthorized);
             }
 
-            request
-                .extensions_mut()
-                .insert(Arc::new(current_user.clone()));
+            // Record from the local before it moves into the session —
+            // the old code re-read the just-inserted extension and paid a
+            // `to_string` for the span value.
+            if let Some(c) = &chroot {
+                tracing::Span::current().record("chroot_id", tracing::field::display(&c.id));
+            }
+            request.extensions_mut().insert(Arc::clone(&current_user));
             request.extensions_mut().insert(Arc::new(
                 crate::interfaces::nextcloud::session::NcSession {
                     user: current_user,
-                    raw_username: raw_username.clone(),
+                    raw_username,
                     chroot,
                 },
             ));
-            tracing::Span::current().record(
-                "chroot_id",
-                request
-                    .extensions()
-                    .get::<Arc<crate::interfaces::nextcloud::session::NcSession>>()
-                    .and_then(|s| s.chroot.as_ref())
-                    .map(|c| c.id.to_string())
-                    .unwrap_or_default(),
-            );
             Ok(next.run(request).await)
         }
         Err(_) => {

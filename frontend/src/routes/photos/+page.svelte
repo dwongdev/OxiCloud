@@ -94,15 +94,27 @@
 	// deps re-fire without an actual append, `sync` sees a non-growing list and
 	// safely full-rebuilds — same output as the pure `buildPhotoRows`.
 	const timeline = new PhotoTimeline();
+	// `mobile` as state fed by one MediaQueryList listener: the derive below
+	// re-runs on every page append, and `window.matchMedia(...)` inside it was
+	// a per-recompute style/layout read that only changes on viewport-class
+	// crossings — now those crossings push the boolean instead.
+	let isMobile = $state(false);
+	$effect(() => {
+		if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return;
+		const mql = window.matchMedia('(max-width: 768px)');
+		isMobile = mql.matches;
+		const onchange = (e: MediaQueryListEvent) => {
+			isMobile = e.matches;
+		};
+		mql.addEventListener('change', onchange);
+		return () => mql.removeEventListener('change', onchange);
+	});
 	const photoRows = $derived.by<PhotoRow[]>(() =>
 		timeline.sync(visibleItems, {
 			groupMode,
 			layoutMode,
 			width: gridWidth,
-			mobile:
-				typeof window !== 'undefined' &&
-				typeof window.matchMedia === 'function' &&
-				window.matchMedia('(max-width: 768px)').matches,
+			mobile: isMobile,
 			timestampOf: photoTimestamp,
 			labelOf: bucketLabel
 		})

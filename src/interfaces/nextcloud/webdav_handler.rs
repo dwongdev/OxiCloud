@@ -218,7 +218,7 @@ pub fn nc_href(username: &str, subpath: &str) -> String {
 pub async fn handle_nc_webdav(
     state: Arc<AppState>,
     req: Request<Body>,
-    session: crate::interfaces::nextcloud::session::NcSession,
+    session: crate::interfaces::nextcloud::session::SharedNcSession,
     subpath: String,
 ) -> Result<Response<Body>, AppError> {
     // Validate up-front that we have a chroot — every method below is
@@ -1566,19 +1566,29 @@ fn build_nc_streaming_propfind(
                 }
                 let batch_len = batch.len();
 
-                // Per-page enrichment: favorites + oc:fileids, two batch queries.
-                let favs = if let Some(fav) = fav_svc {
-                    let items: Vec<(&str, &str)> =
-                        batch.iter().map(|f| (f.id.as_str(), "file")).collect();
-                    fav.batch_check_favorites(user_id, &items).await.unwrap_or_default()
-                } else {
-                    HashSet::new()
-                };
+                // Per-page enrichment: favorites + oc:fileids + dead props —
+                // three independent reads over the same id batch, overlapped
+                // with `join!` so a page pays ~max(RTT) instead of 3×RTT
+                // (each query still batched per page: DEAD-PROPS.md). The
+                // round-7 deferred "serial pairs" item, adopted for this
+                // per-page triple after the injected-latency A/B in
+                // benches/ROUND9.md showed no local-PG regression.
+                let fav_items: Vec<(&str, &str)> =
+                    batch.iter().map(|f| (f.id.as_str(), "file")).collect();
                 let file_uuids: Vec<&str> = batch.iter().map(|f| f.id.as_str()).collect();
-                let (file_id_map, _) = batch_resolve_ids(file_id_svc, &file_uuids, &[]).await;
-                // One batched dead-props query per page, not one per child
-                // (benches/DEAD-PROPS.md).
-                let file_deads = files_dead_props_map(&state.webdav_dead_props, &batch).await;
+                let (favs, (file_id_map, _), file_deads) = tokio::join!(
+                    async {
+                        if let Some(fav) = fav_svc {
+                            fav.batch_check_favorites(user_id, &fav_items)
+                                .await
+                                .unwrap_or_default()
+                        } else {
+                            HashSet::new()
+                        }
+                    },
+                    batch_resolve_ids(file_id_svc, &file_uuids, &[]),
+                    files_dead_props_map(&state.webdav_dead_props, &batch),
+                );
 
                 let mut chunk = Vec::with_capacity(batch_len * 1024);
                 {
@@ -1624,18 +1634,23 @@ fn build_nc_streaming_propfind(
                     break;
                 }
 
-                let favs = if let Some(fav) = fav_svc {
-                    let items: Vec<(&str, &str)> =
-                        batch.iter().map(|sf| (sf.id.as_str(), "folder")).collect();
-                    fav.batch_check_favorites(user_id, &items).await.unwrap_or_default()
-                } else {
-                    HashSet::new()
-                };
+                // Same overlapped enrichment triple as the file pages above.
+                let fav_items: Vec<(&str, &str)> =
+                    batch.iter().map(|sf| (sf.id.as_str(), "folder")).collect();
                 let folder_uuids: Vec<&str> = batch.iter().map(|sf| sf.id.as_str()).collect();
-                let (_, sub_id_map) = batch_resolve_ids(file_id_svc, &[], &folder_uuids).await;
-                // Batched — see benches/DEAD-PROPS.md.
-                let sub_deads =
-                    folders_dead_props_map(&state.webdav_dead_props, &batch).await;
+                let (favs, (_, sub_id_map), sub_deads) = tokio::join!(
+                    async {
+                        if let Some(fav) = fav_svc {
+                            fav.batch_check_favorites(user_id, &fav_items)
+                                .await
+                                .unwrap_or_default()
+                        } else {
+                            HashSet::new()
+                        }
+                    },
+                    batch_resolve_ids(file_id_svc, &[], &folder_uuids),
+                    folders_dead_props_map(&state.webdav_dead_props, &batch),
+                );
 
                 let mut chunk = Vec::with_capacity(batch.len() * 1024);
                 {

@@ -498,21 +498,26 @@ impl DriveRepository for DrivePgRepository {
         // the trash. Trashed items don't count — owners can delete a
         // drive even when its trash bin still holds rows; the trash GC
         // will clean those up after the standard retention window.
-        let count: (i64,) = sqlx::query_as(
+        //
+        // EXISTS instead of COUNT(*): only emptiness is tested, so the
+        // planner stops at the first matching row — a populated drive
+        // answers from one index probe instead of aggregating every
+        // live file + folder it contains.
+        let occupied: (bool,) = sqlx::query_as(
             r#"
-            SELECT (
-                (SELECT COUNT(*) FROM storage.folders
-                  WHERE drive_id = $1 AND parent_id IS NOT NULL AND NOT is_trashed)
-              + (SELECT COUNT(*) FROM storage.files
-                  WHERE drive_id = $1 AND NOT is_trashed)
-            )
+            SELECT EXISTS(
+                SELECT 1 FROM storage.folders
+                 WHERE drive_id = $1 AND parent_id IS NOT NULL AND NOT is_trashed)
+              OR EXISTS(
+                SELECT 1 FROM storage.files
+                 WHERE drive_id = $1 AND NOT is_trashed)
             "#,
         )
         .bind(drive_id)
         .fetch_one(self.pool.as_ref())
         .await
         .map_err(|e| Self::map_sqlx_err("is_empty", e))?;
-        Ok(count.0 == 0)
+        Ok(!occupied.0)
     }
 
     async fn delete_atomic(&self, drive_id: Uuid) -> Result<(), DriveRepositoryError> {

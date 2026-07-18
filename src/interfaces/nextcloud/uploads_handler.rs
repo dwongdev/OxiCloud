@@ -110,7 +110,7 @@ async fn session_bytes_so_far(
 pub async fn handle_nc_uploads(
     state: Arc<AppState>,
     req: Request<Body>,
-    session: crate::interfaces::nextcloud::session::NcSession,
+    session: crate::interfaces::nextcloud::session::SharedNcSession,
     upload_id: String,
     rest: String, // chunk name or ".file" or empty
 ) -> Result<Response<Body>, AppError> {

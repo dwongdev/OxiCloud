@@ -159,6 +159,43 @@ impl BlobStorageBackend for RetryBlobBackend {
         })
     }
 
+    // Without this override the trait default would re-route the CDC chunk
+    // write through `put_blob_from_bytes` above — reinstating the remote
+    // backend's exists-probe (HEAD/get_properties) per chunk that the
+    // `_unsynced` fast path exists to skip.
+    fn put_blob_from_bytes_unsynced(
+        &self,
+        hash: &str,
+        data: Bytes,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<u64, DomainError>> + Send + '_>> {
+        let inner = self.inner.clone();
+        let policy = self.policy.clone();
+        let hash = hash.to_string();
+        Box::pin(async move {
+            retry_async(
+                &policy,
+                &format!("put_blob_from_bytes_unsynced({hash})"),
+                || {
+                    let inner = inner.clone();
+                    let hash = hash.clone();
+                    let data = data.clone();
+                    async move { inner.put_blob_from_bytes_unsynced(&hash, data).await }
+                },
+            )
+            .await
+        })
+    }
+
+    // Forwarded WITHOUT retry wrapping: a failed fsync must surface, not be
+    // re-issued — after an fsync error the kernel may have dropped the dirty
+    // pages, so a retried fsync can report success for data that was lost.
+    fn sync_blobs(
+        &self,
+        hashes: &[String],
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), DomainError>> + Send + '_>> {
+        self.inner.sync_blobs(hashes)
+    }
+
     fn get_blob_stream(
         &self,
         hash: &str,

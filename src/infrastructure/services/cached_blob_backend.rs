@@ -187,20 +187,46 @@ impl BlobStorageBackend for CachedBlobBackend {
         };
         Box::pin(async move {
             let size = inner.put_blob_from_bytes(&hash, data.clone()).await?;
-            // Also cache locally (best-effort): write bytes to cache path
-            let dest = self_ref.cached_path(&hash);
-            if let Some(parent) = dest.parent() {
-                let _ = fs::create_dir_all(parent).await;
-            }
-            let _ = fs::write(&dest, &data).await;
-            let data_len = data.len() as u64;
-            let mut idx = self_ref.index.lock().await;
-            if let Some(old) = idx.put(hash, CacheEntry { size: data_len }) {
-                self_ref.current_size.fetch_sub(old.size, Ordering::Relaxed);
-            }
-            self_ref.current_size.fetch_add(data_len, Ordering::Relaxed);
+            self_ref.cache_bytes_write_through(hash, &data).await;
             Ok(size)
         })
+    }
+
+    // Without this override the trait default would re-route the CDC chunk
+    // write through `put_blob_from_bytes` above, whose inner (synced) call
+    // pays the remote exists-probe per chunk. The local write-through cache
+    // population is kept identical — post-upload readers (thumbnail/EXIF/
+    // face hooks) hit the cache instead of re-fetching from the remote.
+    fn put_blob_from_bytes_unsynced(
+        &self,
+        hash: &str,
+        data: Bytes,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<u64, DomainError>> + Send + '_>> {
+        let inner = self.inner.clone();
+        let hash = hash.to_string();
+        let self_ref = CachedRef {
+            cache_dir: self.cache_dir.clone(),
+            max_cache_bytes: self.max_cache_bytes,
+            index: self.index.clone(),
+            current_size: self.current_size.clone(),
+            inflight: self.inflight.clone(),
+        };
+        Box::pin(async move {
+            let size = inner
+                .put_blob_from_bytes_unsynced(&hash, data.clone())
+                .await?;
+            self_ref.cache_bytes_write_through(hash, &data).await;
+            Ok(size)
+        })
+    }
+
+    // The durability barrier must reach the backend that buffered the
+    // unsynced writes; the local cache copy is disposable and needs none.
+    fn sync_blobs(
+        &self,
+        hashes: &[String],
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<(), DomainError>> + Send + '_>> {
+        self.inner.sync_blobs(hashes)
     }
 
     fn get_blob_stream(
@@ -435,6 +461,24 @@ impl CachedRef {
     fn cached_path(&self, hash: &str) -> PathBuf {
         let prefix = &hash[..2.min(hash.len())];
         self.cache_dir.join(prefix).join(format!("{hash}.blob"))
+    }
+
+    /// Best-effort write-through cache population shared by both blob-bytes
+    /// PUT paths. Deliberately no eviction sweep here — the byte budget is
+    /// enforced on read-miss inserts (`insert_into_cache_static`), matching
+    /// the historical write-path behavior.
+    async fn cache_bytes_write_through(&self, hash: String, data: &Bytes) {
+        let dest = self.cached_path(&hash);
+        if let Some(parent) = dest.parent() {
+            let _ = fs::create_dir_all(parent).await;
+        }
+        let _ = fs::write(&dest, data).await;
+        let data_len = data.len() as u64;
+        let mut idx = self.index.lock().await;
+        if let Some(old) = idx.put(hash, CacheEntry { size: data_len }) {
+            self.current_size.fetch_sub(old.size, Ordering::Relaxed);
+        }
+        self.current_size.fetch_add(data_len, Ordering::Relaxed);
     }
 
     /// Single-flight wrapper around [`Self::fetch_and_cache_static`]: the

@@ -128,16 +128,39 @@ async fn fsync_paths_parallel(paths: Vec<PathBuf>, strict: bool) -> Result<(), D
 /// (fsync now vs. deferred batch sync), or `None` when the blob already
 /// existed (idempotent skip — content-addressed, so identical by definition).
 async fn write_blob_bytes(blob_path: &Path, data: &Bytes) -> Result<Option<File>, DomainError> {
-    if fs::try_exists(blob_path).await.unwrap_or(false) {
-        return Ok(None);
-    }
-    let mut file = fs::File::create(blob_path).await.map_err(|e| {
-        DomainError::internal_error("Blob", format!("Failed to create blob file: {}", e))
-    })?;
+    // One atomic O_CREAT|O_EXCL open replaces the old stat-then-create pair:
+    // `AlreadyExists` IS the idempotent skip (content-addressed names mean an
+    // existing file has identical content), saving a syscall + a blocking-pool
+    // dispatch on every new chunk of every upload.
+    let mut file = match fs::File::options()
+        .write(true)
+        .create_new(true)
+        .open(blob_path)
+        .await
+    {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(None),
+        Err(e) => {
+            return Err(DomainError::internal_error(
+                "Blob",
+                format!("Failed to create blob file: {}", e),
+            ));
+        }
+    };
     file.write_all(data).await.map_err(|e| {
         DomainError::internal_error("Blob", format!("Failed to write blob from bytes: {}", e))
     })?;
     Ok(Some(file))
+}
+
+/// Bench-only public wrapper (feature = "bench") over the private chunk
+/// writer so `examples/bench_storage_micro.rs` can A/B the open strategy.
+#[cfg(feature = "bench")]
+pub async fn write_blob_bytes_for_bench(
+    blob_path: &Path,
+    data: &Bytes,
+) -> Result<Option<File>, DomainError> {
+    write_blob_bytes(blob_path, data).await
 }
 
 /// Compile-time lookup table for the 256 two-digit lowercase hex prefixes ("00"…"ff").

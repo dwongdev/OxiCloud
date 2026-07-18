@@ -35,20 +35,51 @@ fn ocs_err(statuscode: u16, message: &str) -> serde_json::Value {
 }
 
 pub async fn handle_capabilities_v1(State(state): State<Arc<AppState>>) -> Response {
-    let payload = capabilities_payload(&state, 1);
     tracing::info!("[NC] capabilities v1 requested, returning payload");
-    Json(payload).into_response()
+    capabilities_response(&state, 1)
 }
 
 pub async fn handle_capabilities_v2(State(state): State<Arc<AppState>>) -> Response {
-    let payload = capabilities_payload(&state, 2);
     tracing::info!("[NC] capabilities v2 requested, returning payload");
-    Json(payload).into_response()
+    capabilities_response(&state, 2)
+}
+
+/// Pre-serialized capabilities bodies, `[v1, v2]`. The payload is
+/// process-invariant (pure config: base URL + emulated NC version), yet
+/// every desktop/mobile client polls it periodically — the old handler
+/// re-built the ~40-node `json!` tree, re-read `OXICLOUD_BASE_URL` from
+/// the environment and re-serialized on every poll. Now that work runs
+/// once; a poll is a `Bytes` refcount bump.
+static CAPABILITIES_BODIES: std::sync::OnceLock<[bytes::Bytes; 2]> = std::sync::OnceLock::new();
+
+fn capabilities_response(state: &AppState, ocs_version: u8) -> Response {
+    let bodies = CAPABILITIES_BODIES.get_or_init(|| {
+        let base_url = state.core.config.base_url();
+        let emulated = state.core.config.nextcloud.emulated_version;
+        let version_string = state.core.config.nextcloud.version_string();
+        [1u8, 2u8].map(|v| {
+            bytes::Bytes::from(
+                serde_json::to_vec(&capabilities_payload(
+                    &base_url,
+                    emulated,
+                    &version_string,
+                    v,
+                ))
+                .expect("static capabilities JSON serializes"),
+            )
+        })
+    });
+    let body = bodies[usize::from(ocs_version != 1)].clone();
+    (
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        body,
+    )
+        .into_response()
 }
 
 pub async fn handle_user_info(
     State(state): State<Arc<AppState>>,
-    session: crate::interfaces::nextcloud::session::NcSession,
+    session: crate::interfaces::nextcloud::session::SharedNcSession,
 ) -> Response {
     let quota: (i64, i64) = match state.storage_usage_service.as_ref() {
         Some(service) => match service.get_user_storage_info(session.user.id).await {
@@ -530,11 +561,19 @@ fn empty_search_response() -> Json<serde_json::Value> {
     }))
 }
 
-fn capabilities_payload(state: &AppState, ocs_version: u8) -> serde_json::Value {
+/// Build the capabilities JSON tree from its three config inputs. Public
+/// only under the `bench` feature caller path via
+/// [`capabilities_payload_for_bench`]; production reaches it once through
+/// the [`CAPABILITIES_BODIES`] init.
+fn capabilities_payload(
+    base_url: &str,
+    emulated_version: (u32, u32, u32),
+    version_string: &str,
+    ocs_version: u8,
+) -> serde_json::Value {
     let statuscode = if ocs_version == 1 { 100 } else { 200 };
-    let base_url = state.core.config.base_url();
-    let (nc_major, nc_minor, nc_micro) = state.core.config.nextcloud.emulated_version;
-    let nc_version_str = state.core.config.nextcloud.version_string();
+    let (nc_major, nc_minor, nc_micro) = emulated_version;
+    let nc_version_str = version_string;
 
     json!({
         "ocs": {
@@ -600,6 +639,19 @@ fn capabilities_payload(state: &AppState, ocs_version: u8) -> serde_json::Value 
             }
         }
     })
+}
+
+/// Bench-only public wrapper (feature = "bench") over the private payload
+/// builder so `examples/bench_capabilities_static.rs` can A/B the
+/// rebuild-per-poll flow against the memoized bytes.
+#[cfg(feature = "bench")]
+pub fn capabilities_payload_for_bench(
+    base_url: &str,
+    emulated_version: (u32, u32, u32),
+    version_string: &str,
+    ocs_version: u8,
+) -> serde_json::Value {
+    capabilities_payload(base_url, emulated_version, version_string, ocs_version)
 }
 
 fn extract_basic_password(headers: &axum::http::HeaderMap) -> Option<String> {
