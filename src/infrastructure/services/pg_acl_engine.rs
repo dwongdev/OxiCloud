@@ -103,6 +103,19 @@ const DRIVE_POLICIES_CACHE_CAPACITY: u64 = 100_000;
 /// effective within a minute on the hot path.
 const DRIVE_POLICIES_CACHE_TTL: Duration = Duration::from_secs(30);
 
+/// `cascade_grant_cache` bound: entries are
+/// `((Subject, Resource, Permission), bool)` — a few tens of bytes each. A
+/// shared photo album is one folder grant serving hundreds of file checks, so
+/// 100k comfortably covers the working set of active shared-resource viewers.
+const CASCADE_GRANT_CACHE_CAPACITY: u64 = 100_000;
+/// `cascade_grant_cache` TTL. Direct grant mutations on the file/folder
+/// (`set_role` / `clear_role`) explicitly invalidate the whole cache, so the
+/// TTL is the self-heal net for the *indirect* paths — a group-membership
+/// change, a resource move, or a grant's `expires_at` passing — exactly as
+/// `drive_role_cache` leans on its TTL for group changes "rather than a deep
+/// invalidation tree". Short enough that any such change takes effect in <1 min.
+const CASCADE_GRANT_CACHE_TTL: Duration = Duration::from_secs(30);
+
 pub struct PgAclEngine {
     pool: Arc<PgPool>,
     folder_repo: Arc<FolderDbRepository>,
@@ -160,6 +173,35 @@ pub struct PgAclEngine {
     /// returns, so the next check sees the fresh values. Short 30 s TTL
     /// as the self-heal net for direct-SQL edits and migration backfills.
     drive_policies_cache: Cache<Uuid, DrivePolicies>,
+
+    /// Memoise the File/Folder **grant-cascade** decision
+    /// `(subject, resource, permission) → bool` — the result of the
+    /// `role_grants` + folder-ancestor (`lpath @>`) cascade that
+    /// `check_inner` falls through to when the drive-role precheck doesn't
+    /// cover the caller. This is the per-request query a shared-album
+    /// recipient (a grant on the containing folder, no drive membership) pays
+    /// for **every thumbnail** — and browsers revalidate immutable thumbnails
+    /// constantly, so the same `(subject, file, Read)` decision is recomputed
+    /// again and again. Cached here it costs one query then in-memory hits.
+    ///
+    /// Only reached AFTER the drive-role precheck fails, so a caller who is a
+    /// drive member short-circuits above and never populates a (possibly
+    /// negative) entry here — a later drive grant can't be shadowed by a stale
+    /// cascade `false`.
+    ///
+    /// **Invalidation**: explicit `invalidate_all` on every File/Folder
+    /// `set_role` / `clear_role` (the direct share/revoke path — infrequent
+    /// relative to thumbnail reads, so a full flush is cheap and keeps
+    /// revocation immediate). The indirect paths — group-membership changes,
+    /// resource moves that change ancestry, grant `expires_at` expiry — are
+    /// caught by the 30 s TTL, matching `drive_role_cache`'s documented
+    /// convention.
+    ///
+    /// **Safety**: the check still runs on every request (the ordering is
+    /// unchanged — authz is never skipped); only its *result* is memoised, and
+    /// only positively-or-negatively for at most the TTL. A revoke via
+    /// `clear_role` flushes immediately; anything missed self-heals in ≤30 s.
+    cascade_grant_cache: Cache<(Subject, Resource, Permission), bool>,
 }
 
 impl PgAclEngine {
@@ -196,6 +238,10 @@ impl PgAclEngine {
             drive_policies_cache: Cache::builder()
                 .max_capacity(DRIVE_POLICIES_CACHE_CAPACITY)
                 .time_to_live(DRIVE_POLICIES_CACHE_TTL)
+                .build(),
+            cascade_grant_cache: Cache::builder()
+                .max_capacity(CASCADE_GRANT_CACHE_CAPACITY)
+                .time_to_live(CASCADE_GRANT_CACHE_TTL)
                 .build(),
         }
     }
@@ -264,6 +310,10 @@ impl PgAclEngine {
                 .time_to_live(Duration::from_secs(1))
                 .build(),
             drive_policies_cache: Cache::builder()
+                .max_capacity(1)
+                .time_to_live(Duration::from_secs(1))
+                .build(),
+            cascade_grant_cache: Cache::builder()
                 .max_capacity(1)
                 .time_to_live(Duration::from_secs(1))
                 .build(),
@@ -356,6 +406,20 @@ impl PgAclEngine {
     /// bug that returned `NotFound` for legitimate Delete.
     pub async fn invalidate_owner_cache_all(&self) {
         self.owner_cache.invalidate_all();
+    }
+
+    /// Flush the entire `cascade_grant_cache`. Called on every File/Folder
+    /// `set_role` / `clear_role` — the direct share/revoke path. A resource
+    /// grant can widen (or, via ancestry, narrow) the cascade decision for an
+    /// unbounded set of descendant files, and the cache is keyed by the
+    /// decision — not the grant — so we can't target the affected entries
+    /// without walking the subtree. A full flush is correct and cheap here:
+    /// grant mutations are rare next to the thumbnail reads the cache serves,
+    /// and it keeps a revoke immediate. Indirect changes (group membership,
+    /// resource moves, grant expiry) are left to the 30 s TTL, mirroring
+    /// `drive_role_cache`.
+    pub async fn invalidate_cascade_grant_cache_all(&self) {
+        self.cascade_grant_cache.invalidate_all();
     }
 
     /// Sibling of [`Self::invalidate_drive_role_cache_for_drive`] keyed by
@@ -709,6 +773,63 @@ impl PgAclEngine {
         Ok(exists.is_some())
     }
 
+    /// Cache-aware wrapper over the File/Folder grant cascade. Serves the
+    /// memoised `(subject, resource, permission)` decision when warm; on a
+    /// miss it expands the subject set (itself cached) and runs the matching
+    /// cascade query, then stores the result. Only invoked after the drive-role
+    /// precheck fails, so it never caches a decision a drive grant would have
+    /// satisfied — a later drive grant short-circuits above this cache.
+    ///
+    /// The result is a pure function of the subject's group expansion + the
+    /// resource's grants + folder ancestry; `invalidate_cascade_grant_cache_all`
+    /// (on File/Folder grant writes) and the 30 s TTL (indirect changes) keep
+    /// it fresh. See the `cascade_grant_cache` field doc.
+    async fn cascade_grant_cached(
+        &self,
+        subject: Subject,
+        resource: Resource,
+        permission: Permission,
+        counters: &QueryCounters,
+    ) -> Result<bool, DomainError> {
+        if let Some(allowed) = self
+            .cascade_grant_cache
+            .get(&(subject, resource, permission))
+            .await
+        {
+            counters.cache_hit.fetch_add(1, Ordering::Relaxed);
+            return Ok(allowed);
+        }
+        let (subject_types, subject_ids) = self.subject_match_set(subject, counters).await?;
+        let allowed = match resource {
+            Resource::Folder(id) => {
+                self.folder_cascade_grant_exists(
+                    &subject_types,
+                    &subject_ids,
+                    permission,
+                    id,
+                    counters,
+                )
+                .await?
+            }
+            Resource::File(id) => {
+                self.file_cascade_grant_exists(
+                    &subject_types,
+                    &subject_ids,
+                    permission,
+                    id,
+                    counters,
+                )
+                .await?
+            }
+            // Only File/Folder reach this helper (see `check_inner`).
+            _ => return Ok(false),
+        };
+        self.cascade_grant_cache
+            .insert((subject, resource, permission), allowed)
+            .await;
+        Ok(allowed)
+    }
+
     /// Cached resolution of `(subject, drive_id) → Option<Role>` — the
     /// strongest role the subject holds on the drive (direct + transitive
     /// group grants collapsed). `None` means no qualifying grant; cached
@@ -972,32 +1093,15 @@ impl PgAclEngine {
         }
 
         match resource {
-            // File/Folder dispatch falls through to the cascade query —
-            // expand the subject set lazily here (it's cached) so the
-            // Drive branch below never pays for an expansion it doesn't need.
-            Resource::Folder(id) => {
-                let (subject_types, subject_ids) =
-                    self.subject_match_set(subject, counters).await?;
-                self.folder_cascade_grant_exists(
-                    &subject_types,
-                    &subject_ids,
-                    permission,
-                    id,
-                    counters,
-                )
-                .await
-            }
-            Resource::File(id) => {
-                let (subject_types, subject_ids) =
-                    self.subject_match_set(subject, counters).await?;
-                self.file_cascade_grant_exists(
-                    &subject_types,
-                    &subject_ids,
-                    permission,
-                    id,
-                    counters,
-                )
-                .await
+            // File/Folder dispatch falls through to the cascade query, now
+            // memoised: a shared-album recipient (folder grant, no drive
+            // membership) reaches this per thumbnail, and browsers revalidate
+            // thumbnails constantly, so the same decision is recomputed over
+            // and over. `cascade_grant_cached` serves it from memory after the
+            // first query; the check is unchanged (never skipped), only cached.
+            Resource::Folder(_) | Resource::File(_) => {
+                self.cascade_grant_cached(subject, resource, permission, counters)
+                    .await
             }
             Resource::Drive(id) => {
                 // Same read_only gate as the File/Folder branch: a frozen
@@ -2413,6 +2517,12 @@ impl AuthorizationEngine for PgAclEngine {
         if let Resource::Drive(drive_id) = resource {
             self.invalidate_drive_role_cache_for_drive(drive_id).await;
         }
+        // File/Folder grant write — a new share can widen the cascade
+        // decision for descendant files; flush the cascade cache so the next
+        // thumbnail/read check sees it immediately.
+        if matches!(resource, Resource::File(_) | Resource::Folder(_)) {
+            self.invalidate_cascade_grant_cache_all().await;
+        }
 
         Self::row_to_grant(row)
     }
@@ -2436,6 +2546,11 @@ impl AuthorizationEngine for PgAclEngine {
         // keep passing the precheck for up to 30 s.
         if let Resource::Drive(drive_id) = resource {
             self.invalidate_drive_role_cache_for_drive(drive_id).await;
+        }
+        // Revoking a File/Folder share must stop passing the cascade check
+        // now, not in ≤30 s — flush the cascade cache (see `set_role`).
+        if matches!(resource, Resource::File(_) | Resource::Folder(_)) {
+            self.invalidate_cascade_grant_cache_all().await;
         }
 
         Ok(())

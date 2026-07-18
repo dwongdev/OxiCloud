@@ -1455,8 +1455,7 @@ async fn write_nc_file_multistatus<W: std::io::Write>(
     extras: (&HashSet<String>, &[(QualifiedName, Option<String>)]),
 ) -> Result<(), String> {
     let (favorite_ids, dead_props) = extras;
-    let (file_id_map, _) =
-        batch_resolve_ids(file_id_svc, std::slice::from_ref(&file.id), &[]).await;
+    let (file_id_map, _) = batch_resolve_ids(file_id_svc, &[file.id.as_str()], &[]).await;
 
     let mut xml = Writer::new(writer);
     write_nc_multistatus_open(&mut xml)?;
@@ -1467,7 +1466,7 @@ async fn write_nc_file_multistatus<W: std::io::Write>(
     // shares the requested URL's prefix. `username` is the canonical
     // identity for the `oc:owner-id` field.
     let href = nc_href(url_user, subpath);
-    let file_id = file_id_map.get(&file.id).copied();
+    let file_id = nc_id_of(&file_id_map, &file.id);
     let oc_id = file_id.map(|id| format_oc_id(id, file_id_svc));
     write_file_response(
         &mut xml,
@@ -1519,7 +1518,7 @@ fn build_nc_streaming_propfind(
             HashSet::new()
         };
         let (_, folder_id_map) =
-            batch_resolve_ids(file_id_svc, &[], std::slice::from_ref(&folder.id)).await;
+            batch_resolve_ids(file_id_svc, &[], &[folder.id.as_str()]).await;
         let folder_dead = folder_dead_props(&state.webdav_dead_props, &folder).await;
 
         let mut buf = Vec::with_capacity(4096);
@@ -1527,7 +1526,7 @@ fn build_nc_streaming_propfind(
             let mut xml = Writer::new(&mut buf);
             write_nc_multistatus_open(&mut xml).map_err(std::io::Error::other)?;
             let href = nc_collection_href(&username, &subpath);
-            let fid = folder_id_map.get(&folder.id).copied();
+            let fid = nc_id_of(&folder_id_map, &folder.id);
             let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
             write_folder_response(&mut xml, &folder, &href, (fid, oc_id.as_deref()), &username, &folder_favs, quota, &folder_dead)
                 .map_err(std::io::Error::other)?;
@@ -1575,7 +1574,7 @@ fn build_nc_streaming_propfind(
                 } else {
                     HashSet::new()
                 };
-                let file_uuids: Vec<String> = batch.iter().map(|f| f.id.clone()).collect();
+                let file_uuids: Vec<&str> = batch.iter().map(|f| f.id.as_str()).collect();
                 let (file_id_map, _) = batch_resolve_ids(file_id_svc, &file_uuids, &[]).await;
                 // One batched dead-props query per page, not one per child
                 // (benches/DEAD-PROPS.md).
@@ -1592,7 +1591,7 @@ fn build_nc_streaming_propfind(
                         // re-encoded both for every child).
                         let href =
                             format!("{}{}", child_href_prefix, urlencoding::encode(&file.name));
-                        let fid = file_id_map.get(&file.id).copied();
+                        let fid = nc_id_of(&file_id_map, &file.id);
                         let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
                         write_file_response(&mut xml, file, &href, (fid, oc_id.as_deref()), &username, &favs, dead)
                             .map_err(std::io::Error::other)?;
@@ -1632,7 +1631,7 @@ fn build_nc_streaming_propfind(
                 } else {
                     HashSet::new()
                 };
-                let folder_uuids: Vec<String> = batch.iter().map(|sf| sf.id.clone()).collect();
+                let folder_uuids: Vec<&str> = batch.iter().map(|sf| sf.id.as_str()).collect();
                 let (_, sub_id_map) = batch_resolve_ids(file_id_svc, &[], &folder_uuids).await;
                 // Batched — see benches/DEAD-PROPS.md.
                 let sub_deads =
@@ -1647,7 +1646,7 @@ fn build_nc_streaming_propfind(
                         // precomputed once like the file loop above.
                         let href =
                             format!("{}{}/", child_href_prefix, urlencoding::encode(&sf.name));
-                        let fid = sub_id_map.get(&sf.id).copied();
+                        let fid = nc_id_of(&sub_id_map, &sf.id);
                         let oc_id = fid.map(|id| format_oc_id(id, file_id_svc));
                         write_folder_response(&mut xml, sf, &href, (fid, oc_id.as_deref()), &username, &favs, quota, dead)
                             .map_err(std::io::Error::other)?;
@@ -1959,14 +1958,15 @@ pub fn write_text_element<W: std::io::Write>(
 
 /// Resolve every `oc:fileid` for a listing in two batch queries (one per
 /// object type) instead of one INSERT round-trip per child. Returns
-/// `(file_map, folder_map)` keyed by object UUID; entries are absent when the
-/// service is disabled or an id can't be resolved, mirroring the previous
-/// per-call `Option` behaviour. The two batches run concurrently.
+/// `(file_map, folder_map)` keyed by parsed object UUID; entries are absent
+/// when the service is disabled or an id can't be resolved, mirroring the
+/// previous per-call `Option` behaviour. The two batches run concurrently.
+/// Borrowed inputs + `Uuid` keys keep the whole resolution alloc-free.
 pub async fn batch_resolve_ids(
     svc: Option<&Arc<NextcloudFileIdService>>,
-    file_uuids: &[String],
-    folder_uuids: &[String],
-) -> (HashMap<String, i64>, HashMap<String, i64>) {
+    file_uuids: &[&str],
+    folder_uuids: &[&str],
+) -> (HashMap<Uuid, i64>, HashMap<Uuid, i64>) {
     let Some(svc) = svc else {
         return (HashMap::new(), HashMap::new());
     };
@@ -1975,6 +1975,11 @@ pub async fn batch_resolve_ids(
         svc.get_or_create_folder_ids(folder_uuids),
     );
     (files.unwrap_or_default(), folders.unwrap_or_default())
+}
+
+/// Look up a batch-resolved `oc:fileid` by a DTO's string UUID.
+pub fn nc_id_of(map: &HashMap<Uuid, i64>, id: &str) -> Option<i64> {
+    Uuid::parse_str(id).ok().and_then(|u| map.get(&u).copied())
 }
 
 pub fn format_oc_id(id: i64, svc: Option<&Arc<NextcloudFileIdService>>) -> String {

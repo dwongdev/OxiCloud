@@ -419,8 +419,8 @@ impl IncrementalHasher {
 
     fn finalize_hex(self) -> String {
         match self {
-            Self::Md5(h) => h.finalize().iter().map(|b| format!("{b:02x}")).collect(),
-            Self::Sha256(h) => h.finalize().iter().map(|b| format!("{b:02x}")).collect(),
+            Self::Md5(h) => crate::common::fmt::hex_lower(&h.finalize()),
+            Self::Sha256(h) => crate::common::fmt::hex_lower(&h.finalize()),
             Self::Blake3(h) => h.finalize().to_hex().to_string(),
         }
     }

@@ -350,6 +350,62 @@ name = "bench_micro_allocs"
 path = "examples/bench_micro_allocs.rs"
 required-features = ["bench"]
 
+# Round-8 battery ─────────────────────────────────────────────────────────────
+
+# Shared-album thumbnail authz — folder-grant cascade query per thumbnail vs
+# the cascade_grant_cache; includes a revocation safety gate (needs the dev
+# Postgres up).
+[[example]]
+name = "bench_thumbnail_cascade_cache"
+path = "examples/bench_thumbnail_cascade_cache.rs"
+required-features = ["bench"]
+
+# Round-7 battery ─────────────────────────────────────────────────────────────
+
+# Range-seek per-request authz duplication — the per-seek require the range
+# branch used to run (warm CPU + cold drive-resolve query) vs 0 after routing
+# through the non-perms range read (needs the dev Postgres up).
+[[example]]
+name = "bench_range_seek_authz"
+path = "examples/bench_range_seek_authz.rs"
+required-features = ["bench"]
+
+# `/api/folders/{id}/resources` row→DTO mapping — per-row name clone vs move
+# (pure CPU; counting allocator).
+[[example]]
+name = "bench_resource_row_map"
+path = "examples/bench_resource_row_map.rs"
+required-features = ["bench"]
+
+# Round-6 battery ─────────────────────────────────────────────────────────────
+
+# CardDAV whole-book REPORT/PROPFIND — buffered double-residency vs cursor
+# streaming; TTFB + peak live heap (needs the dev Postgres up).
+[[example]]
+name = "bench_carddav_stream"
+path = "examples/bench_carddav_stream.rs"
+required-features = ["bench"]
+
+# Batch-favorites authz pre-check — serial require loop vs try_join_all
+# against the real PgAclEngine (needs the dev Postgres up).
+[[example]]
+name = "bench_favorites_authz"
+path = "examples/bench_favorites_authz.rs"
+required-features = ["bench"]
+
+# Digest-hex rendering + NC id-batch marshalling micro-allocs (pure CPU).
+[[example]]
+name = "bench_hex_ids"
+path = "examples/bench_hex_ids.rs"
+required-features = ["bench"]
+
+# `id::text` server cast vs binary UUID decode + app-side formatting A/B
+# (needs the dev Postgres up).
+[[example]]
+name = "bench_uuid_text_cast"
+path = "examples/bench_uuid_text_cast.rs"
+required-features = ["bench"]
+
 # Round-3 battery ─────────────────────────────────────────────────────────────
 
 # Web-UI folder listing — whole-folder rescan + top-N sort per page vs keyset

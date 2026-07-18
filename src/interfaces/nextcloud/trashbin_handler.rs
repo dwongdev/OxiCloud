@@ -15,7 +15,7 @@ use crate::application::ports::trash_ports::TrashUseCase;
 use crate::common::di::AppState;
 use crate::interfaces::errors::AppError;
 use crate::interfaces::nextcloud::webdav_handler::{
-    batch_resolve_ids, extract_nc_subpath_from_dest, format_oc_id, nc_to_internal_path,
+    batch_resolve_ids, extract_nc_subpath_from_dest, format_oc_id, nc_id_of, nc_to_internal_path,
     write_text_element,
 };
 
@@ -308,6 +308,7 @@ fn strip_home_prefix<'a>(
 use crate::application::dtos::trash_dto::TrashedItemDto;
 use crate::application::services::nextcloud_file_id_service::NextcloudFileIdService;
 use std::collections::HashMap;
+use uuid::Uuid;
 
 /// Generate a complete Nextcloud-compatible multistatus XML response for the trashbin.
 ///
@@ -337,14 +338,14 @@ async fn write_trashbin_multistatus<W: std::io::Write>(
 
     // Pre-resolve every oc:fileid in two batch queries by object type (was one
     // INSERT round-trip per item). File and folder UUIDs are disjoint, so the
-    // two maps merge cleanly into one keyed by original_id.
-    let mut file_uuids: Vec<String> = Vec::new();
-    let mut folder_uuids: Vec<String> = Vec::new();
+    // two maps merge cleanly into one keyed by parsed original-id UUID.
+    let mut file_uuids: Vec<&str> = Vec::new();
+    let mut folder_uuids: Vec<&str> = Vec::new();
     for item in items {
         if item.item_type == "folder" {
-            folder_uuids.push(item.original_id.clone());
+            folder_uuids.push(item.original_id.as_str());
         } else {
-            file_uuids.push(item.original_id.clone());
+            file_uuids.push(item.original_id.as_str());
         }
     }
     let (mut id_map, folder_id_map) =
@@ -427,7 +428,7 @@ fn write_trash_item_response<W: std::io::Write>(
     username: &str,
     chroot: &crate::application::dtos::folder_dto::FolderDto,
     file_id_svc: Option<&Arc<NextcloudFileIdService>>,
-    id_map: &HashMap<String, i64>,
+    id_map: &HashMap<Uuid, i64>,
 ) -> Result<(), String> {
     xml.write_event(Event::Start(BytesStart::new("d:response")))
         .map_err(|e| e.to_string())?;
@@ -475,7 +476,7 @@ fn write_trash_item_response<W: std::io::Write>(
     write_text_element(xml, "d:getcontentlength", "0")?;
 
     // oc:fileid and oc:id — resolved up front in a batch query.
-    let file_id = id_map.get(&item.original_id).copied();
+    let file_id = nc_id_of(id_map, &item.original_id);
     if let Some(id) = file_id {
         write_text_element(xml, "oc:fileid", &id.to_string())?;
         let oc_id = format_oc_id(id, file_id_svc);

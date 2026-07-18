@@ -232,17 +232,18 @@ pub async fn access_shared_item(
     Path(token): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    // Register the access
-    let _ = share_use_case.register_shared_link_access(&token).await;
-
     // Honour an unlock cookie if one was issued by a prior `/verify` call.
     let unlock_jwt = unlock_jwt_from_headers(&headers, &token);
 
-    // Get the shared link
-    match share_use_case
-        .get_shared_link_with_unlock(&token, unlock_jwt.as_deref())
-        .await
-    {
+    // The access-count increment doesn't gate the fetch — run both
+    // round-trips concurrently instead of serially (one RTT saved on
+    // every public share landing).
+    let (_, item) = tokio::join!(
+        share_use_case.register_shared_link_access(&token),
+        share_use_case.get_shared_link_with_unlock(&token, unlock_jwt.as_deref()),
+    );
+
+    match item {
         Ok(item) => (StatusCode::OK, Json(item)).into_response(),
         Err(err) => {
             // Special handling for share access errors

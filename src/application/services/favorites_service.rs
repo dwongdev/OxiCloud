@@ -145,6 +145,12 @@ impl FavoritesUseCase for FavoritesService {
         // valid (partial success would leak the same oracle we
         // closed on the single-item path). See
         // `docs/plan/authz_audit/rest_storage.md`.
+        //
+        // Deliberately serial: a `try_join_all` fan-out measured WORSE
+        // on both the cold (drive_of point-SELECTs) and warm (all-moka)
+        // paths — future orchestration + pool-acquire contention cost
+        // more than the local round trips they overlap. Rejected by
+        // `bench_favorites_authz`; numbers in benches/ROUND6.md.
         for (item_id, item_type) in items {
             let resource = Resource::parse(item_type, item_id)?;
             self.authorization

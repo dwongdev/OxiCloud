@@ -116,8 +116,33 @@ export function resolveBrowserLocale(
 	return 'en';
 }
 
+// Resolved-value cache, one map per dict object: `t()` runs ~10× per rendered
+// list row over the app's finite static key set, so the nested split + tree
+// walk runs once per (locale, key) instead of on every call. Dicts are
+// assigned once in `loadDict` and never mutated, so entries can't go stale;
+// the cap only guards against a pathological dynamic-key caller.
+const RESOLVED_CACHE_MAX = 4000;
+const resolvedCache = new WeakMap<Dict, Map<string, string | null>>();
+
 /** Resolve a dot-notation key with a prefix_suffix underscore fallback. */
 export function getNestedValue(obj: Dict | undefined, path: string): string | null {
+	if (!obj || typeof obj !== 'object') return resolveNestedValue(obj, path);
+	let cache = resolvedCache.get(obj);
+	if (cache === undefined) {
+		// eslint-disable-next-line svelte/prefer-svelte-reactivity -- deliberately non-reactive: a memo written during render must not create/notify signals
+		cache = new Map();
+		resolvedCache.set(obj, cache);
+	}
+	const hit = cache.get(path);
+	if (hit !== undefined) return hit;
+	const value = resolveNestedValue(obj, path);
+	if (cache.size >= RESOLVED_CACHE_MAX) cache.clear();
+	cache.set(path, value);
+	return value;
+}
+
+/** The uncached lookup: flat-key fast path, dotted walk, underscore fallback. */
+function resolveNestedValue(obj: Dict | undefined, path: string): string | null {
 	if (obj && typeof obj === 'object' && path in obj) {
 		const value = obj[path];
 		return typeof value === 'string' ? value : null;
@@ -146,6 +171,9 @@ export function getNestedValue(obj: Dict | undefined, path: string): string | nu
 
 /** Replace `{{param}}` placeholders; leaves unknown placeholders intact. */
 export function interpolate(text: string, params: Record<string, unknown>): string {
+	// The vast majority of UI strings carry no placeholder — skip the regex
+	// scan (and its per-call machinery) for them.
+	if (!text.includes('{{')) return text;
 	return text.replace(/{{\s*([^}]+)\s*}}/g, (_, key: string) => {
 		const k = key.trim();
 		return params[k] !== undefined ? String(params[k]) : `{{${key}}}`;

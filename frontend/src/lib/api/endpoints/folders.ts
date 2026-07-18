@@ -95,6 +95,17 @@ export async function getFolder(id: string): Promise<FolderItem> {
 }
 
 /**
+ * Minimum spacing between intermediate progressive-render emissions of
+ * {@link fetchFolderListing}. Each emission hands the consumer the WHOLE
+ * accumulated listing, and the files view re-derives its filtered + sorted
+ * view from it (O(accumulated · log) with `localeCompare`), so emitting every
+ * page made a large-folder load Σ O(N²/page) of main-thread sort work. Page
+ * one and the final page always emit; pages in between only emit after this
+ * much time has passed since the previous emission.
+ */
+export const PAGE_EMIT_MIN_INTERVAL_MS = 150;
+
+/**
  * Fetch a folder's complete listing (sub-folders + files), rebuilt from the
  * cursor-paginated `/api/folders/{id}/resources` feed — the old combined
  * `/listing` route was removed. We page through to the end (folders sort first
@@ -112,12 +123,15 @@ export async function fetchFolderListing(
 		etag?: string;
 		forceRefresh?: boolean;
 		/**
-		 * Progressive render hook: invoked after EVERY page with the
-		 * accumulated listing so far (the arrays are fresh copies — safe to
-		 * hand to reactive state). Without it, a 2,000-item folder waited
-		 * for all ⌈N/200⌉ sequential round-trips before the first row
-		 * painted; with it the view paints after page one (~200 items) and
-		 * fills in as the tail pages land.
+		 * Progressive render hook: invoked with the accumulated listing so
+		 * far (the arrays are fresh copies — safe to hand to reactive
+		 * state). Without it, a 2,000-item folder waited for all ⌈N/200⌉
+		 * sequential round-trips before the first row painted; with it the
+		 * view paints after page one (~200 items) and fills in as the tail
+		 * pages land. Emissions are coalesced to at most one per
+		 * {@link PAGE_EMIT_MIN_INTERVAL_MS} between the first and the final
+		 * page — the hook is always called for page one and always called
+		 * once more with `done === true` and the complete listing.
 		 */
 		onPage?: (partial: FolderListing, done: boolean) => void;
 	} = {}
@@ -125,6 +139,8 @@ export async function fetchFolderListing(
 	const folders: FolderItem[] = [];
 	const files: FileItem[] = [];
 	let cursor: string | undefined;
+	let firstPage = true;
+	let lastEmit = 0;
 	do {
 		const params = new URLSearchParams({ order_by: 'name', limit: '200' });
 		if (opts.forceRefresh) params.set('force_refresh', 'true');
@@ -144,10 +160,18 @@ export async function fetchFolderListing(
 			else files.push(it.resource as FileItem);
 		}
 		cursor = page.next_cursor;
-		opts.onPage?.(
-			{ folders: [...folders], files: [...files], favoriteIds: [], sharedIds: [] },
-			!cursor
-		);
+		const done = !cursor;
+		if (
+			opts.onPage &&
+			(done || firstPage || performance.now() - lastEmit >= PAGE_EMIT_MIN_INTERVAL_MS)
+		) {
+			lastEmit = performance.now();
+			opts.onPage(
+				{ folders: [...folders], files: [...files], favoriteIds: [], sharedIds: [] },
+				done
+			);
+		}
+		firstPage = false;
 	} while (cursor);
 
 	return { status: 200, listing: { folders, files, favoriteIds: [], sharedIds: [] } };
