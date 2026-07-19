@@ -45,9 +45,11 @@
 	import { countHidden, filterDotfiles } from '$lib/utils/dotfileFilter';
 	import { preferences } from '$lib/stores/preferences.svelte';
 	import type { FileItem, FolderItem, ItemType } from '$lib/api/types';
-	import ListToolbar from '$lib/components/ListToolbar.svelte';
 	import ReadOnlyBanner from '$lib/components/ReadOnlyBanner.svelte';
-	import VirtualList from '$lib/components/VirtualList.svelte';
+	import ResourceList, {
+		isFile,
+		type GroupByDef as RLGroupByDef
+	} from '$lib/components/ResourceList.svelte';
 	import { lazyComponent } from '$lib/composables/lazyComponent.svelte';
 	import { t } from '$lib/i18n/index.svelte';
 	import { confirmDialog, promptDialog } from '$lib/stores/dialogs.svelte';
@@ -55,22 +57,8 @@
 	import { files as filesStore } from '$lib/stores/files.svelte';
 	import { session } from '$lib/stores/session.svelte';
 	import { ui } from '$lib/stores/ui.svelte';
-	import {
-		dateBucket,
-		ownerLabel,
-		relativeTimeAgo,
-		sizeBucket,
-		typeLabel
-	} from '$lib/stores/files.svelte';
-	import { formatBytes } from '$lib/utils/format';
+	import { dateBucket, sizeBucket, typeLabel } from '$lib/stores/files.svelte';
 	import { replaceSet } from '$lib/utils/sets';
-	import { formatDate, iconNameFromClass, fileIconKindClass } from '$lib/utils/display';
-	import { gridColumns } from '$lib/utils/grid';
-	import {
-		canThumbnailClientSide,
-		preloadPdf,
-		queueGenerate as queueThumbnailGenerate
-	} from '$lib/utils/thumbnail';
 
 	// File preview and the WOPI editor are heavy and only appear on demand, so
 	// their modules load the first time the user opens one (see the effects that
@@ -152,7 +140,6 @@
 	let error = $state<string | null>(null);
 	let fileInput = $state<HTMLInputElement | null>(null);
 	let uploading = $state(false);
-	let dragOver = $state(false);
 
 	interface ActionTarget {
 		id: string;
@@ -696,7 +683,6 @@
 
 	async function onDrop(e: DragEvent) {
 		e.preventDefault();
-		dragOver = false;
 		const dt = e.dataTransfer;
 		if (!dt) return;
 		// A dropped folder isn't expanded into `.files`, so walk the dropped entry
@@ -882,63 +868,16 @@
 	}
 
 	// ── Multi-select + batch ────────────────────────────────────────────────
-	// In-place `SvelteSet`: a toggle is O(1) (no full-set copy) and spares
-	// the other selected rows' `has()` readers — decisive when refining a
-	// select-all (selectionPatterns.bench.test.ts).
+	// After the ResourceList migration the row-level selection UX (shift-
+	// range, ctrl-toggle, anchor tracking, header select-all) lives inside
+	// `<ResourceList>` and mirrors state OUT via `onselectionchange`. This
+	// SvelteSet is the local reflection the batch action functions consume;
+	// it stays a plain in-place `SvelteSet` (per benches ROUND11 §S2) so
+	// batch buttons see the same set as the row template does.
 	const selected = new SvelteSet<string>();
-	// Anchor row id for shift-click range selection.
-	let selectionAnchor = $state<string | null>(null);
 
-	function toggleSelected(id: string) {
-		if (selected.has(id)) selected.delete(id);
-		else selected.add(id);
-		selectionAnchor = id;
-	}
 	function clearSelection() {
 		selected.clear();
-		selectionAnchor = null;
-	}
-
-	/**
-	 * Row click selection mirroring static/js/components/resourceList.js:
-	 *  - Shift+click selects the contiguous range from the anchor to this row.
-	 *  - Ctrl/Cmd+click toggles this row without clearing the rest.
-	 *  - A plain click (no modifier) opens the item — handled by the caller.
-	 * Returns true when the click was consumed as a selection gesture.
-	 */
-	function handleSelectionClick(e: MouseEvent, id: string): boolean {
-		if (e.shiftKey && selectionAnchor) {
-			e.preventDefault();
-			const a = orderedIds.indexOf(selectionAnchor);
-			const b = orderedIds.indexOf(id);
-			if (a !== -1 && b !== -1) {
-				const [lo, hi] = a < b ? [a, b] : [b, a];
-				for (let i = lo; i <= hi; i++) selected.add(orderedIds[i]);
-			}
-			return true;
-		}
-		if (e.ctrlKey || e.metaKey) {
-			e.preventDefault();
-			toggleSelected(id);
-			return true;
-		}
-		return false;
-	}
-
-	const selectedCount = $derived(selected.size);
-	const totalCount = $derived(visibleFolders.length + visibleFiles.length);
-
-	function toggleSelectAll() {
-		if (selected.size === totalCount) {
-			clearSelection();
-		} else {
-			// Select-all only picks what the user can see — dotfiles hidden
-			// by the current filter are excluded so "select all → delete"
-			// can't accidentally sweep up hidden files the user never saw.
-			selected.clear();
-			for (const i of visibleFolders) selected.add(i.id);
-			for (const i of visibleFiles) selected.add(i.id);
-		}
 	}
 
 	/**
@@ -1060,16 +999,18 @@
 	function onKeydown(e: KeyboardEvent) {
 		const tag = (e.target as HTMLElement)?.tagName;
 		if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-		if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'a') {
-			e.preventDefault();
-			toggleSelectAll();
-		} else if (e.key === 'Escape' && selected.size) {
+		if (e.key === 'Escape' && selected.size) {
 			clearSelection();
 		} else if (e.key === 'Delete' && selected.size) {
 			// Delete only — Backspace was dropped: it triggered accidental deletes.
 			e.preventDefault();
 			void batchDelete();
 		}
+		// Ctrl+A "select all" moved to the list-header checkbox owned by
+		// ResourceList — the row-level selection UX now lives entirely
+		// there, so the shortcut is served by clicking that box. Kept the
+		// binding surface here for the still-page-level Escape / Delete
+		// gestures that reference the local `selected` mirror.
 	}
 
 	async function batchDelete() {
@@ -1488,134 +1429,113 @@
 		return v * sortDir;
 	}
 
-	// `visibleFolders` / `visibleFiles` are declared up-top (near
-	// `listing`) because `totalCount` and `isEmpty` reference them
-	// before this block; only the sorted copies live here so they
-	// stay next to the sort comparators.
+	// Sorted (folders-then-files) merged into one `Array<FileItem | FolderItem>`
+	// that <ResourceList> renders directly. Order matches the un-migrated
+	// layout: folders precede files, sort key applied within each cohort. The
+	// bespoke `Entry` discriminator + swimlane bucketing that used to live
+	// here is gone — ResourceList does swimlane bucketing itself via
+	// `rlGroupBys` below.
 	const sortedFolders = $derived([...visibleFolders].sort(cmpFolders));
 	const sortedFiles = $derived([...visibleFiles].sort(cmpFiles));
+	const rlItems = $derived<Array<FileItem | FolderItem>>([...sortedFolders, ...sortedFiles]);
 
-	/** Flat id order matching how rows are displayed (folders then files). */
-	const orderedIds = $derived([...sortedFolders.map((f) => f.id), ...sortedFiles.map((f) => f.id)]);
+	// Group-by state (bound to <ResourceList>). Kept as a `string` prop
+	// value; the current `sortField` mirrors from the picked group's
+	// `orderBy` so a group-by change also drives the sort.
+	let groupBy = $state<string>('');
 
-	// Folders-then-files as one ordered, discriminated list so the (flat) view can
-	// be windowed by a single VirtualList. Content width drives the grid columns.
-	type Entry = { kind: 'folder'; folder: FolderItem } | { kind: 'file'; file: FileItem };
-	const entries = $derived<Entry[]>([
-		...sortedFolders.map((folder) => ({ kind: 'folder' as const, folder })),
-		...sortedFiles.map((file) => ({ kind: 'file' as const, file }))
-	]);
-	const entryKey = (e: Entry): string => (e.kind === 'folder' ? e.folder.id : e.file.id);
-	let gridWidth = $state(0);
-
-	// ── Group-by / swimlanes ─────────────────────────────────────────────────
-	// Mirrors GROUP_BY_DEFS in static/js/app/filesView.js: a flat list ('') plus
-	// Type / Size / Modified date / Created date dimensions. Folders always group
-	// into their own lane (Folder / "Folders" size sentinel) ahead of the files.
-	type GroupBy = '' | 'type' | 'size' | 'modifiedAt' | 'createdAt';
-	let groupBy = $state<GroupBy>('');
-
-	interface ResourceGroup {
-		key: string;
-		label: string;
-		folders: FolderItem[];
-		files: FileItem[];
-	}
-
-	function folderGroupKey(folder: FolderItem): string {
-		if (groupBy === 'type') return t('files.file_types.folder', 'Folders');
-		if (groupBy === 'size') return sizeBucket(-1);
-		if (groupBy === 'modifiedAt') return dateBucket(folder.modified_at);
-		if (groupBy === 'createdAt') return dateBucket(folder.created_at);
-		return '';
-	}
-	function fileGroupKey(file: FileItem): string {
-		if (groupBy === 'type') return typeLabel(file.category);
-		if (groupBy === 'size') return sizeBucket(file.size ?? 0);
-		if (groupBy === 'modifiedAt') return dateBucket(file.modified_at);
-		if (groupBy === 'createdAt') return dateBucket(file.created_at);
-		return '';
-	}
-
-	// Grouped rendering: ordered lanes preserving the sorted folder-then-file order
-	// within each lane. Lanes appear in first-seen order (folders precede files).
-	const groups = $derived.by<ResourceGroup[]>(() => {
-		if (groupBy === '') return [];
-		// Transient grouping map, local to this derivation and discarded once the
-		// array is built — must stay a plain Map (a reactive one created inside a
-		// $derived would be unsafe state).
-		// eslint-disable-next-line svelte/prefer-svelte-reactivity
-		const map = new Map<string, ResourceGroup>();
-		const ensure = (key: string): ResourceGroup => {
-			let g = map.get(key);
-			if (!g) {
-				g = { key, label: key, folders: [], files: [] };
-				map.set(key, g);
-			}
-			return g;
-		};
-		for (const folder of sortedFolders) ensure(folderGroupKey(folder)).folders.push(folder);
-		for (const file of sortedFiles) ensure(fileGroupKey(file)).files.push(file);
-		return [...map.values()];
-	});
-
-	// Each group's folders + files folded into ONE ordered `Entry` stream
-	// (folders first, then files — the exact render order the un-windowed
-	// `{#each folders}{#each files}` produced), so each swimlane can feed a
-	// windowed <VirtualList> instead of mounting every row/card
-	// (benches/ROUND13.md §V1). `buildFileRows` is intentionally identity-
-	// and order-only: it must NOT read favoriteIds/sharedIds/selection, or a
-	// single star/select toggle would rebuild every swimlane (the ROUND11
-	// §S2 fine-grained-star invariant).
-	const groupedEntries = $derived(
-		groups.map((g) => ({
-			key: g.key,
-			label: g.label,
-			entries: [
-				...g.folders.map((folder) => ({ kind: 'folder' as const, folder })),
-				...g.files.map((file) => ({ kind: 'file' as const, file }))
-			] as Entry[]
-		}))
-	);
-
-	// ── Toolbar controls (upload split-button + group-by popup menu) ─────────
-	// The group-by popup + sort-direction + view toggle live in the shared
-	// <ListToolbar>; this page only owns the upload split-button dropdown.
-	let uploadMenuOpen = $state(false);
-
-	interface GroupByDef {
-		key: GroupBy;
-		label: string;
-		icon: string;
-		/** Sort field implied by this dimension (the old group-by drove order_by). */
-		sort?: SortField;
-	}
-	// Mirrors the old GROUP_BY_DEFS: "Name" is the default (flat, sorted by name)
-	// entry — there is no "None" option — followed by the swimlane dimensions.
-	const GROUP_BYS = $derived<GroupByDef[]>([
-		{ key: '', label: t('files.name', 'Name'), icon: 'arrow-up-a-z', sort: 'name' },
-		{ key: 'type', label: t('groupby.type', 'Type'), icon: 'layer-group', sort: 'type' },
-		{ key: 'size', label: t('groupby.size', 'Size'), icon: 'layer-group', sort: 'size' },
+	// Same swimlane keys as the bespoke groups above (Type / Size /
+	// modifiedAt / createdAt). The `orderBy` values are what the
+	// GROUP_BYS toolbar emits, so <ResourceList>'s onreload gets the
+	// legacy `sortField` name and can drive the same sort path.
+	const rlGroupBys = $derived<RLGroupByDef[]>([
+		{ key: '', label: t('files.name', 'Name'), orderBy: 'name', icon: 'arrow-up-a-z' },
+		{
+			key: 'type',
+			label: t('groupby.type', 'Type'),
+			orderBy: 'type',
+			icon: 'layer-group',
+			bucketOf: (item) =>
+				isFile(item) ? typeLabel(item.category) : t('files.file_types.folder', 'Folders'),
+			labelOf: (k) => k
+		},
+		{
+			key: 'size',
+			label: t('groupby.size', 'Size'),
+			orderBy: 'size',
+			icon: 'layer-group',
+			bucketOf: (item) => (isFile(item) ? sizeBucket(item.size ?? 0) : sizeBucket(-1)),
+			labelOf: (k) => k
+		},
 		{
 			key: 'modifiedAt',
 			label: t('groupby.modifiedAt', 'Modified date'),
+			orderBy: 'modified_at',
 			icon: 'layer-group',
-			sort: 'modified_at'
+			bucketOf: (item) => dateBucket(item.modified_at),
+			labelOf: (k) => k
 		},
 		{
 			key: 'createdAt',
 			label: t('groupby.createdAt', 'Created date'),
+			orderBy: 'created_at',
 			icon: 'layer-group',
-			sort: 'created_at'
+			bucketOf: (item) => dateBucket(item.created_at),
+			labelOf: (k) => k
 		}
 	]);
 
-	/** Group-by chosen in the toolbar — also sets the matching sort field. */
-	function onPickGroup(key: string) {
-		groupBy = key as GroupBy;
-		const def = GROUP_BYS.find((g) => g.key === key);
-		if (def?.sort) sortField = def.sort;
+	// ResourceList's `reversed` is a boolean; the legacy sort uses `1 | -1`.
+	// Two-way binding: setting `rlReversed` writes back into `sortDir`, and
+	// any programmatic sort direction change (e.g. group-by picking) mirrors
+	// out.
+	let rlReversed = $state(false);
+	$effect(() => {
+		rlReversed = sortDir === -1;
+	});
+	$effect(() => {
+		sortDir = rlReversed ? -1 : 1;
+	});
+
+	// Bridge for <ResourceList>'s callbacks — the row's open/favorite/drag
+	// props take one item; the legacy handlers take `(kind, id, name)`.
+	function rlOnOpen(item: FileItem | FolderItem) {
+		if (isFile(item)) openFile(item);
+		else openFolder(item);
 	}
+	function rlOnFavorite(item: FileItem | FolderItem) {
+		void toggleFavorite(isFile(item) ? 'file' : 'folder', item.id);
+	}
+	function rlOnContextMenu(e: MouseEvent, item: FileItem | FolderItem) {
+		openContext(e, isFile(item) ? 'file' : 'folder', item.id, item.name);
+	}
+	// Row-drag: everything is draggable; only folders accept drops.
+	function rlIsDraggable(_item: FileItem | FolderItem): boolean {
+		return true;
+	}
+	function rlIsDropTarget(item: FileItem | FolderItem): boolean {
+		return !isFile(item);
+	}
+	function rlOnItemDragStart(e: DragEvent, item: FileItem | FolderItem) {
+		onItemDragStart(e, isFile(item) ? 'file' : 'folder', item.id, item.name);
+	}
+	function rlOnItemDragOver(e: DragEvent, item: FileItem | FolderItem) {
+		if (isFile(item)) return;
+		if (e.dataTransfer?.types.includes(DRAG_TYPE)) {
+			e.preventDefault();
+			dropFolderId = item.id;
+		}
+	}
+	function rlOnItemDragLeave(_e: DragEvent, item: FileItem | FolderItem) {
+		if (dropFolderId === item.id) dropFolderId = null;
+	}
+	function rlOnItemDrop(e: DragEvent, item: FileItem | FolderItem) {
+		if (isFile(item)) return;
+		onFolderDrop(e, item);
+	}
+
+	// ── Upload split-button popup state ─────────────────────────────────────
+	let uploadMenuOpen = $state(false);
 
 	// Close the upload popup when clicking outside of it.
 	$effect(() => {
@@ -1660,19 +1580,7 @@
 
 <svelte:window onkeydown={onKeydown} />
 
-<div
-	class="files-page"
-	class:dropzone-active={dragOver}
-	role="region"
-	aria-label={t('nav.files', 'Files')}
-	data-testid="files-dropzone"
-	ondragover={(e) => {
-		e.preventDefault();
-		dragOver = true;
-	}}
-	ondragleave={() => (dragOver = false)}
-	ondrop={onDrop}
->
+<div class="files-page" data-testid="files-dropzone">
 	<!-- Read-only freeze banner, placed inside the listing container so it
 	     lives in the same visual/scroll flow as the file list (previously
 	     rendered above the page container, which visually detached it from
@@ -1683,609 +1591,222 @@
 	{#if currentDrive?.policies?.read_only}
 		<ReadOnlyBanner driveName={currentDrive.name} />
 	{/if}
-	<div class="page-sticky-header">
-		<!-- Hidden upload inputs stay mounted even while the batch bar is shown. -->
-		<input
-			bind:this={fileInput}
-			type="file"
-			multiple
-			hidden
-			data-testid="files-upload-file-input"
-			onchange={onUpload}
-		/>
-		<input
-			bind:this={folderInput}
-			type="file"
-			multiple
-			hidden
-			webkitdirectory
-			data-testid="files-upload-folder-input"
-			onchange={onUploadFolder}
-		/>
 
-		<ListToolbar
-			groups={GROUP_BYS}
-			{groupBy}
-			reversed={sortDir === -1}
-			ongroup={onPickGroup}
-			ondirection={() => (sortDir = (sortDir * -1) as 1 | -1)}
-			showDotfileToggle
-		>
-			{#snippet start()}
-				{#if selectedCount > 0}
-					<div class="action-buttons batch-selection-bar" data-testid="files-batch-bar">
-						<div class="list-header-checkbox">
-							<button
-								class="batch-bar-close"
-								title={t('files.cancel_selection', 'Cancel selection')}
-								aria-label={t('files.cancel_selection', 'Cancel selection')}
-								data-testid="files-batch-cancel-btn"
-								onclick={clearSelection}
-							>
-								<Icon name="times" />
-							</button>
-							<span class="batch-bar-count"
-								>{t('files.selected_count', { count: selectedCount }, '{{count}} selected')}</span
-							>
-						</div>
-						<div class="batch-selection-info">
-							<div class="batch-bar-actions">
-								<button
-									class="batch-btn"
-									title={t('files.add_favorites', 'Add to favorites')}
-									data-testid="files-batch-favorite-btn"
-									onclick={() => void batchFavorites()}
-								>
-									<Icon name="star" />
-									<span>{t('files.add_favorites', 'Add to favorites')}</span>
-								</button>
-								<button
-									class="batch-btn"
-									title={t('files.move', 'Move')}
-									data-testid="files-batch-move-btn"
-									onclick={batchMove}
-								>
-									<Icon name="arrows-alt" />
-									<span>{t('files.move', 'Move')}</span>
-								</button>
-								<button
-									class="batch-btn"
-									title={t('files.copy', 'Copy')}
-									data-testid="files-batch-copy-btn"
-									onclick={batchCopy}
-								>
-									<Icon name="copy" />
-									<span>{t('files.copy', 'Copy')}</span>
-								</button>
-								<button
-									class="batch-btn"
-									title={t('common.download', 'Download')}
-									data-testid="files-batch-download-btn"
-									onclick={() => void batchDownload()}
-								>
-									<Icon name="download" />
-									<span>{t('common.download', 'Download')}</span>
-								</button>
-								<button
-									class="batch-btn batch-btn-danger"
-									title={t('common.delete', 'Delete')}
-									data-testid="files-batch-delete-btn"
-									onclick={batchDelete}
-								>
-									<Icon name="trash" />
-									<span>{t('common.delete', 'Delete')}</span>
-								</button>
-							</div>
-						</div>
-					</div>
-				{:else}
-					<div class="action-buttons">
-						<div class="upload-dropdown" data-testid="files-upload-dropdown">
-							<button
-								class="btn btn-primary"
-								data-testid="files-upload-btn"
-								onclick={() => (uploadMenuOpen = !uploadMenuOpen)}
-								disabled={uploading}
-								aria-haspopup="true"
-								aria-expanded={uploadMenuOpen}
-							>
-								<Icon name="cloud-upload-alt" class="icon-mr" />
-								<span
-									>{uploading
-										? t('files.uploading', 'Uploading…')
-										: t('actions.upload', 'Upload')}</span
-								>
-								<Icon name="caret-down" class="upload-caret" />
-							</button>
-							{#if uploadMenuOpen}
-								<div class="upload-dropdown-menu" data-testid="files-upload-menu">
-									<button
-										class="upload-dropdown-item"
-										data-testid="files-upload-files-item"
-										onclick={() => {
-											uploadMenuOpen = false;
-											fileInput?.click();
-										}}
-									>
-										<Icon name="file" />
-										<span>{t('actions.upload_files', 'Upload files')}</span>
-									</button>
-									<button
-										class="upload-dropdown-item"
-										data-testid="files-upload-folder-item"
-										onclick={() => {
-											uploadMenuOpen = false;
-											folderInput?.click();
-										}}
-									>
-										<Icon name="folder-open" />
-										<span>{t('actions.upload_folder', 'Upload folder')}</span>
-									</button>
-								</div>
-							{/if}
-						</div>
-						<button
-							class="btn btn-secondary"
-							data-testid="files-new-folder-btn"
-							onclick={onNewFolder}
+	<!-- Hidden upload inputs stay mounted even while the batch bar is shown.
+	     Kept OUTSIDE ResourceList so the split-button dropdown in the
+	     `actions` snippet can click() them without ResourceList's internal
+	     scoping getting in the way. -->
+	<input
+		bind:this={fileInput}
+		type="file"
+		multiple
+		hidden
+		data-testid="files-upload-file-input"
+		onchange={onUpload}
+	/>
+	<input
+		bind:this={folderInput}
+		type="file"
+		multiple
+		hidden
+		webkitdirectory
+		data-testid="files-upload-folder-input"
+		onchange={onUploadFolder}
+	/>
+
+	<ResourceList
+		title={t('nav.files', 'Files')}
+		items={rlItems}
+		{favoriteIds}
+		emptyText={hiddenCount > 0
+			? t('files.empty_hidden_title', { n: hiddenCount }, '{{n}} hidden item(s) in this folder')
+			: t('files.empty_title', 'This folder is empty')}
+		emptyHint={hiddenCount > 0
+			? t(
+					'files.empty_hidden_hint',
+					"Files whose name starts with '.' are hidden. Toggle the setting to see them."
+				)
+			: t('files.empty_hint', 'Drop files here or use the Upload button to add files.')}
+		emptyIcon={hiddenCount > 0 ? 'eye-slash' : undefined}
+		loading={showSkeleton}
+		error={error ?? undefined}
+		selectable
+		shiftRangeSelect
+		showOwner
+		showType
+		showDate
+		showDotfileToggle
+		enableSystemDrop
+		onsystemdrop={onDrop}
+		groupBys={rlGroupBys}
+		bind:groupBy
+		bind:reversed={rlReversed}
+		onreload={(orderBy) => {
+			sortField = orderBy as SortField;
+		}}
+		onopen={rlOnOpen}
+		onfavorite={rlOnFavorite}
+		oncontextmenu={rlOnContextMenu}
+		onselectionchange={(ids) => replaceSet(selected, ids)}
+		isDraggable={rlIsDraggable}
+		isDropTarget={rlIsDropTarget}
+		dropTargetId={dropFolderId}
+		onitemdragstart={rlOnItemDragStart}
+		onitemdragover={rlOnItemDragOver}
+		onitemdragleave={rlOnItemDragLeave}
+		onitemdrop={rlOnItemDrop}
+	>
+		{#snippet breadcrumb()}
+			<nav class="breadcrumb" aria-label="Breadcrumb">
+				<!-- Persistent home link → the root listing (bare /files canonicalizes to
+				     the user's drive root). `buildCrumbs` returns only the path folders,
+				     so this is the single always-present "go home" affordance. Both the
+				     home link and every crumb accept row drops via the same
+				     `application/x-oxi-item` MIME the item-drag uses. -->
+				<a
+					href={resolve('/files')}
+					class="breadcrumb-item breadcrumb-home breadcrumb-link"
+					title={t('breadcrumb.home', 'Home')}
+					data-testid="files-breadcrumb-home-link"
+					ondragover={(e) => e.dataTransfer?.types.includes(DRAG_TYPE) && e.preventDefault()}
+					ondrop={(e) => session.homeFolderId && onCrumbDrop(e, session.homeFolderId)}
+				>
+					<Icon name={rootIcon} />
+				</a>
+				{#each crumbs as c, i (c.id)}
+					<span class="breadcrumb-separator">&gt;</span>
+					{#if i === crumbs.length - 1}
+						<span class="breadcrumb-item breadcrumb-current">{c.name}</span>
+					{:else}
+						<a
+							href={resolve(`/files/${pathSegments.slice(0, i + 1).join('/')}`)}
+							class="breadcrumb-item breadcrumb-link"
+							data-testid={`files-breadcrumb-${c.id}`}
+							ondragover={(e) => e.dataTransfer?.types.includes(DRAG_TYPE) && e.preventDefault()}
+							ondrop={(e) => onCrumbDrop(e, c.id)}
 						>
-							<Icon name="folder-plus" class="icon-mr" />
-							<span>{t('actions.new_folder', 'New folder')}</span>
+							{c.name}
+						</a>
+					{/if}
+				{/each}
+			</nav>
+		{/snippet}
+
+		{#snippet actions()}
+			<div class="upload-dropdown" data-testid="files-upload-dropdown">
+				<button
+					class="btn btn-primary"
+					data-testid="files-upload-btn"
+					onclick={() => (uploadMenuOpen = !uploadMenuOpen)}
+					disabled={uploading}
+					aria-haspopup="true"
+					aria-expanded={uploadMenuOpen}
+				>
+					<Icon name="cloud-upload-alt" class="icon-mr" />
+					<span
+						>{uploading ? t('files.uploading', 'Uploading…') : t('actions.upload', 'Upload')}</span
+					>
+					<Icon name="caret-down" class="upload-caret" />
+				</button>
+				{#if uploadMenuOpen}
+					<div class="upload-dropdown-menu" data-testid="files-upload-menu">
+						<button
+							class="upload-dropdown-item"
+							data-testid="files-upload-files-item"
+							onclick={() => {
+								uploadMenuOpen = false;
+								fileInput?.click();
+							}}
+						>
+							<Icon name="file" />
+							<span>{t('actions.upload_files', 'Upload files')}</span>
+						</button>
+						<button
+							class="upload-dropdown-item"
+							data-testid="files-upload-folder-item"
+							onclick={() => {
+								uploadMenuOpen = false;
+								folderInput?.click();
+							}}
+						>
+							<Icon name="folder-open" />
+							<span>{t('actions.upload_folder', 'Upload folder')}</span>
 						</button>
 					</div>
 				{/if}
-			{/snippet}
-		</ListToolbar>
-
-		<nav class="breadcrumb" aria-label="Breadcrumb">
-			<!-- Persistent home link → the root listing (bare /files canonicalizes to
-			     the user's drive root). `buildCrumbs` returns only the path folders,
-			     so this is the single always-present "go home" affordance. -->
-			<a
-				href={resolve('/files')}
-				class="breadcrumb-item breadcrumb-home breadcrumb-link"
-				title={t('breadcrumb.home', 'Home')}
-				data-testid="files-breadcrumb-home-link"
-				ondragover={(e) => e.dataTransfer?.types.includes(DRAG_TYPE) && e.preventDefault()}
-				ondrop={(e) => session.homeFolderId && onCrumbDrop(e, session.homeFolderId)}
-			>
-				<Icon name={rootIcon} />
-			</a>
-			{#each crumbs as c, i (c.id)}
-				<span class="breadcrumb-separator">&gt;</span>
-				{#if i === crumbs.length - 1}
-					<span class="breadcrumb-item breadcrumb-current">{c.name}</span>
-				{:else}
-					<a
-						href={resolve(`/files/${pathSegments.slice(0, i + 1).join('/')}`)}
-						class="breadcrumb-item breadcrumb-link"
-						data-testid={`files-breadcrumb-${c.id}`}
-						ondragover={(e) => e.dataTransfer?.types.includes(DRAG_TYPE) && e.preventDefault()}
-						ondrop={(e) => onCrumbDrop(e, c.id)}
-					>
-						{c.name}
-					</a>
-				{/if}
-			{/each}
-		</nav>
-	</div>
-
-	{#if error}
-		<EmptyState title={error} error />
-	{:else if showSkeleton && isEmpty}
-		<SkeletonList count={SKELETON.length} />
-	{:else if isEmpty}
-		{#if hiddenCount > 0}
-			<!-- Folder isn't really empty — it's just filtered. Hint the
-			     user rather than making the "why is my folder empty?"
-			     question require a preferences hunt. Toggling the
-			     preference flips the whole app's dotfile visibility. -->
-			<EmptyState
-				icon="eye-slash"
-				title={t(
-					'files.empty_hidden_title',
-					{ n: hiddenCount },
-					'{{n}} hidden item(s) in this folder'
-				)}
-				hint={t(
-					'files.empty_hidden_hint',
-					"Files whose name starts with '.' are hidden. Toggle the setting to see them."
-				)}
-			>
-				<button
-					class="btn btn-secondary"
-					onclick={() => preferences.setHideDotfiles(false)}
-					data-testid="files-show-hidden-btn"
-				>
-					<Icon name="eye" />
-					{t('files.show_hidden', 'Show hidden files')}
-				</button>
-			</EmptyState>
-		{:else}
-			<EmptyState
-				title={t('files.empty_title', 'This folder is empty')}
-				hint={t('files.empty_hint', 'Drop files here or use the Upload button to add files.')}
-			/>
-		{/if}
-	{:else}
-		<div class="files-container" bind:clientWidth={gridWidth}>
-			{#if groupBy !== '' && filesStore.viewMode === 'list'}
-				<!-- Grouped list: each swimlane's rows are windowed (was: every row
-				     of every group mounted at once — benches/ROUND13.md §V1). -->
-				<div class="files-list-view">
-					{@render fileListHeader()}
-					{#each groupedEntries as group (group.key)}
-						<div class="resource-list__swimlane-header">{group.label}</div>
-						<VirtualList items={group.entries} rowHeight={56} key={entryKey} row={entryRow} />
-					{/each}
-				</div>
-			{:else if groupBy !== ''}
-				<!-- Grouped grid: a flex stack of (header + its own windowed card grid)
-				     per swimlane. The grid lives on each VirtualList's inner window via
-				     `windowClass`, so the outer stack isn't itself a grid. Was the last
-				     unwindowed path (benches/ROUND13.md §V1). -->
-				<div class="files-grouped-grid">
-					{#each groupedEntries as group (group.key)}
-						<div class="resource-list__swimlane-header resource-list__swimlane-header--grid">
-							{group.label}
-						</div>
-						<VirtualList
-							items={group.entries}
-							columns={gridColumns(gridWidth)}
-							rowHeight={240}
-							windowClass="files-grid-view"
-							key={entryKey}
-							row={entryRow}
-						/>
-					{/each}
-				</div>
-			{:else if filesStore.viewMode === 'list'}
-				<!-- Flat list: only the rows near the viewport are mounted. -->
-				<div class="files-list-view">
-					{@render fileListHeader()}
-					<VirtualList items={entries} rowHeight={56} key={entryKey} row={entryRow} />
-				</div>
-			{:else}
-				<!-- Grid: the windowed list's inner element IS the card grid. -->
-				<VirtualList
-					items={entries}
-					columns={gridColumns(gridWidth)}
-					rowHeight={240}
-					windowClass="files-grid-view"
-					key={entryKey}
-					row={entryRow}
-				/>
-			{/if}
-		</div>
-	{/if}
-</div>
-
-{#snippet fileListHeader()}
-	<div class="list-header">
-		<div class="list-header-checkbox">
-			<input
-				type="checkbox"
-				aria-label={t('files.select_all', 'Select all')}
-				data-testid="files-select-all-checkbox"
-				checked={selectedCount > 0 && selectedCount === totalCount}
-				indeterminate={selectedCount > 0 && selectedCount < totalCount}
-				onchange={toggleSelectAll}
-			/>
-		</div>
-		{#each [{ f: 'name', l: t('files.col_name', 'Name') }, { f: 'owner', l: t('files.col_owner', 'Owner') }, { f: 'type', l: t('files.col_type', 'Type') }, { f: 'size', l: t('files.col_size', 'Size') }, { f: 'modified_at', l: t('files.col_modified', 'Modified') }] as col (col.f)}
-			{#if col.f === 'owner'}
-				<div class="list-header-owner">{col.l}</div>
-			{:else}
-				<button
-					class="list-header-sort"
-					class:is-active={sortField === col.f}
-					data-sort-field={col.f}
-					data-testid={`files-sort-${col.f}-btn`}
-					onclick={() => toggleSort(col.f as SortField)}
-				>
-					{col.l}
-					{#if sortField === col.f}
-						<Icon
-							name={sortDir === 1 ? 'arrow-down' : 'arrow-up'}
-							class="list-header-sort__arrow"
-						/>
-					{/if}
-				</button>
-			{/if}
-		{/each}
-		<div></div>
-	</div>
-{/snippet}
-
-{#snippet entryRow(e: Entry)}
-	{#if e.kind === 'folder'}
-		{@render folderRow(e.folder)}
-	{:else}
-		{@render fileRow(e.file)}
-	{/if}
-{/snippet}
-
-{#snippet folderRow(folder: FolderItem)}
-	<div
-		class="file-item"
-		class:selected={selected.has(folder.id)}
-		class:drop-target={dropFolderId === folder.id}
-		role="button"
-		tabindex="0"
-		draggable="true"
-		aria-label={folder.name}
-		data-testid={folder.name}
-		ondragstart={(e) => onItemDragStart(e, 'folder', folder.id, folder.name)}
-		ondragover={(e) => {
-			if (e.dataTransfer?.types.includes(DRAG_TYPE)) {
-				e.preventDefault();
-				dropFolderId = folder.id;
-			}
-		}}
-		ondragleave={() => {
-			if (dropFolderId === folder.id) dropFolderId = null;
-		}}
-		ondrop={(e) => onFolderDrop(e, folder)}
-		ondblclick={() => openFolder(folder)}
-		onclick={(e) => {
-			if (!handleSelectionClick(e, folder.id)) openFolder(folder);
-		}}
-		oncontextmenu={(e) => openContext(e, 'folder', folder.id, folder.name)}
-		onkeydown={(e) => e.key === 'Enter' && openFolder(folder)}
-	>
-		<div class="checkbox-cell">
-			<input
-				type="checkbox"
-				checked={selected.has(folder.id)}
-				aria-label={folder.name}
-				data-testid={`files-folder-checkbox-${folder.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					toggleSelected(folder.id);
-				}}
-			/>
-		</div>
-		<div class="name-cell">
-			<div class="file-icon file-icon--folder"><Icon name="folder" /></div>
-			<span title={folder.name}>{folder.name}</span>
-			{#if favoriteIds.has(folder.id)}<div
-					class="item-badge item-badge--fav"
-					title={t('files.favorited', 'Favorite')}
-				>
-					<Icon name="star" />
-				</div>{/if}
-			{#if sharedIds.has(folder.id)}<div
-					class="file-badge file-badge-shared"
-					title={t('files.shared', 'Shared')}
-				>
-					<Icon name="oxiexport" />
-				</div>{/if}
-		</div>
-		<div class="grid-meta">
-			<span class="grid-meta__date">{relativeTimeAgo(folder.modified_at)}</span>
-		</div>
-		<div class="owner-cell">
-			{ownerLabel(folder.created_by, session.user?.id ?? null)}
-		</div>
-		<div class="type-cell">{t('files.file_types.folder', 'Folder')}</div>
-		<div class="size-cell">—</div>
-		<div class="date-cell">{formatDate(folder.modified_at)}</div>
-		<div class="action-cell">
-			<button
-				class="favorite-star"
-				class:active={favoriteIds.has(folder.id)}
-				title={favoriteIds.has(folder.id)
-					? t('files.unfavorite', 'Remove favorite')
-					: t('files.favorite', 'Add favorite')}
-				aria-pressed={favoriteIds.has(folder.id)}
-				data-testid={`files-folder-favorite-${folder.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					void toggleFavorite('folder', folder.id);
-				}}><Icon name={favoriteIds.has(folder.id) ? 'star' : 'star-outline'} /></button
-			>
-			<button
-				class="btn-action"
-				title={t('files.share', 'Share')}
-				data-testid={`files-folder-share-${folder.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					openShare('folder', folder.id, folder.name);
-				}}><Icon name="link" /></button
-			>
-			<button
-				class="btn-action"
-				title={t('files.move', 'Move')}
-				data-testid={`files-folder-move-${folder.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					openMove('folder', folder.id, folder.name);
-				}}><Icon name="arrows-alt" /></button
-			>
-			<button
-				class="btn-action"
-				title={t('common.rename', 'Rename')}
-				data-testid={`files-folder-rename-${folder.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					renameItem('folder', folder.id, folder.name);
-				}}><Icon name="pen" /></button
-			>
-			<button
-				class="btn-action btn-action--delete"
-				title={t('common.delete', 'Delete')}
-				data-testid={`files-folder-delete-${folder.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					deleteItem('folder', folder.id, folder.name);
-				}}><Icon name="trash" /></button
-			>
-			<button
-				class="file-actions"
-				title={t('files.more_actions', 'More actions')}
-				aria-label={t('files.more_actions', 'More actions')}
-				aria-haspopup="menu"
-				data-testid={`files-folder-more-${folder.id}`}
-				onclick={(e) => openContext(e, 'folder', folder.id, folder.name)}
-				><Icon name="ellipsis-v" /></button
-			>
-		</div>
-	</div>
-{/snippet}
-
-{#snippet fileRow(file: FileItem)}
-	{@const iconName = iconNameFromClass(file.icon_class)}
-	<div
-		class="file-item"
-		class:selected={selected.has(file.id)}
-		role="button"
-		tabindex="0"
-		draggable="true"
-		aria-label={file.name}
-		data-testid={file.name}
-		ondragstart={(e) => onItemDragStart(e, 'file', file.id, file.name)}
-		ondblclick={() => openFile(file)}
-		onclick={(e) => {
-			if (!handleSelectionClick(e, file.id)) openFile(file);
-		}}
-		oncontextmenu={(e) => openContext(e, 'file', file.id, file.name)}
-		onkeydown={(e) => e.key === 'Enter' && openFile(file)}
-	>
-		<div class="checkbox-cell">
-			<input
-				type="checkbox"
-				checked={selected.has(file.id)}
-				aria-label={file.name}
-				data-testid={`files-file-checkbox-${file.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					toggleSelected(file.id);
-				}}
-			/>
-		</div>
-		<div class="name-cell">
-			<div class="file-icon {fileIconKindClass(iconName)}">
-				<!-- Colour type icon is always rendered; a successful thumbnail covers it
-				     edge-to-edge, and a failed one (onerror hides the <img>) reveals it. -->
-				<Icon name={iconName} />
-				{#if canThumbnail(file)}
-					<img
-						class="file-thumb"
-						src={fileThumbnailUrl(file.id, thumbSizeForView(filesStore.viewMode))}
-						alt=""
-						loading="lazy"
-						onerror={(e) => {
-							// Server-side thumbnail is missing (404) — try client-side
-							// generation for image / PDF / video and PUT the result
-							// back so the next viewer gets the server thumbnail.
-							// Ported from the legacy static/js/features/thumbnail.js.
-							const img = e.currentTarget as HTMLImageElement;
-							img.style.display = 'none';
-							if (!canThumbnailClientSide(file)) return;
-							if (file.mime_type === 'application/pdf') preloadPdf();
-							void queueThumbnailGenerate(file, (dataUrl) => {
-								img.src = dataUrl;
-								img.style.display = '';
-							});
-						}}
-					/>
-				{/if}
 			</div>
-			<span title={file.name}>{file.name}</span>
-			{#if favoriteIds.has(file.id)}<div
-					class="item-badge item-badge--fav"
-					title={t('files.favorited', 'Favorite')}
-				>
-					<Icon name="star" />
-				</div>{/if}
-			{#if sharedIds.has(file.id)}<div
-					class="file-badge file-badge-shared"
-					title={t('files.shared', 'Shared')}
-				>
-					<Icon name="oxiexport" />
-				</div>{/if}
-		</div>
-		<div class="grid-meta">
-			<span class="grid-meta__date">{relativeTimeAgo(file.modified_at)}</span>
-			{#if file.size != null}<span class="grid-meta__size">{formatBytes(file.size)}</span>{/if}
-		</div>
-		<div class="owner-cell">
-			{ownerLabel(file.created_by, session.user?.id ?? null)}
-		</div>
-		<div class="type-cell">{typeLabel(file.category)}</div>
-		<div class="size-cell">{file.size != null ? formatBytes(file.size) : ''}</div>
-		<div class="date-cell">{formatDate(file.modified_at)}</div>
-		<div class="action-cell">
 			<button
-				class="favorite-star"
-				class:active={favoriteIds.has(file.id)}
-				title={favoriteIds.has(file.id)
-					? t('files.unfavorite', 'Remove favorite')
-					: t('files.favorite', 'Add favorite')}
-				aria-pressed={favoriteIds.has(file.id)}
-				data-testid={`files-file-favorite-${file.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					void toggleFavorite('file', file.id);
-				}}><Icon name={favoriteIds.has(file.id) ? 'star' : 'star-outline'} /></button
+				class="btn btn-secondary"
+				data-testid="files-new-folder-btn"
+				onclick={onNewFolder}
 			>
+				<Icon name="folder-plus" class="icon-mr" />
+				<span>{t('actions.new_folder', 'New folder')}</span>
+			</button>
+		{/snippet}
+
+		{#snippet batchActions(sel)}
 			<button
-				class="btn-action"
-				title={t('files.share', 'Share')}
-				data-testid={`files-file-share-${file.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					openShare('file', file.id, file.name);
-				}}><Icon name="link" /></button
+				class="batch-btn"
+				title={t('files.add_favorites', 'Add to favorites')}
+				data-testid="files-batch-favorite-btn"
+				onclick={() => void batchFavorites()}
 			>
+				<Icon name="star" />
+				<span>{t('files.add_favorites', 'Add to favorites')}</span>
+			</button>
 			<button
-				class="btn-action"
+				class="batch-btn"
 				title={t('files.move', 'Move')}
-				data-testid={`files-file-move-${file.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					openMove('file', file.id, file.name);
-				}}><Icon name="arrows-alt" /></button
+				data-testid="files-batch-move-btn"
+				onclick={batchMove}
 			>
-			<a
-				class="btn-action"
-				href={fileDownloadUrl(file.id)}
-				rel="external"
-				download
+				<Icon name="arrows-alt" />
+				<span>{t('files.move', 'Move')}</span>
+			</button>
+			<button
+				class="batch-btn"
+				title={t('files.copy', 'Copy')}
+				data-testid="files-batch-copy-btn"
+				onclick={batchCopy}
+			>
+				<Icon name="copy" />
+				<span>{t('files.copy', 'Copy')}</span>
+			</button>
+			<button
+				class="batch-btn"
 				title={t('common.download', 'Download')}
-				data-testid={`files-file-download-${file.id}`}
-				onclick={(e) => e.stopPropagation()}><Icon name="download" /></a
+				data-testid="files-batch-download-btn"
+				onclick={() => void batchDownload()}
 			>
+				<Icon name="download" />
+				<span>{t('common.download', 'Download')}</span>
+			</button>
 			<button
-				class="btn-action"
-				title={t('common.rename', 'Rename')}
-				data-testid={`files-file-rename-${file.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					renameItem('file', file.id, file.name);
-				}}><Icon name="pen" /></button
-			>
-			<button
-				class="btn-action btn-action--delete"
+				class="batch-btn batch-btn-danger"
 				title={t('common.delete', 'Delete')}
-				data-testid={`files-file-delete-${file.id}`}
-				onclick={(e) => {
-					e.stopPropagation();
-					deleteItem('file', file.id, file.name);
-				}}><Icon name="trash" /></button
+				data-testid="files-batch-delete-btn"
+				onclick={batchDelete}
 			>
-			<button
-				class="file-actions"
-				title={t('files.more_actions', 'More actions')}
-				aria-label={t('files.more_actions', 'More actions')}
-				aria-haspopup="menu"
-				data-testid={`files-file-more-${file.id}`}
-				onclick={(e) => openContext(e, 'file', file.id, file.name)}
-				><Icon name="ellipsis-v" /></button
-			>
-		</div>
-	</div>
-{/snippet}
+				<Icon name="trash" />
+				<span>{t('common.delete', 'Delete')}</span>
+			</button>
+		{/snippet}
+
+		{#snippet rowBadge(item)}
+			{#if favoriteIds.has(item.id)}
+				<span class="item-badge item-badge--fav" title={t('files.favorited', 'Favorite')}>
+					<Icon name="star" />
+				</span>
+			{/if}
+			{#if sharedIds.has(item.id)}
+				<span class="file-badge file-badge-shared" title={t('files.shared', 'Shared')}>
+					<Icon name="oxiexport" />
+				</span>
+			{/if}
+		{/snippet}
+	</ResourceList>
+</div>
 
 {#if moveDialog.component}
 	{@const MoveDialog = moveDialog.component}
@@ -2490,41 +2011,6 @@
 <style>
 	.files-page {
 		min-height: 100%;
-	}
-
-	.files-page.dropzone-active {
-		outline: 2px dashed var(--color-accent);
-		outline-offset: -8px;
-		border-radius: var(--radius-xl);
-	}
-
-	.page-sticky-header {
-		display: flex;
-		flex-direction: column;
-		gap: var(--space-3);
-	}
-
-	.action-cell {
-		display: flex;
-		gap: var(--space-1);
-		justify-content: flex-end;
-	}
-
-	.btn-action--delete:hover {
-		color: var(--color-danger-text);
-	}
-
-	.btn-action {
-		text-decoration: none;
-	}
-
-	/* Owner column header — non-sortable, so it's a plain div rather than a
-	   sort button. Inherits the header row's weight/colour. */
-	.list-header-owner {
-		min-width: 0;
-		overflow: hidden;
-		text-overflow: ellipsis;
-		white-space: nowrap;
 	}
 
 	.item-badge {

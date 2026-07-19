@@ -179,6 +179,16 @@
 		/** Selection changed (set of selected item ids). */
 		onselectionchange?: (ids: Set<string>) => void;
 		/**
+		 * Right-click / long-press handler. When provided, ResourceList
+		 * forwards the row's `contextmenu` event to this callback and
+		 * SKIPS its built-in menu — the page renders and positions its
+		 * own. Useful when the page needs conditional entries (WOPI
+		 * editability, audio-only actions) that don't fit the flat
+		 * `contextActions` array. If both `oncontextmenu` and
+		 * `contextActions` are provided, `oncontextmenu` wins.
+		 */
+		oncontextmenu?: (e: MouseEvent, item: FileItem | FolderItem) => void;
+		/**
 		 * Per-item action cell (renders at the end of a row). Kept as a
 		 * distinct slot from the action-bar snippets below so callers
 		 * that want an item-scoped affordance (a per-row overflow menu)
@@ -320,6 +330,7 @@
 		onopen,
 		onfavorite,
 		onselectionchange,
+		oncontextmenu: onContextMenuOverride,
 		itemActions,
 		actions,
 		batchActions,
@@ -393,6 +404,13 @@
 	let gridWidth = $state(0);
 	const gridCols = $derived(gridColumns(gridWidth));
 
+	// Whether an action-cell renders per row — matches the row-template
+	// gate below. Feeds both the list-view column track and the header
+	// row's trailing placeholder so the layout stays in sync.
+	const hasActionCell = $derived(
+		!!onfavorite || !!itemActions || !!onContextMenuOverride || !!contextActions?.length
+	);
+
 	// Build the list-view column track from the enabled cells.
 	const columns = $derived(
 		[
@@ -403,7 +421,7 @@
 			showType ? '120px' : '',
 			showSize ? '110px' : '',
 			showDate ? '160px' : '',
-			itemActions ? '120px' : ''
+			hasActionCell ? '120px' : ''
 		]
 			.filter(Boolean)
 			.join(' ')
@@ -693,8 +711,8 @@
 	<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 	<div
 		class="file-item"
-		class:file-item--selected={selectable && selected.has(item.id)}
-		class:file-item--drop-target={dropTarget && dropTargetId === item.id}
+		class:selected={selectable && selected.has(item.id)}
+		class:drop-target={dropTarget && dropTargetId === item.id}
 		role={onopen ? 'button' : undefined}
 		tabindex={onopen ? 0 : undefined}
 		aria-label={onopen ? item.name : undefined}
@@ -715,10 +733,14 @@
 			: undefined}
 		ondblclick={onopen && openOnDoubleClick ? () => onopen(item) : undefined}
 		onkeydown={onopen ? (e) => e.key === 'Enter' && onopen(item) : undefined}
-		oncontextmenu={contextActions?.length ? (e) => openContext(e, item) : undefined}
+		oncontextmenu={onContextMenuOverride
+			? (e) => onContextMenuOverride(e, item)
+			: contextActions?.length
+				? (e) => openContext(e, item)
+				: undefined}
 	>
 		{#if selectable}
-			<div class="select-cell" role="presentation" onclick={(e) => e.stopPropagation()}>
+			<div class="checkbox-cell" role="presentation" onclick={(e) => e.stopPropagation()}>
 				<input
 					type="checkbox"
 					aria-label={t('common.select', 'Select')}
@@ -788,23 +810,53 @@
 				{#if dateVal != null}<span class="grid-meta__date">{formatDate(dateVal)}</span>{/if}
 			</span>
 		</div>
-		{#if onfavorite}
-			<button
-				class="rl-star"
-				class:rl-star--on={isFav}
-				data-testid={`resource-list-favorite-${item.id}-btn`}
-				title={isFav
-					? t('files.unfavorite', 'Remove favorite')
-					: t('files.favorite', 'Add favorite')}
-				aria-pressed={isFav}
-				onclick={(e) => {
-					e.stopPropagation();
-					onfavorite(item);
-				}}><Icon name={isFav ? 'star' : 'star-outline'} /></button
-			>
-		{/if}
-		{#if itemActions}
-			<div class="action-cell">{@render itemActions(item)}</div>
+		<!--
+			Every row that surfaces an action puts everything into a single
+			`.action-cell` — the shared `ported/resourceList.css` styles both
+			the favorite-star and the `.file-actions` kebab expecting them to
+			live inside `.action-cell` (grid view uses the corner-overlay CSS
+			to float `.file-actions` into the top-right; list view flexes them
+			inline). The cell renders when ANY of favorite / itemActions /
+			context-menu is enabled; a row with none of those still lays out
+			cleanly because the columns collapse via the grid track.
+		-->
+		{#if onfavorite || itemActions || onContextMenuOverride || contextActions?.length}
+			<div class="action-cell">
+				{#if onfavorite}
+					<button
+						class="favorite-star"
+						class:active={isFav}
+						data-testid={`resource-list-favorite-${item.id}-btn`}
+						title={isFav
+							? t('files.unfavorite', 'Remove favorite')
+							: t('files.favorite', 'Add favorite')}
+						aria-pressed={isFav}
+						onclick={(e) => {
+							e.stopPropagation();
+							onfavorite(item);
+						}}
+					>
+						<Icon name={isFav ? 'star' : 'star-outline'} />
+					</button>
+				{/if}
+				{#if itemActions}{@render itemActions(item)}{/if}
+				{#if onContextMenuOverride || contextActions?.length}
+					<button
+						class="file-actions"
+						data-testid={`resource-list-more-${item.id}-btn`}
+						title={t('files.more_actions', 'More actions')}
+						aria-label={t('files.more_actions', 'More actions')}
+						aria-haspopup="menu"
+						onclick={(e) => {
+							e.stopPropagation();
+							if (onContextMenuOverride) onContextMenuOverride(e, item);
+							else openContext(e, item);
+						}}
+					>
+						<Icon name="ellipsis-v" />
+					</button>
+				{/if}
+			</div>
 		{/if}
 	</div>
 {/snippet}
@@ -836,20 +888,27 @@
 	{/if}
 	<ActionBar>
 		{#snippet start()}
-			<div class="action-buttons">
-				<!--
-					The action-bar left cluster has two states:
-					  1. `batchActions` — when the user has selected items, the
-					     page's batch buttons (Move / Delete / Restore / …)
-					     replace the default cluster, prefixed with a "clear
-					     selection" close button + count label so the batch is
-					     dismissable without unchecking every row by hand.
-					  2. `actions` — the page's default cluster
-					     (Upload / New folder / Empty trash / Clear recent).
-				-->
+			<!--
+				The action-bar left cluster has two states:
+				  1. `batchActions` — when the user has selected items, the
+				     page's batch buttons (Move / Delete / Restore / …)
+				     replace the default cluster, prefixed with a "clear
+				     selection" close button + count label so the batch is
+				     dismissable without unchecking every row by hand. The
+				     wrapper carries the `.batch-selection-bar` class so
+				     the shared `batchToolbar.css` styling (muted
+				     background, count typography, action hover states)
+				     applies — matching the pre-migration `/files` look.
+				  2. `actions` — the page's default cluster
+				     (Upload / New folder / Empty trash / Clear recent).
+			-->
+			<div
+				class="action-buttons"
+				class:batch-selection-bar={selectable && selected.size > 0 && batchActions}
+			>
 				{#if selectable && selected.size > 0 && batchActions}
 					<button
-						class="rl-batch-close"
+						class="batch-bar-close"
 						title={t('common.clear', 'Clear selection')}
 						aria-label={t('common.clear', 'Clear selection')}
 						data-testid="resource-list-batch-close-btn"
@@ -857,10 +916,12 @@
 					>
 						<Icon name="times" />
 					</button>
-					<span class="rl-batch-count"
+					<span class="batch-bar-count"
 						>{t('files.selected_count', { count: selected.size }, '{{count}} selected')}</span
 					>
-					{@render batchActions(selectedItems)}
+					<div class="batch-bar-actions">
+						{@render batchActions(selectedItems)}
+					</div>
 				{:else if actions}
 					{@render actions()}
 				{/if}
@@ -975,7 +1036,7 @@
 {#snippet listHeader()}
 	<div class="list-header">
 		{#if selectable}
-			<div class="select-cell">
+			<div class="checkbox-cell">
 				<input
 					type="checkbox"
 					aria-label={t('common.select_all', 'Select all')}
@@ -991,7 +1052,7 @@
 		{#if showType}<div>{t('files.col_type', 'Type')}</div>{/if}
 		{#if showSize}<div>{t('files.col_size', 'Size')}</div>{/if}
 		{#if showDate}<div>{dateLabel ?? t('files.col_modified', 'Date')}</div>{/if}
-		{#if onfavorite || itemActions}<div></div>{/if}
+		{#if hasActionCell}<div></div>{/if}
 	</div>
 {/snippet}
 
@@ -1073,51 +1134,6 @@
 		margin-left: var(--space-2);
 	}
 
-	/* ── Selection controls inside the action bar ──
-	   Replaces the deprecated `.rl-batch` floating strip. When items
-	   are selected, the close button + count sit before the page's
-	   `batchActions` snippet inside `.action-buttons`, so the whole
-	   cluster reads as one row of the action bar. */
-	.rl-batch-close {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: 28px;
-		height: 28px;
-		border: none;
-		border-radius: var(--radius-sm);
-		background: transparent;
-		color: var(--color-text-secondary);
-		cursor: pointer;
-	}
-
-	.rl-batch-close:hover {
-		background: var(--color-bg-hover);
-	}
-
-	.rl-batch-count {
-		font-weight: var(--weight-semibold);
-		color: var(--color-text);
-	}
-
-	/* ── Selection column ── */
-	.select-cell {
-		display: flex;
-		align-items: center;
-		justify-content: center;
-	}
-
-	.file-item--selected {
-		background: var(--color-accent-bg);
-	}
-
-	/* Drop-target highlight — mirrors the legacy files browser's cue when
-	   dragging a row over a folder row. */
-	.file-item--drop-target {
-		outline: 2px dashed var(--color-accent);
-		outline-offset: -2px;
-	}
-
 	/* ── Owner vignette ── */
 	.owner-cell {
 		display: flex;
@@ -1136,29 +1152,6 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		white-space: nowrap;
-	}
-
-	/* ── Favorite star ── */
-	.rl-star {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		width: 32px;
-		height: 32px;
-		border: none;
-		border-radius: var(--radius-sm);
-		background: transparent;
-		color: var(--color-text-faint);
-		cursor: pointer;
-	}
-
-	.rl-star:hover {
-		background: var(--color-bg-hover);
-		color: var(--color-text-secondary);
-	}
-
-	.rl-star--on {
-		color: var(--color-warning-text-amber);
 	}
 
 	/* ── Swimlane section header ── */
