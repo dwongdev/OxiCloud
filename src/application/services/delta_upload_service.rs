@@ -398,7 +398,7 @@ impl DeltaUploadService {
         let verification = self
             .dedup
             .hash_chunk_sequence(
-                &request
+                request
                     .chunks
                     .iter()
                     .map(|c| (c.h.clone(), c.s))

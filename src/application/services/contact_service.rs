@@ -283,12 +283,11 @@ impl ContactService {
 
         // Email addresses
         for email in contact.email() {
-            let _ = write!(
-                vcard,
-                "EMAIL;TYPE={}:{}\r\n",
-                email.r#type.to_uppercase(),
-                email.email
-            );
+            vcard.push_str("EMAIL;TYPE=");
+            crate::common::fmt::push_upper(&mut vcard, &email.r#type);
+            vcard.push(':');
+            vcard.push_str(&email.email);
+            vcard.push_str("\r\n");
         }
 
         // Phone numbers
@@ -305,17 +304,18 @@ impl ContactService {
 
         // Addresses
         for addr in contact.address() {
-            let addr_type = addr.r#type.to_uppercase();
             let street = addr.street.as_deref().unwrap_or_default();
             let city = addr.city.as_deref().unwrap_or_default();
             let state = addr.state.as_deref().unwrap_or_default();
             let postal_code = addr.postal_code.as_deref().unwrap_or_default();
             let country = addr.country.as_deref().unwrap_or_default();
 
+            vcard.push_str("ADR;TYPE=");
+            crate::common::fmt::push_upper(&mut vcard, &addr.r#type);
             let _ = write!(
                 vcard,
-                "ADR;TYPE={}:;;{};{};{};{};{}\r\n",
-                addr_type, street, city, state, postal_code, country
+                ":;;{};{};{};{};{}\r\n",
+                street, city, state, postal_code, country
             );
         }
 

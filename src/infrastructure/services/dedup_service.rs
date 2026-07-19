@@ -912,7 +912,7 @@ impl DedupService {
     /// the declared one — the manifest's Range arithmetic depends on it.
     pub async fn hash_chunk_sequence(
         &self,
-        chunks: &[(String, u64)],
+        chunks: Vec<(String, u64)>,
         sniff_len: usize,
     ) -> Result<(String, Vec<u8>), DomainError> {
         let mut hasher = blake3::Hasher::new();
@@ -925,7 +925,7 @@ impl DedupService {
         // strictly in manifest order: `buffered` yields in input order.
         let prefetch = self.backend.read_prefetch().max(1);
         let backend = self.backend.clone();
-        let mut opened = futures::stream::iter(chunks.iter().cloned())
+        let mut opened = futures::stream::iter(chunks)
             .map(move |(hash, declared_size)| {
                 let backend = backend.clone();
                 async move {
@@ -1032,7 +1032,11 @@ impl DedupService {
         let mut total_size: u64 = 0;
         let mut chunk_hashes: Vec<String> = Vec::new();
         let mut chunk_sizes: Vec<u64> = Vec::new();
-        let mut session_seen: HashSet<String> = HashSet::new();
+        // Keyed on the raw 32-byte BLAKE3 digest (`Copy`, no heap) rather than
+        // the 64-char hex String: the intra-upload dedup set no longer clones a
+        // String per chunk, holds 32-byte inline keys, and hashes 32 bytes not
+        // 64 on every membership test (benches/ROUND17.md §D2).
+        let mut session_seen: HashSet<[u8; 32]> = HashSet::new();
         let mut pending: Vec<(String, Bytes)> = Vec::new();
         let mut pending_bytes: usize = 0;
         // Depth-1 settle pipeline: batch N settles on a spawned task while
@@ -1077,12 +1081,19 @@ impl DedupService {
             // Per-chunk hashing is ≤ 1 MiB of BLAKE3 (< 1 ms) — cheaper than
             // a spawn_blocking round-trip per chunk.
             file_hasher.update(&data);
-            let hash = blake3::hash(&data).to_hex().to_string();
+            let digest = blake3::hash(&data);
+            let hash = digest.to_hex().to_string();
             chunk_sizes.push(data.len() as u64);
-            chunk_hashes.push(hash.clone());
 
-            if session_seen.insert(hash.clone()) {
+            // The hex `hash` is materialised once. A genuinely new chunk needs
+            // it in three places — the ordered manifest, the dedup set key and
+            // the backend write — but the set keys on the raw digest (no clone),
+            // so only `chunk_hashes` is cloned before `pending` takes the
+            // original. A duplicate within this upload needs it only for the
+            // manifest: the `else` moves it in, no clone (benches/ROUND17.md §D2).
+            if session_seen.insert(*digest.as_bytes()) {
                 pending_bytes += data.len();
+                chunk_hashes.push(hash.clone());
                 pending.push((hash, Bytes::from(data)));
                 if pending.len() >= Self::FLUSH_MAX_CHUNKS || pending_bytes >= Self::FLUSH_MAX_BYTES
                 {
@@ -1111,6 +1122,10 @@ impl DedupService {
                     }
                     pending_bytes = 0;
                 }
+            } else {
+                // Duplicate within this upload: only the ordered manifest needs
+                // the hash. Move it in — no set/pending copy, zero extra allocs.
+                chunk_hashes.push(hash);
             }
         }
 
@@ -4000,7 +4015,7 @@ mod delta_upload_integration_tests {
             .collect();
 
         let (computed, head) = svc
-            .hash_chunk_sequence(&sequence, 16)
+            .hash_chunk_sequence(sequence.clone(), 16)
             .await
             .expect("verification read");
         assert_eq!(computed, file_hash, "recomputed hash must match");
@@ -4015,7 +4030,7 @@ mod delta_upload_integration_tests {
         let mut lying = sequence.clone();
         lying[0].1 += 1;
         assert!(
-            svc.hash_chunk_sequence(&lying, 0).await.is_err(),
+            svc.hash_chunk_sequence(lying, 0).await.is_err(),
             "size lie must fail verification"
         );
 

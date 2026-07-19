@@ -354,6 +354,19 @@ name = "bench_micro_allocs"
 path = "examples/bench_micro_allocs.rs"
 required-features = ["bench"]
 
+# Round-17 battery ────────────────────────────────────────────────────────────
+
+# Round-17 dedup + CardDAV CPU/alloc micro-pack — `hash_chunk_sequence` by-value
+# (drop the delta-commit verification's 2nd per-chunk hash clone), chunk-ingest
+# `session_seen` keyed on the raw 32-byte BLAKE3 digest + branch-split manifest
+# push (3 → 2/1 hash-String allocs per ingested chunk), `contact_to_vcard` TYPE
+# tokens pushed upper-cased into the buffer (drop the per-token `to_uppercase`
+# String). No Postgres.
+[[example]]
+name = "bench_round17_micro"
+path = "examples/bench_round17_micro.rs"
+required-features = ["bench"]
+
 # Round-16 battery ────────────────────────────────────────────────────────────
 
 # Round-16 CPU/alloc micro-pack — folder display constants `Arc::from` → interned

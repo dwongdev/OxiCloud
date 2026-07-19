@@ -210,6 +210,22 @@ pub fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
+/// Append the upper-cased form of `s` to `buf` without a temporary `String`.
+///
+/// Byte-identical to `buf.push_str(&s.to_uppercase())` — same
+/// `char::to_uppercase` expansion (incl. ß → SS, ﬀ → FF) — but writes straight
+/// into the caller's buffer. The vCard emit path (`contact_to_vcard`,
+/// `generate_vcard`) formats an `EMAIL`/`TEL`/`ADR` `TYPE=` token per line, and
+/// the old `write!(…, "{}", ty.to_uppercase())` heap-allocated one throw-away
+/// `String` per token per contact (benches/ROUND17.md §V1).
+pub fn push_upper(buf: &mut String, s: &str) {
+    for c in s.chars() {
+        for u in c.to_uppercase() {
+            buf.push(u);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,6 +245,20 @@ mod tests {
         for bytes in cases {
             let reference: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
             assert_eq!(hex_lower(bytes), reference);
+        }
+    }
+
+    /// `push_upper` must match `push_str(&s.to_uppercase())` byte for byte,
+    /// including multi-char upper-casings (ß → SS) and dotless-i.
+    #[test]
+    fn push_upper_matches_to_uppercase() {
+        let cases = [
+            "", "home", "WORK", "Cell", "voice", "x-custom", "café", "straße", "ﬀ", "ı",
+        ];
+        for s in cases {
+            let mut got = String::new();
+            push_upper(&mut got, s);
+            assert_eq!(got, s.to_uppercase(), "push_upper differs for {s:?}");
         }
     }
 

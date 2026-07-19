@@ -970,28 +970,27 @@ pub fn contact_to_vcard(contact: &ContactDto) -> String {
     }
 
     for email in &contact.email {
-        let _ = write!(
-            vcard,
-            "EMAIL;TYPE={}:{}\r\n",
-            email.r#type.to_uppercase(),
-            email.email
-        );
+        vcard.push_str("EMAIL;TYPE=");
+        crate::common::fmt::push_upper(&mut vcard, &email.r#type);
+        vcard.push(':');
+        vcard.push_str(&email.email);
+        vcard.push_str("\r\n");
     }
 
     for phone in &contact.phone {
-        let _ = write!(
-            vcard,
-            "TEL;TYPE={}:{}\r\n",
-            phone.r#type.to_uppercase(),
-            phone.number
-        );
+        vcard.push_str("TEL;TYPE=");
+        crate::common::fmt::push_upper(&mut vcard, &phone.r#type);
+        vcard.push(':');
+        vcard.push_str(&phone.number);
+        vcard.push_str("\r\n");
     }
 
     for addr in &contact.address {
+        vcard.push_str("ADR;TYPE=");
+        crate::common::fmt::push_upper(&mut vcard, &addr.r#type);
         let _ = write!(
             vcard,
-            "ADR;TYPE={}:;;{};{};{};{};{}\r\n",
-            addr.r#type.to_uppercase(),
+            ":;;{};{};{};{};{}\r\n",
             addr.street.as_deref().unwrap_or(""),
             addr.city.as_deref().unwrap_or(""),
             addr.state.as_deref().unwrap_or(""),
