@@ -79,6 +79,7 @@
 	import { formatDate, iconNameFromClass, fileIconKindClass } from '$lib/utils/display';
 	import { gridColumns } from '$lib/utils/grid';
 	import { ResourceSectionsBuilder } from '$lib/utils/resourceSections';
+	import { ItemIndexBuilder } from '$lib/utils/itemIndex';
 	import { fileThumbnailUrl, thumbSizeForView } from '$lib/api/endpoints/files';
 	import {
 		canThumbnailClientSide,
@@ -468,13 +469,18 @@
 	// stale-selection cleanup only fires when items truly leave the
 	// dataset (reload, delete, etc.), not when the filter hides them.
 	//
-	// Index rebuilt only when `items` changes; the projection is then
-	// O(k · log k) in the selection size k instead of a full O(N) re-scan
-	// of the list on every toggle (O(N²)-ish across a shift-range gesture
-	// once the batch toolbar is mounted — benches/ROUND11.md §S1). The
-	// index sort preserves item order, so the toolbar sees the same array
-	// the old filter produced.
-	const itemIndexById = $derived(new Map(items.map((i, idx) => [i.id, idx])));
+	// Index extended over the freshly-appended page only (never re-scanned in
+	// full) via `ItemIndexBuilder`: an infinite-scroll drain with a selection
+	// active collapses from Σ O(N²) Map rebuilds to O(N) total, and the Map
+	// reference is reused across appends so the reap-stale effect below no
+	// longer re-fires (nor re-allocates an O(N) id Set) on a page that removed
+	// nothing — its reference only changes on a rebuild (reload / deletion),
+	// exactly when a reap is warranted. The projection is then O(k · log k) in
+	// the selection size k, not a full O(N) re-scan on every toggle
+	// (benches/ROUND11.md §S1, benches/ROUND18.md §F1). The index sort preserves
+	// item order, so the toolbar sees the same array the old filter produced.
+	const itemIndex = new ItemIndexBuilder<FileItem | FolderItem>();
+	const itemIndexById = $derived(itemIndex.sync(items));
 	const selectedItems = $derived.by(() => {
 		const picked: { idx: number; item: FileItem | FolderItem }[] = [];
 		for (const id of selected) {
@@ -487,15 +493,20 @@
 
 	// Drop selection ids that are no longer present after a reload.
 	$effect(() => {
-		// With nothing selected (the common case) every infinite-scroll page
-		// re-fired this effect and built a throwaway O(N) id Set for a loop
-		// that never runs — skip straight out. `selected.size` is reactive,
-		// so the effect re-fires when a selection appears.
+		// With nothing selected (the common case) the loop never runs — skip
+		// straight out. `selected.size` is reactive, so the effect re-fires
+		// when a selection appears.
 		if (selected.size === 0) return;
-		const ids = new Set(items.map((i) => i.id));
+		// Test membership against the incremental `itemIndexById` rather than a
+		// throwaway O(N) id Set rebuilt per page. Its reference is stable across
+		// infinite-scroll appends (which never remove an id — nothing to reap)
+		// so this effect no longer re-fires on every page; the reference changes
+		// only on a rebuild (reload / deletion), which is exactly when a stale
+		// selection must be dropped (benches/ROUND18.md §F1).
+		const index = itemIndexById;
 		let changed = false;
 		for (const id of selected) {
-			if (!ids.has(id)) {
+			if (!index.has(id)) {
 				selected.delete(id);
 				changed = true;
 			}

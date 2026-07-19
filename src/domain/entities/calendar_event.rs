@@ -1092,40 +1092,70 @@ impl CalendarEvent {
      * @param property_name The name of the property to update
      * @param value The new value for the property
      */
+    /// Write `\n{name}:` into `buf` and return it as `&str`, or `None` if the
+    /// name is too long to fit (unreachable for RFC 5545 property names, the
+    /// longest of which — `LAST-MODIFIED`, `RECURRENCE-ID` — are 13 bytes).
+    ///
+    /// The bare-LF form is deliberate: `\n{name}:` is a suffix of the CRLF form
+    /// `\r\n{name}:`, so a single search for it matches a property line whether
+    /// the body is LF- or CRLF-terminated and returns the LF offset either way
+    /// — behaviour-identical to the old `find("\n..").or(find("\r\n.."))` (the
+    /// CRLF needle could never match where the LF one didn't). Built on the
+    /// stack: no per-call heap needle.
+    fn line_needle<'a>(buf: &'a mut [u8; 64], name: &str) -> Option<&'a str> {
+        let n = name.len();
+        if n + 2 > buf.len() {
+            return None;
+        }
+        buf[0] = b'\n';
+        buf[1..1 + n].copy_from_slice(name.as_bytes());
+        buf[1 + n] = b':';
+        // `name` is valid UTF-8 and only ASCII bytes were added around it.
+        std::str::from_utf8(&buf[..n + 2]).ok()
+    }
+
     fn update_ical_property(&mut self, property_name: &str, value: &str) {
-        let search_str = format!("\n{}:", property_name);
-        let search_str_alt = format!("\r\n{}:", property_name);
+        let mut buf = [0u8; 64];
+        let needle_owned;
+        let needle: &str = match Self::line_needle(&mut buf, property_name) {
+            Some(n) => n,
+            None => {
+                needle_owned = format!("\n{property_name}:");
+                &needle_owned
+            }
+        };
 
-        // Check if property exists
-        let pos = self
-            .ical_data
-            .find(&search_str)
-            .or_else(|| self.ical_data.find(&search_str_alt));
-
-        if let Some(pos) = pos {
-            // Find the start of the value
-            let value_start = pos + search_str.len();
-
-            // Find the end of the value (next line or end of string)
+        if let Some(pos) = self.ical_data.find(needle) {
+            // Value spans from just after `\n{NAME}:` to the next LF (or EOF).
+            let value_start = pos + needle.len();
             let value_end = self.ical_data[value_start..]
                 .find('\n')
-                .map(|p| value_start + p)
-                .unwrap_or_else(|| self.ical_data.len());
+                .map_or(self.ical_data.len(), |p| value_start + p);
 
-            // Replace the value
-            let before = &self.ical_data[..value_start];
-            let after = &self.ical_data[value_end..];
-            self.ical_data = format!("{}{}{}", before, value, after);
+            // In place: reuses the body's own buffer (growing it once only when
+            // the new value is longer) instead of allocating a whole fresh body
+            // String per property, as the old `format!("{}{}{}")` did — on a
+            // multi-field edit that was one full-body (up to ~11 KB) allocation
+            // per changed property.
+            self.ical_data.replace_range(value_start..value_end, value);
         } else {
-            // Property doesn't exist, add it before END:VEVENT
+            // Property absent: insert `{NAME}:{value}\n` before END:VEVENT.
             let end_pos = self
                 .ical_data
                 .find("END:VEVENT")
                 .unwrap_or(self.ical_data.len());
 
-            let before = &self.ical_data[..end_pos];
-            let after = &self.ical_data[end_pos..];
-            self.ical_data = format!("{}{}:{}\n{}", before, property_name, value, after);
+            // Insert the four pieces at one point in reverse order so the result
+            // is `{NAME}:{value}\n` before END:VEVENT — byte-identical to the old
+            // `format!("{}{}:{}\n{}")` — without allocating a fresh body String
+            // (nor a value-sized fragment). One `reserve` caps it at a single
+            // grow; the shifted tail is just the trailing END:VEVENT/VCALENDAR.
+            self.ical_data
+                .reserve(property_name.len() + value.len() + 2);
+            self.ical_data.insert(end_pos, '\n');
+            self.ical_data.insert_str(end_pos, value);
+            self.ical_data.insert(end_pos, ':');
+            self.ical_data.insert_str(end_pos, property_name);
         }
     }
 
@@ -1135,26 +1165,25 @@ impl CalendarEvent {
      * @param property_name The name of the property to remove
      */
     fn remove_ical_property(&mut self, property_name: &str) {
-        let search_str = format!("\n{}:", property_name);
-        let search_str_alt = format!("\r\n{}:", property_name);
+        let mut buf = [0u8; 64];
+        let needle_owned;
+        let needle: &str = match Self::line_needle(&mut buf, property_name) {
+            Some(n) => n,
+            None => {
+                needle_owned = format!("\n{property_name}:");
+                &needle_owned
+            }
+        };
 
-        // Check if property exists
-        let pos = self
-            .ical_data
-            .find(&search_str)
-            .or_else(|| self.ical_data.find(&search_str_alt));
-
-        if let Some(pos) = pos {
-            // Find the end of the value (next line or end of string)
+        if let Some(pos) = self.ical_data.find(needle) {
+            // Delete from the property's leading LF (`pos`) through the end of
+            // its value line (exclusive of the next line's LF) — byte-identical
+            // to the old `format!("{}{}", &data[..pos], &data[value_end..])`,
+            // but in place, with no fresh body String.
             let value_end = self.ical_data[pos + 1..]
                 .find('\n')
-                .map(|p| pos + 1 + p)
-                .unwrap_or_else(|| self.ical_data.len());
-
-            // Remove the property
-            let before = &self.ical_data[..pos];
-            let after = &self.ical_data[value_end..];
-            self.ical_data = format!("{}{}", before, after);
+                .map_or(self.ical_data.len(), |p| pos + 1 + p);
+            self.ical_data.replace_range(pos..value_end, "");
         }
     }
 }

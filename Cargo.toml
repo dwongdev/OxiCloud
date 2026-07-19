@@ -354,6 +354,19 @@ name = "bench_micro_allocs"
 path = "examples/bench_micro_allocs.rs"
 required-features = ["bench"]
 
+# Round-18 battery ────────────────────────────────────────────────────────────
+
+# Round-18 calendar-event edit CPU/alloc micro-pack — `update_ical_property` /
+# `remove_ical_property` mutate the `ical_data` body in place (`replace_range` /
+# `insert`) instead of re-`format!`ing the whole body per changed property, and
+# build the single `\nNAME:` search needle on the stack (dropping the redundant
+# `\r\nNAME:` needle). A multi-field REST edit went from one full-body (up to
+# ~11 KB) allocation per property to none. No Postgres.
+[[example]]
+name = "bench_round18_micro"
+path = "examples/bench_round18_micro.rs"
+required-features = ["bench"]
+
 # Round-17 battery ────────────────────────────────────────────────────────────
 
 # Round-17 dedup + CardDAV CPU/alloc micro-pack — `hash_chunk_sequence` by-value
