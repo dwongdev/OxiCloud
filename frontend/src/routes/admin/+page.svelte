@@ -49,6 +49,7 @@
 		listAllDrives,
 		listDriveMembersAdmin,
 		removeDriveMemberAdmin,
+		updateDriveQuota,
 		type SmtpInfo,
 		type SmtpTestResult,
 		type StorageSettings,
@@ -72,6 +73,7 @@
 	import Modal from '$lib/components/Modal.svelte';
 	import OwnerAvatarStack from '$lib/components/OwnerAvatarStack.svelte';
 	import PolicyList from '$lib/components/PolicyList.svelte';
+	import QuotaEditor from '$lib/components/QuotaEditor.svelte';
 	import UserVignette from '$lib/components/UserVignette.svelte';
 	import { t } from '$lib/i18n/index.svelte';
 	import { readPolicyBool } from '$lib/utils/drivePolicies';
@@ -617,13 +619,16 @@
 		quotaUnit: (1024 ** 3) as number
 	});
 
-	// Quota edit modal
+	// User-envelope quota edit modal state. Draft (unlimited flag,
+	// value, unit) lives inside <QuotaEditor>; the parent only tracks
+	// the subject (which user) and the current bytes to seed with.
 	let quotaModal = $state<{
 		userId: string;
 		username: string;
-		value: number;
-		unit: number;
+		initialBytes: number;
 	} | null>(null);
+	let quotaModalBusy = $state(false);
+	let quotaModalError = $state<string | null>(null);
 
 	// Reset-password modal
 	let resetModal = $state<{ userId: string; username: string } | null>(null);
@@ -761,22 +766,30 @@
 	}
 
 	function openQuota(u: User) {
+		quotaModalError = null;
 		quotaModal = {
 			userId: u.id,
 			username: u.username || u.email,
-			value:
-				u.storage_quota_bytes > 0 ? Math.round((u.storage_quota_bytes / 1024 ** 3) * 10) / 10 : 0,
-			unit: 1024 ** 3
+			initialBytes: u.storage_quota_bytes
 		};
 	}
-	async function saveQuota() {
+	// `unlimited` maps to 0 on the wire — that's the backend
+	// convention for the user envelope (`quota <= 0` short-circuit
+	// in `eval_user_envelope`). Encoding the "unlimited" concept
+	// happens here, so the shared <QuotaEditor> doesn't have to
+	// know about endpoint-specific magic values.
+	async function saveQuota(result: { unlimited: boolean; bytes: number }) {
 		if (!quotaModal) return;
+		quotaModalBusy = true;
+		quotaModalError = null;
 		try {
-			await setUserQuota(quotaModal.userId, Math.round(quotaModal.value * quotaModal.unit));
+			await setUserQuota(quotaModal.userId, result.unlimited ? 0 : result.bytes);
 			quotaModal = null;
 			await loadUsers();
 		} catch (e) {
-			reportError(e);
+			quotaModalError = errorMessage(e);
+		} finally {
+			quotaModalBusy = false;
 		}
 	}
 
@@ -947,9 +960,12 @@
 
 	function driveKindLabel(d: Drive): string {
 		if (d.kind === 'shared') return t('admin.drive_kind_shared', 'Shared');
-		return d.default_for_user
-			? t('admin.drive_kind_personal_default', 'Personal (default)')
-			: t('admin.drive_kind_personal', 'Personal');
+		return t('admin.drive_kind_personal', 'Personal');
+	}
+	// The "(default)" annotation renders on a separate line under the
+	// kind badge so the Kind column stays narrow (users' request).
+	function driveDefaultSuffix(d: Drive): string | null {
+		return d.default_for_user ? t('admin.drive_kind_default_suffix', '(default)') : null;
 	}
 
 	function openDriveCreate() {
@@ -1181,6 +1197,67 @@
 			managePoliciesError = errorMessage(e);
 		} finally {
 			managePoliciesBusy = false;
+		}
+	}
+
+	// ─────────────────────────────────────────────────────────────
+	// Shared-drive quota edit modal.
+	//
+	// Personal drives are refused server-side (400) because their
+	// effective cap is the owner user's `storage_quota_bytes`
+	// envelope (memory `project_user_envelope_quota_model`). The
+	// action button in the table doesn't render for personal drives,
+	// so this state only feeds shared-drive PATCH calls.
+	//
+	// The draft (value, unit, unlimited toggle) lives inside the
+	// shared <QuotaEditor>; the parent tracks only the subject and
+	// current bytes.
+	// ─────────────────────────────────────────────────────────────
+	let driveQuotaModal = $state<{
+		driveId: string;
+		driveName: string;
+		initialBytes: number | null;
+	} | null>(null);
+	let driveQuotaError = $state<string | null>(null);
+	let driveQuotaBusy = $state(false);
+
+	function openDriveQuota(d: Drive) {
+		driveQuotaError = null;
+		driveQuotaModal = {
+			driveId: d.id,
+			driveName: d.name,
+			// `quota_bytes` is `number | null | undefined` on the DTO
+			// (optional + nullable). Both undefined and null map to
+			// unlimited — collapse to null for the modal.
+			initialBytes: d.quota_bytes ?? null
+		};
+	}
+
+	// `unlimited` maps to `null` on the wire for the drive endpoint
+	// (backend `Option::None` = "no cap") — distinct from the user
+	// envelope, which uses `0`. Both encodings live in their
+	// respective save callbacks, keeping <QuotaEditor> endpoint-
+	// agnostic.
+	async function saveDriveQuota(result: { unlimited: boolean; bytes: number }) {
+		if (!driveQuotaModal) return;
+		driveQuotaBusy = true;
+		driveQuotaError = null;
+		try {
+			const quota_bytes = result.unlimited ? null : result.bytes;
+			const persisted = await updateDriveQuota(driveQuotaModal.driveId, quota_bytes);
+			const driveId = driveQuotaModal.driveId;
+			drivesList = drivesList.map((d) =>
+				d.id === driveId ? { ...d, quota_bytes: persisted } : d
+			);
+			// Sibling surfaces (sidebar picker, breadcrumb) read the
+			// cached `GET /api/drives`. Mirrors the policies-modal
+			// pattern above.
+			void drivesStore.refresh();
+			driveQuotaModal = null;
+		} catch (e) {
+			driveQuotaError = errorMessage(e);
+		} finally {
+			driveQuotaBusy = false;
 		}
 	}
 
@@ -2187,7 +2264,7 @@
 									aria-label={t('admin.edit_quota_title', 'Edit quota')}
 									onclick={() => openQuota(u)}
 								>
-									<Icon name="box" />
+									<Icon name="gauge-simple-high" />
 								</button>
 								{#if !isOidcUser(u)}
 									<button
@@ -2321,9 +2398,14 @@
 								</div>
 							</td>
 							<td>
-								<span class="badge badge--{d.kind === 'shared' ? 'admin' : 'user'}">
-									{driveKindLabel(d)}
-								</span>
+								<div class="drive-kind-cell">
+									<span class="badge badge--{d.kind === 'shared' ? 'admin' : 'user'}">
+										{driveKindLabel(d)}
+									</span>
+									{#if driveDefaultSuffix(d)}
+										<span class="muted drive-kind-cell__suffix">{driveDefaultSuffix(d)}</span>
+									{/if}
+								</div>
 							</td>
 							<td>
 								{#if driveMembers[d.id]}
@@ -2391,6 +2473,26 @@
 									>
 										<Icon name="shield-alt" />
 									</button>
+									<!-- Shared-drive quota edit. Personal drives use the
+									     owner user's `storage_quota_bytes` envelope; the
+									     backend refuses PATCH /api/drives/{id}/quota on a
+									     personal drive with 400 (see the service-layer
+									     guard and Step 25 of drive_quota.hurl). Render an
+									     invisible placeholder on personal rows so the
+									     column stays aligned. -->
+									{#if d.kind === 'shared'}
+										<button
+											class="icon-btn"
+											data-testid={`admin-drive-edit-quota-${d.id}`}
+											title={t('admin.drive_edit_quota', 'Edit quota')}
+											aria-label={t('admin.drive_edit_quota', 'Edit quota')}
+											onclick={() => openDriveQuota(d)}
+										>
+											<Icon name="gauge-simple-high" />
+										</button>
+									{:else}
+										<span class="icon-btn icon-btn--placeholder" aria-hidden="true"></span>
+									{/if}
 									<!-- Default-personal drives can never be deleted
 									     (backend returns 405). Render an invisible
 									     placeholder so the row's columns still line up
@@ -2874,58 +2976,34 @@
 	{/snippet}
 </Modal>
 
-<!-- Quota edit modal -->
-<Modal
+<!-- User-envelope quota edit — uses the shared <QuotaEditor>.
+     "Unlimited" checkbox maps to 0 on the wire; positive value * unit
+     is sent verbatim to `setUserQuota`. -->
+<QuotaEditor
 	open={quotaModal !== null}
 	title={t('admin.edit_quota_title', 'Edit quota')}
+	subjectName={quotaModal?.username ?? ''}
+	initialBytes={quotaModal?.initialBytes ?? 0}
+	busy={quotaModalBusy}
+	error={quotaModalError}
+	testIdPrefix="admin-user-quota"
 	onclose={() => (quotaModal = null)}
->
-	{#if quotaModal}
-		<form
-			id="quota-form"
-			class="form"
-			data-testid="admin-quota-form"
-			onsubmit={(e) => {
-				e.preventDefault();
-				void saveQuota();
-			}}
-		>
-			<p class="muted">
-				{t('admin.quota_for', 'Quota for')} <strong>{quotaModal.username}</strong>
-			</p>
-			<label
-				><span>{t('admin.quota', 'Quota')}</span>
-				<div class="quota-input">
-					<input
-						type="number"
-						data-testid="admin-quota-value-input"
-						min="0"
-						step="0.1"
-						bind:value={quotaModal.value}
-					/>
-					<select bind:value={quotaModal.unit} data-testid="admin-quota-unit-select">
-						{#each QUOTA_UNITS as unit (unit.label)}<option value={unit.value}>{unit.label}</option
-							>{/each}
-					</select>
-				</div>
-				<span class="muted">{t('admin.quota_unlimited_hint', '0 = unlimited')}</span></label
-			>
-		</form>
-	{/if}
-	{#snippet footer()}
-		<button class="btn" data-testid="admin-quota-cancel-btn" onclick={() => (quotaModal = null)}
-			>{t('common.cancel', 'Cancel')}</button
-		>
-		<button
-			class="btn btn--primary"
-			type="submit"
-			form="quota-form"
-			data-testid="admin-quota-save-btn"
-		>
-			{t('common.save', 'Save')}
-		</button>
-	{/snippet}
-</Modal>
+	onsave={saveQuota}
+/>
+
+<!-- Shared-drive quota edit — same component, different endpoint.
+     "Unlimited" maps to `null` on the wire (see saveDriveQuota). -->
+<QuotaEditor
+	open={driveQuotaModal !== null}
+	title={t('admin.drive_edit_quota', 'Edit quota')}
+	subjectName={driveQuotaModal?.driveName ?? ''}
+	initialBytes={driveQuotaModal?.initialBytes ?? null}
+	busy={driveQuotaBusy}
+	error={driveQuotaError}
+	testIdPrefix="admin-drive-quota"
+	onclose={() => (driveQuotaModal = null)}
+	onsave={saveDriveQuota}
+/>
 
 <!-- Reset-password modal -->
 <Modal
@@ -3872,9 +3950,23 @@
 	   (see `.icon-btn--placeholder`). */
 	.actions--drive {
 		display: grid;
-		grid-template-columns: repeat(3, auto);
+		/* Four action slots per row: manage-owners, policies, edit-
+		   quota, delete. Fixed columns keep icons aligned across
+		   rows even when a row renders placeholders for
+		   inapplicable actions (e.g. personal drives have no
+		   owners roster). */
+		grid-template-columns: repeat(4, auto);
 		justify-content: end;
 		align-items: center;
+	}
+	.drive-kind-cell {
+		display: flex;
+		flex-direction: column;
+		align-items: flex-start;
+		gap: 0.15rem;
+	}
+	.drive-kind-cell__suffix {
+		font-size: 0.85em;
 	}
 
 	.icon-btn--placeholder {

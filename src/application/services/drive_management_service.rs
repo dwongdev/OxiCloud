@@ -533,6 +533,116 @@ impl DriveManagementService {
         Ok(merged)
     }
 
+    /// `PATCH /api/drives/{id}/quota`. OxiCloud-admin only.
+    ///
+    /// `quota_bytes = None` (or ≤ 0 from the wire, normalised to None
+    /// here) means unlimited — matches the DB convention where a NULL
+    /// `drives.quota_bytes` row is treated as no cap by
+    /// `storage_usage_service`.
+    ///
+    /// **Refuses personal drives** with `InvalidInput`. Personal
+    /// drives carry `NULL` on the row by design (memory
+    /// `project_user_envelope_quota_model`) — the effective cap comes
+    /// from the owner user's `storage_quota_bytes`, editable via
+    /// `PUT /api/admin/users/{id}/quota`. Allowing a per-personal-drive
+    /// quota here would fork the model into two competing enforcement
+    /// paths; keep the envelope model intact.
+    ///
+    /// **Soft-quota semantic on reduction.** A newly-lowered quota
+    /// can land BELOW the drive's current `used_bytes` — this method
+    /// accepts that without failing. `storage_usage_service` gates
+    /// new writes on `used + delta ≤ quota`, so a shared drive
+    /// already over its freshly-reduced cap can only shrink (delete)
+    /// until it comes back under; no existing content is retroactively
+    /// touched. Ed's call: intentional design, matches how filesystems
+    /// treat quota shrink (Linux xfs quota tools do the same).
+    ///
+    /// Follows the same handler-gates-admin deviation from AGENTS.md
+    /// as `update_policies` — see memory
+    /// `feedback_drive_policies_admin_at_handler`. The handler
+    /// refuses non-admin callers with 404 anti-enumeration; this
+    /// method trusts that gate and writes unconditionally on
+    /// shared-kind drives.
+    ///
+    /// Emits `drive.quota_changed` for steady-state observability.
+    /// Returns the persisted post-mutation quota so the handler can
+    /// echo it in the API response.
+    pub async fn update_quota(
+        &self,
+        caller_id: Uuid,
+        drive_id: Uuid,
+        quota_bytes: Option<i64>,
+    ) -> Result<Option<i64>, DomainError> {
+        // Normalise sentinel values: `0` and negative numbers on the
+        // wire all mean "unlimited" — same convention the storage
+        // service uses on the query side (see `check_drive_quota`).
+        // Doing this once here (rather than in every caller) keeps the
+        // audit line + DB row consistent.
+        let quota_bytes = quota_bytes.filter(|&q| q > 0);
+
+        let drive = self
+            .drive_repo
+            .get_by_id(drive_id)
+            .await
+            .map_err(|e| match e {
+                DriveRepositoryError::NotFound(_) => {
+                    DomainError::not_found("Drive", drive_id.to_string())
+                }
+                other => DomainError::internal_error(
+                    "Drive",
+                    format!("Failed to fetch drive: {other:?}"),
+                ),
+            })?;
+
+        // Personal drives are refused with `InvalidInput` — a 400 that
+        // the handler doesn't need to translate specially. Audit line
+        // captures the attempt so an operator can see if someone is
+        // trying to circumvent the envelope model.
+        if drive.drive.kind == crate::domain::entities::drive::DriveKind::Personal {
+            tracing::info!(
+                target: "audit",
+                event = "drive.quota_change_rejected",
+                reason = "personal_drive_uses_user_envelope",
+                drive_id = %drive_id,
+                by = %caller_id,
+                "👮🏻‍♂️ refused quota edit on personal drive {drive_id} — use PUT /api/admin/users/{{id}}/quota",
+            );
+            return Err(DomainError::validation_error(
+                "Personal drive quota is not editable here — set the owner user's storage envelope via PUT /api/admin/users/{id}/quota instead.",
+            ));
+        }
+
+        let persisted = self
+            .drive_repo
+            .update_quota(drive_id, quota_bytes)
+            .await
+            .map_err(|e| match e {
+                DriveRepositoryError::NotFound(_) => {
+                    DomainError::not_found("Drive", drive_id.to_string())
+                }
+                other => {
+                    DomainError::internal_error("Drive", format!("update_quota failed: {other:?}"))
+                }
+            })?;
+
+        // Under-usage note in the audit line: an admin should be able
+        // to spot from `grep audit drive.quota_changed` whether the
+        // new cap put the drive into the "over quota, delete-only"
+        // state, so the numbers (used, new quota) are both present.
+        tracing::info!(
+            target: "audit",
+            event = "drive.quota_changed",
+            drive_id = %drive_id,
+            by = %caller_id,
+            new_quota_bytes = ?persisted,
+            used_bytes = drive.drive.used_bytes,
+            over_quota = persisted.map(|q| drive.drive.used_bytes > q).unwrap_or(false),
+            "💾 drive quota updated",
+        );
+
+        Ok(persisted)
+    }
+
     /// D5 `forbid_external_sharing` for `set_member_role`. Fetches the
     /// data this surface has but grant_handler doesn't (drive policies +
     /// user flags), then defers the decision + audit + canonical error

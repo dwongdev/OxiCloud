@@ -839,4 +839,38 @@ impl DriveRepository for DrivePgRepository {
             &raw,
         ))
     }
+
+    async fn update_quota(
+        &self,
+        drive_id: Uuid,
+        quota_bytes: Option<i64>,
+    ) -> Result<Option<i64>, DriveRepositoryError> {
+        // RETURNING gives the persisted value so the caller (service
+        // layer) has authoritative data for the audit line + API
+        // response without a second read.
+        let row: Option<(Option<i64>,)> = sqlx::query_as(
+            "UPDATE storage.drives \
+                SET quota_bytes = $2, \
+                    updated_at  = now() \
+              WHERE id = $1 \
+              RETURNING quota_bytes",
+        )
+        .bind(drive_id)
+        .bind(quota_bytes)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| Self::map_sqlx_err("update_quota", e))?;
+        let persisted = row
+            .ok_or_else(|| DriveRepositoryError::NotFound(drive_id.to_string()))?
+            .0;
+        // Same invalidation strategy as `update_policies` — both
+        // user-keyed caches (`default_drive_cache`, the readable-drive
+        // list) carry the whole DriveWithRootName / DriveDto rows and
+        // would serve a stale quota otherwise. Admin-rare mutation,
+        // so blowing the whole cache is fine (no per-user pinpointing
+        // needed).
+        self.default_drive_cache.invalidate_all();
+        self.invalidate_readable_all();
+        Ok(persisted)
+    }
 }

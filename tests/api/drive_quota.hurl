@@ -431,6 +431,336 @@ HTTP 200
 jsonpath "$[?(@.id=='{{tight_drive_id}}')].used_bytes" == 32
 
 
+# ─────────────────────────────────────────────────────────────
+# Steps 12-19 — D4 quota MUTATION surface
+# (`PATCH /api/drives/{id}/quota`, admin-only).
+#
+# The enforcement side (steps 4-11 above) tested how a fixed
+# quota gates writes. These steps test how an admin CHANGES the
+# quota after creation — the counterpart mutation that lets
+# quotas be adjusted without recreating the drive.
+#
+# Reuses `tight_drive_id` (100 B initial cap, used_bytes = 32
+# after Step 11's convergence) so we also exercise the soft-
+# shrink case (Step 16 lowers the cap below `used_bytes = 32`
+# and back — accepted, matches xfs/ext4 quota shrink behaviour).
+# ─────────────────────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 12 — Admin raises `tight_drive_id` quota to 1 GiB.
+# Response echoes the persisted value from the RETURNING clause.
+# ─────────────────────────────────────────────────────────────
+PATCH {{base_url}}/api/drives/{{tight_drive_id}}/quota
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{ "quota_bytes": 1073741824 }
+
+HTTP 200
+[Asserts]
+jsonpath "$.quota_bytes" == 1073741824
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 13 — Non-admin (the drive Owner) is refused with 404.
+# Anti-enumeration: same shape as "no such drive". A 403 would
+# leak the endpoint's existence to any caller who can hit it.
+# Matches the identical pattern on `PATCH .../policies`.
+# ─────────────────────────────────────────────────────────────
+PATCH {{base_url}}/api/drives/{{tight_drive_id}}/quota
+Authorization: Bearer {{owner_token}}
+Content-Type: application/json
+{ "quota_bytes": 500 }
+
+HTTP 404
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 14 — Verify Owner refusal was a no-op: cap is still
+# 1 GiB from Step 12, not 500 B. Guards against a partial-write
+# regression that could sneak a value through even after the
+# handler-side admin gate rejects.
+#
+# Read as the drive owner, NOT admin: admin created this drive
+# for `dq_owner` (Step 3) and holds no role_grant on it, so
+# `/api/drives` (which returns only drives readable via role
+# grants) would omit `tight_drive_id` from admin's list and the
+# JSONPath filter would return no value.
+# ─────────────────────────────────────────────────────────────
+GET {{base_url}}/api/drives
+Authorization: Bearer {{owner_token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$[?(@.id=='{{tight_drive_id}}')].quota_bytes" == 1073741824
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 15 — Set unlimited via `null`. Passes through to the DB
+# NULL that `storage_usage_service::check_drive_quota` reads as
+# "no cap". Response echoes `null`.
+# ─────────────────────────────────────────────────────────────
+PATCH {{base_url}}/api/drives/{{tight_drive_id}}/quota
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{ "quota_bytes": null }
+
+HTTP 200
+[Asserts]
+jsonpath "$.quota_bytes" == null
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 16 — Set unlimited via `0`. Backend normalises ≤ 0 to
+# None (see the `.filter(|&q| q > 0)` in the service layer) →
+# same NULL persisted, same null echoed. Guards the "0 means
+# unlimited" convention shared with the write-time gate.
+# ─────────────────────────────────────────────────────────────
+PATCH {{base_url}}/api/drives/{{tight_drive_id}}/quota
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{ "quota_bytes": 0 }
+
+HTTP 200
+[Asserts]
+jsonpath "$.quota_bytes" == null
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 17 — Restore cap to 100 B so we can add a second file in
+# Step 18 (the drive already holds 32 B; the null/0 cases above
+# left it unlimited).
+# ─────────────────────────────────────────────────────────────
+PATCH {{base_url}}/api/drives/{{tight_drive_id}}/quota
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{ "quota_bytes": 100 }
+
+HTTP 200
+[Asserts]
+jsonpath "$.quota_bytes" == 100
+
+
+# ─────────────────────────────────────────────────────────────
+# Steps 18-23 — Soft-shrink semantic end-to-end:
+#   "Admin sets quota BELOW current usage. Owner cannot add
+#    new files, but CAN still delete existing ones."
+#
+# This is the real behavioural pin — matches how xfs / ext4
+# quotas treat a shrink: existing data is not retroactively
+# touched; the enforcement gate is `used + delta > quota`, so
+# new writes are blocked until the drive shrinks back under.
+#
+# State entering Step 18:
+#   tight_drive_id → quota=100 B, used=32 B (hello-copy.txt).
+# ─────────────────────────────────────────────────────────────
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 18 — Re-upload hello.txt (deleted in Step 9). Captures
+# its id so Step 22 can delete THIS specific file to prove the
+# owner-can-still-delete half of the semantic.
+# ─────────────────────────────────────────────────────────────
+POST {{base_url}}/api/files/upload
+Authorization: Bearer {{owner_token}}
+[MultipartFormData]
+folder_id: {{tight_root_id}}
+file: file,fixtures/hello.txt; text/plain
+
+HTTP 201
+[Captures]
+soft_shrink_file_id: jsonpath "$.id"
+
+
+POST {{base_url}}/api/admin/internal/trigger-sweep
+Authorization: Bearer {{admin_token}}
+[Options]
+delay: 200ms
+
+HTTP 200
+
+
+# used_bytes now = 64 (hello-copy.txt at 32 + hello.txt at 32).
+GET {{base_url}}/api/drives
+Authorization: Bearer {{owner_token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$[?(@.id=='{{tight_drive_id}}')].used_bytes" == 64
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 19 — Admin shrinks the quota to 16 B — well below the
+# current 64 B usage. This IS accepted (soft-shrink semantic:
+# `drive.md §7` — no retroactive touch, enforcement kicks in
+# for new writes only). Response echoes the persisted cap.
+# ─────────────────────────────────────────────────────────────
+PATCH {{base_url}}/api/drives/{{tight_drive_id}}/quota
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{ "quota_bytes": 16 }
+
+HTTP 200
+[Asserts]
+jsonpath "$.quota_bytes" == 16
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 20 — Confirm the drive is now in the "over-quota,
+# delete-only" state: quota = 16 B, used_bytes = 64 B. Both
+# numbers must be visible in `GET /api/drives` since operators
+# rely on `used_bytes > quota_bytes` as the signal to flag
+# a drive for owner attention.
+# ─────────────────────────────────────────────────────────────
+GET {{base_url}}/api/drives
+Authorization: Bearer {{owner_token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$[?(@.id=='{{tight_drive_id}}')].quota_bytes" == 16
+jsonpath "$[?(@.id=='{{tight_drive_id}}')].used_bytes"  == 64
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 21 — Owner tries to upload a new file. Refused with
+# `507 Insufficient Storage` — the same shape any over-quota
+# write hits (uniform with Steps 4 / 6 / 8 / 11a-b above).
+# Guards the "cannot add" half of the delete-only semantic.
+# ─────────────────────────────────────────────────────────────
+POST {{base_url}}/api/files/upload
+Authorization: Bearer {{owner_token}}
+[MultipartFormData]
+folder_id: {{tight_root_id}}
+file: file,fixtures/chunk-over-cap-5mb.bin; application/octet-stream
+
+HTTP 507
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 22 — Owner deletes hello.txt (the file captured at Step
+# 18). Succeeds with `204 No Content` even though the drive is
+# still over quota. This is the "but can still delete" half —
+# an over-quota drive isn't frozen; owners recover by shrinking.
+# ─────────────────────────────────────────────────────────────
+DELETE {{base_url}}/api/files/{{soft_shrink_file_id}}
+Authorization: Bearer {{owner_token}}
+
+HTTP 204
+
+
+# Empty trash so used_bytes reflects the permanent purge, not
+# just the trashing (mirrors Step 9's convergence sequence).
+DELETE {{base_url}}/api/trash/empty
+Authorization: Bearer {{owner_token}}
+
+HTTP 200
+
+
+POST {{base_url}}/api/admin/internal/trigger-sweep
+Authorization: Bearer {{admin_token}}
+
+HTTP 200
+
+
+# used_bytes dropped from 64 → 32 (hello-copy.txt still lives).
+# Drive is STILL over quota (32 > 16), so the delete-only state
+# persists — new writes still refused (see Step 23).
+GET {{base_url}}/api/drives
+Authorization: Bearer {{owner_token}}
+
+HTTP 200
+[Asserts]
+jsonpath "$[?(@.id=='{{tight_drive_id}}')].used_bytes"  == 32
+jsonpath "$[?(@.id=='{{tight_drive_id}}')].quota_bytes" == 16
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 23 — Confirm the delete-only state persists: even a
+# fresh 5 MiB upload attempt is still refused with 507. The
+# enforcement is on total usage vs quota, not per-write. Owner
+# would need to delete hello-copy.txt too (bringing used_bytes
+# to 0) OR admin would need to raise the quota back for writes
+# to resume.
+# ─────────────────────────────────────────────────────────────
+POST {{base_url}}/api/files/upload
+Authorization: Bearer {{owner_token}}
+[MultipartFormData]
+folder_id: {{tight_root_id}}
+file: file,fixtures/chunk-over-cap-5mb.bin; application/octet-stream
+
+HTTP 507
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 24 — Admin raises the cap back to 100 B (leaves the
+# drive under quota again). Confirms the escape hatch: admins
+# can also lift the delete-only state without owner action.
+# ─────────────────────────────────────────────────────────────
+PATCH {{base_url}}/api/drives/{{tight_drive_id}}/quota
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{ "quota_bytes": 100 }
+
+HTTP 200
+[Asserts]
+jsonpath "$.quota_bytes" == 100
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 25 — Personal-drive quota edit is refused with 400
+# InvalidInput. Personal drives carry NULL `drives.quota_bytes`
+# by design — the effective cap is the owner user's
+# `storage_quota_bytes` envelope (memory
+# `project_user_envelope_quota_model`). Allowing a per-personal-
+# drive cap here would fork the enforcement model into two
+# paths; the endpoint refuses cleanly with a message that
+# points at the correct admin surface.
+#
+# Locate `dq_owner`'s default personal drive first.
+# ─────────────────────────────────────────────────────────────
+GET {{base_url}}/api/drives
+Authorization: Bearer {{owner_token}}
+
+# `default_for_user` uses `#[serde(skip_serializing_if = "Option::is_none")]`
+# — the field is present ONLY on the caller's default personal drive.
+# The single-match filter returns a scalar, so `nth 0` breaks with
+# "missing value to apply filter" (memory
+# `feedback_hurl_jsonpath_filter_empty`). Body regex sidesteps that by
+# anchoring on the field-adjacency pattern that Rust's `Serialize`
+# preserves (id → name → kind → default_for_user).
+HTTP 200
+[Captures]
+dq_owner_personal_drive_id: body regex "\"id\":\"([a-f0-9-]{36})\",\"name\":\"[^\"]*\",\"kind\":\"personal\",\"default_for_user\""
+
+
+PATCH {{base_url}}/api/drives/{{dq_owner_personal_drive_id}}/quota
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{ "quota_bytes": 500 }
+
+HTTP 400
+[Asserts]
+# Response body carries the hint pointing at the correct
+# admin endpoint. Substring check on "envelope" is deliberate —
+# operator or misfired client script hitting this endpoint sees
+# a self-documenting refusal instead of an opaque error.
+body contains "envelope"
+
+
+# ─────────────────────────────────────────────────────────────
+# Step 26 — Non-existent drive returns 404, distinguishable
+# ONLY by admin caller (a non-admin sees 404 too, per Step 13's
+# anti-enum design). This is the "genuinely missing" case that
+# proves the mutation isn't silently creating rows.
+# ─────────────────────────────────────────────────────────────
+PATCH {{base_url}}/api/drives/00000000-0000-0000-0000-000000000000/quota
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+{ "quota_bytes": 42 }
+
+HTTP 404
+
+
 # No cleanup tail here — `tests/api/storage_cleanup_check.sh` enumerates
 # every drive via `GET /api/admin/drives` and drains+deletes any that
 # isn't admin's default. This keeps individual Hurl tests focused on

@@ -460,6 +460,7 @@ pub fn create_api_routes(app_state: &Arc<AppState>) -> Router<Arc<AppState>> {
                 "/{id}/policies",
                 patch(drive_handler::update_drive_policies),
             )
+            .route("/{id}/quota", patch(drive_handler::update_drive_quota))
             .route(
                 "/{id}/members",
                 get(drive_handler::list_drive_members).post(drive_handler::add_drive_member),

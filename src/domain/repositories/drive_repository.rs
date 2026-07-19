@@ -296,6 +296,39 @@ pub trait DriveRepository: Send + Sync + 'static {
         drive_id: Uuid,
         partial: &serde_json::Value,
     ) -> Result<crate::domain::entities::drive::DrivePolicies, DriveRepositoryError>;
+
+    /// Set the drive-level storage quota on a **shared** drive.
+    ///
+    /// `quota_bytes = None` means unlimited (matches the wire and DB
+    /// convention — `drives.quota_bytes` is nullable; a NULL row → the
+    /// storage-usage service treats it as no cap).
+    ///
+    /// **Personal drives are refused at the service layer** — their
+    /// effective cap comes from the owner user's
+    /// `users.storage_quota_bytes` envelope (see the memory
+    /// `project_user_envelope_quota_model`). This method does not
+    /// re-check the kind; the service does, and only calls the repo
+    /// with a validated shared-drive id.
+    ///
+    /// A newly-lowered quota can be **under** the drive's current
+    /// `used_bytes` — that's a deliberate soft-quota semantic. The
+    /// `storage_usage_service` gates NEW writes on
+    /// `used + delta <= quota`, so a shared drive already over its
+    /// freshly-reduced cap can only shrink (delete) until it comes back
+    /// under the limit; no existing content is retroactively touched.
+    ///
+    /// Cache invalidation mirrors `update_policies` — the user-keyed
+    /// readable-drive-list caches carry the quota alongside the row so
+    /// they'd serve stale numbers otherwise; the default-drive cache
+    /// carries the DriveWithRootName which also includes the quota.
+    ///
+    /// Returns the persisted post-mutation value so the caller can
+    /// echo it back in the audit log and API response.
+    async fn update_quota(
+        &self,
+        drive_id: Uuid,
+        quota_bytes: Option<i64>,
+    ) -> Result<Option<i64>, DriveRepositoryError>;
 }
 
 /// Convenience: convert the canonical kind discriminator from its SQL

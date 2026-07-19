@@ -509,3 +509,102 @@ pub async fn update_drive_policies(
         Err(e) => AppError::from(e).into_response(),
     }
 }
+
+/// Body for `PATCH /api/drives/{id}/quota` (D4).
+///
+/// `quota_bytes = null` (or ≤ 0) means unlimited — matches the DB
+/// convention where NULL on the row is treated as "no cap" by
+/// `storage_usage_service::check_drive_quota`. The service
+/// normalises 0/negative to None before writing.
+#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+pub struct UpdateDriveQuotaDto {
+    /// New quota in bytes. `null` (or omitted) or ≤ 0 → unlimited.
+    /// A value below the drive's current `used_bytes` is accepted
+    /// intentionally (soft-quota semantic — new writes gated,
+    /// existing content untouched; owners recover by deleting
+    /// until the drive comes back under the cap).
+    #[serde(default)]
+    pub quota_bytes: Option<i64>,
+}
+
+/// `PATCH /api/drives/{id}/quota` — **OxiCloud-admin only** storage-cap
+/// mutation for **shared** drives (D4).
+///
+/// Personal drives are refused with `400 InvalidInput` — their
+/// effective cap comes from the owner user's
+/// `users.storage_quota_bytes` envelope (memory
+/// `project_user_envelope_quota_model`); use
+/// `PUT /api/admin/users/{id}/quota` instead. Allowing a per-personal-
+/// drive quota here would fork the model into two competing paths.
+///
+/// Non-admin callers receive `404` (anti-enumeration — same shape as
+/// "no such drive", so a probe can't distinguish "drive doesn't
+/// exist" from "quota edit is admin-only"). Matches the pattern
+/// established by `update_drive_policies` above.
+///
+/// **Soft-quota semantic on reduction.** A newly-lowered quota may
+/// land BELOW the drive's current `used_bytes`. The write succeeds;
+/// `storage_usage_service` then blocks new writes on
+/// `used + delta > quota`, so owners of a shared drive that's now
+/// over its freshly-reduced cap can only shrink (delete) until they
+/// come back under. Existing content is never retroactively touched
+/// — matches xfs `xfs_quota` / ext4 `edquota` behaviour on quota
+/// shrink.
+///
+/// Cache invalidation: the repo drops `readable_cache` +
+/// `default_drive_cache` (both embed the whole drive row incl.
+/// `quota_bytes`), matching the `update_policies` pattern.
+///
+/// Audit: emits `drive.quota_changed` with `new_quota_bytes`,
+/// `used_bytes`, and `over_quota` — so an operator grepping
+/// `audit drive.quota_changed` can spot a shrink that landed the
+/// drive in the over-quota delete-only state.
+#[utoipa::path(
+    patch,
+    path = "/api/drives/{id}/quota",
+    params(("id" = Uuid, Path, description = "Drive UUID")),
+    request_body = UpdateDriveQuotaDto,
+    responses(
+        (status = 200, description = "Quota updated"),
+        (status = 400, description = "Personal drive — quota is envelope-managed via the owner user"),
+        (status = 404, description = "Drive not found OR caller is not OxiCloud admin"),
+    ),
+    security(("bearerAuth" = [])),
+    tag = "drives"
+)]
+pub async fn update_drive_quota(
+    State(state): State<Arc<AppState>>,
+    auth_user: AuthUser,
+    Path(drive_id): Path<Uuid>,
+    axum::Json(dto): axum::Json<UpdateDriveQuotaDto>,
+) -> impl IntoResponse {
+    // Same admin gate + anti-enum shape as `update_drive_policies`.
+    // Refusing with 404 (rather than 403) means an unauthorised
+    // caller can't distinguish "no such drive" from "you're not
+    // admin" — the endpoint's existence isn't probable by error
+    // shape.
+    if auth_user.role != "admin" {
+        tracing::info!(
+            target: "audit",
+            event = "drive.quota_change_rejected",
+            reason = "not_admin",
+            caller_id = %auth_user.id,
+            drive_id = %drive_id,
+            "👮🏻‍♂️ quota mutation refused: caller is not OxiCloud admin",
+        );
+        return AppError::not_found(format!("Drive {drive_id} not found")).into_response();
+    }
+
+    match state
+        .drive_management_service
+        .update_quota(auth_user.id, drive_id, dto.quota_bytes)
+        .await
+    {
+        Ok(persisted) => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({ "quota_bytes": persisted })),
+        )
+            .into_response(),
+        Err(e) => AppError::from(e).into_response(),
+    }
+}

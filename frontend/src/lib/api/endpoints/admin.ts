@@ -167,6 +167,50 @@ export async function removeDriveMemberAdmin(
  * Throws on non-2xx so the caller can branch on `405` (default
  * personal) vs `409` (non-empty) when surfacing the failure.
  */
+/**
+ * `PATCH /api/drives/{id}/quota` — admin-only shared-drive quota
+ * mutation (D4). `quotaBytes = null` or ≤ 0 → unlimited (the backend
+ * normalises 0/negative to NULL).
+ *
+ * **Refuses personal drives** with HTTP 400 — the effective cap
+ * comes from the owner user's `storage_quota_bytes` envelope, edit
+ * via `setUserQuota` (`PUT /api/admin/users/{id}/quota`) instead.
+ * Callers should gate the UI on `drive.kind === 'shared'` so users
+ * never see the refusal.
+ *
+ * **Soft-quota semantic on shrink**: a new cap below current
+ * `used_bytes` is accepted — the write-time gate then blocks new
+ * writes until the drive shrinks back under. No existing content
+ * is retroactively touched. Matches xfs/ext4 quota behaviour.
+ *
+ * Returns the persisted value (the backend's normalisation of the
+ * input) so the caller can update local state without re-fetching.
+ * Throws on non-2xx with the backend's error message when present.
+ */
+export async function updateDriveQuota(
+	driveId: string,
+	quotaBytes: number | null
+): Promise<number | null> {
+	const res = await apiFetch(`/api/drives/${encodeURIComponent(driveId)}/quota`, {
+		method: 'PATCH',
+		credentials: 'same-origin',
+		headers: { ...JSON_HEADERS, ...getCsrfHeaders() },
+		body: JSON.stringify({ quota_bytes: quotaBytes })
+	});
+	if (!res.ok) {
+		let detail = '';
+		try {
+			const parsed = (await res.json()) as { error?: string; message?: string };
+			detail = parsed.error ?? parsed.message ?? '';
+		} catch {
+			/* response body wasn't JSON */
+		}
+		throw new Error(detail || `update drive quota failed: ${res.status}`);
+	}
+	const body = (await res.json()) as { quota_bytes: number | null };
+	return body.quota_bytes;
+}
+
 export async function deleteDriveAdmin(driveId: string): Promise<void> {
 	const res = await apiFetch(`/api/admin/drives/${encodeURIComponent(driveId)}`, {
 		method: 'DELETE',
