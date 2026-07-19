@@ -2434,7 +2434,13 @@ impl AuthApplicationService {
         Ok(())
     }
 
-    /// Change user role (admin only)
+    /// Change user role (admin only).
+    ///
+    /// Refuses `role = "admin"` when the target is external (grant-only).
+    /// The DB CHECK `users_external_not_admin` would also refuse this at
+    /// COMMIT, but surfacing it here yields a clean `InvalidInput` error
+    /// with an audit line naming the reason, instead of a bare
+    /// constraint-violation stringified out of Postgres.
     pub async fn change_user_role(&self, user_id: Uuid, role: &str) -> Result<(), DomainError> {
         if role != "admin" && role != "user" {
             return Err(DomainError::new(
@@ -2443,6 +2449,25 @@ impl AuthApplicationService {
                 format!("Invalid role: {}. Must be 'admin' or 'user'", role),
             ));
         }
+
+        if role == "admin" {
+            let target = self.user_storage.get_user_by_id(user_id).await?;
+            if target.is_external() {
+                tracing::info!(
+                    target: "audit",
+                    event = "user.role_change_rejected",
+                    reason = "external_cannot_be_admin",
+                    target_id = %user_id,
+                    "👮🏻‍♂️ role change refused: external users cannot hold the admin role",
+                );
+                return Err(DomainError::new(
+                    ErrorKind::InvalidInput,
+                    "User",
+                    "External accounts cannot hold the admin role. Promote the user to internal first.",
+                ));
+            }
+        }
+
         self.user_storage.change_role(user_id, role).await?;
         self.user_flags_cache.invalidate(&user_id).await;
         Ok(())

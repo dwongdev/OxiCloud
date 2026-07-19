@@ -2382,17 +2382,25 @@
 									{:else}
 										<span class="icon-btn icon-btn--placeholder" aria-hidden="true"></span>
 									{/if}
-									<!-- Slot 3: role toggle. -->
-									<button
-										class="icon-btn"
-										data-testid={`admin-user-toggle-role-${u.id}`}
-										title={t('admin.toggle_role_title', 'Toggle admin role')}
-										aria-label={t('admin.toggle_role_title', 'Toggle admin role')}
-										disabled={isSelf(u)}
-										onclick={() => toggleRole(u)}
-									>
-										<Icon name={u.role === 'admin' ? 'user' : 'crown'} />
-									</button>
+									<!-- Slot 3: role toggle. Hidden for externals — an
+									     external user cannot be admin (backend guard in
+									     `change_user_role` + DB CHECK
+									     `users_external_not_admin`). Promotion to
+									     internal is offered separately in slot 1. -->
+									{#if !u.is_external}
+										<button
+											class="icon-btn"
+											data-testid={`admin-user-toggle-role-${u.id}`}
+											title={t('admin.toggle_role_title', 'Toggle admin role')}
+											aria-label={t('admin.toggle_role_title', 'Toggle admin role')}
+											disabled={isSelf(u)}
+											onclick={() => toggleRole(u)}
+										>
+											<Icon name={u.role === 'admin' ? 'user' : 'crown'} />
+										</button>
+									{:else}
+										<span class="icon-btn icon-btn--placeholder" aria-hidden="true"></span>
+									{/if}
 									<!-- Slot 4: activate/deactivate. -->
 									<button
 										class="icon-btn {u.active ? 'icon-btn--danger' : 'icon-btn--success'}"
