@@ -199,6 +199,48 @@ export function listUsers(limit: number, offset: number): Promise<AdminUsersPage
 	});
 }
 
+/**
+ * Admin-scoped single-user lookup — `GET /api/admin/users/{id}`.
+ * Returns the full `User` DTO including `storage_quota_bytes` +
+ * `storage_used_bytes` which the non-admin `/api/users/{id}`
+ * response omits for privacy.
+ *
+ * Result promises are cached per id at module scope so multiple
+ * callers for the same user (e.g. the admin drives table with N
+ * personal drives owned by the same person) share one fetch. A
+ * `null` result is cached too so a missing user isn't re-fetched
+ * on every render.
+ *
+ * The cache is process-lifetime; a page navigation away and back
+ * still sees the cached value. Callers that need to refresh (e.g.
+ * after `setUserQuota`) should call `invalidateAdminUserCache`.
+ */
+const adminUserCache = new Map<string, Promise<User | null>>();
+
+export function getUserAdmin(id: string): Promise<User | null> {
+	const hit = adminUserCache.get(id);
+	if (hit) return hit;
+	const pending = (async (): Promise<User | null> => {
+		try {
+			return await apiJson<User>(`/api/admin/users/${encodeURIComponent(id)}`, {
+				credentials: 'same-origin'
+			});
+		} catch {
+			return null;
+		}
+	})();
+	adminUserCache.set(id, pending);
+	return pending;
+}
+
+/** Drop cached admin lookups so mutations (quota change, role change,
+ *  delete) don't return stale data. Called with no arg = clear all,
+ *  or with a specific user id to drop just that entry. */
+export function invalidateAdminUserCache(userId?: string): void {
+	if (userId) adminUserCache.delete(userId);
+	else adminUserCache.clear();
+}
+
 export interface CreateUserInput {
 	username: string;
 	password: string;

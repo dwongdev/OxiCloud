@@ -17,6 +17,7 @@
 		installPlugin,
 		listPlugins,
 		listUsers,
+		getUserAdmin,
 		migrationAction,
 		reextractAudioMetadata,
 		reextractPhotoMetadata,
@@ -883,6 +884,17 @@
 	// "still loading" — the stack treats undefined as no-owners-yet.
 	let driveMembers = $state<Record<string, DriveMember[]>>({});
 
+	// Owner user record for each PERSONAL drive, keyed by drive id.
+	// Personal drives have exactly one user-subject owner and their
+	// `d.quota_bytes` is null — the effective quota comes from the
+	// owner user's `storage_quota_bytes` envelope (see memory
+	// `project_user_envelope_quota_model`). We resolve the owner
+	// once at load time via the admin-scoped `/api/admin/users/{id}`
+	// endpoint so the Name column can show the username instead of
+	// the drive UUID, and the Quota column can display the envelope
+	// cap. Shared drives are absent from this map.
+	let personalDriveOwners = $state<Record<string, User>>({});
+
 	async function loadDrivesTab() {
 		drivesError = null;
 		try {
@@ -911,6 +923,26 @@
 			})
 		);
 		driveMembers = nextMembers;
+
+		// Resolve owner users for personal drives — used by the Name
+		// column (username instead of UUID) and the Quota column
+		// (envelope cap instead of "∞" for a NULL drive.quota_bytes).
+		// getUserAdmin caches per-id at module scope, so N personal
+		// drives owned by the same user share one fetch. Runs after
+		// `driveMembers` is populated because the owner subject id
+		// comes from the first user-typed member of the drive.
+		const nextOwners: Record<string, User> = {};
+		await Promise.all(
+			drivesList
+				.filter((d) => d.kind === 'personal')
+				.map(async (d) => {
+					const ownerMember = nextMembers[d.id]?.find((m) => m.subject.type === 'user');
+					if (!ownerMember) return;
+					const user = await getUserAdmin(ownerMember.subject.id);
+					if (user) nextOwners[d.id] = user;
+				})
+		);
+		personalDriveOwners = nextOwners;
 	}
 
 	function driveKindLabel(d: Drive): string {
@@ -2252,15 +2284,40 @@
 				</thead>
 				<tbody>
 					{#each drivesList as d (d.id)}
+						{@const owner = d.kind === 'personal' ? personalDriveOwners[d.id] : undefined}
+						<!--
+						  Effective quota:
+						  - Shared drive: `d.quota_bytes` (null → unlimited, shown as ∞).
+						  - Personal drive: the owner user's `storage_quota_bytes`
+						    envelope caps the sum of used_bytes across their personal
+						    drives (per memory `project_user_envelope_quota_model`).
+						    `d.quota_bytes` is always null for personal drives so we
+						    fall back to the owner's cap; 0 also means "no limit"
+						    (backend convention — see `User.storage_quota_bytes` doc).
+						-->
+						{@const effectiveQuota =
+							d.kind === 'personal'
+								? owner && owner.storage_quota_bytes > 0
+									? owner.storage_quota_bytes
+									: null
+								: d.quota_bytes && d.quota_bytes > 0
+									? d.quota_bytes
+									: null}
 						{@const pct =
-							d.quota_bytes && d.quota_bytes > 0
-								? Math.min(100, (d.used_bytes / d.quota_bytes) * 100)
+							effectiveQuota !== null
+								? Math.min(100, (d.used_bytes / effectiveQuota) * 100)
 								: null}
 						<tr>
 							<td>
 								<div class="user-cell">
 									<strong>{d.name}</strong>
-									<span class="muted"><code>{d.id}</code></span>
+									{#if d.kind === 'personal'}
+										{#if owner}
+											<span class="muted">{owner.username ?? owner.email}</span>
+										{:else}
+											<span class="muted">{t('common.loading', 'Loading…')}</span>
+										{/if}
+									{/if}
 								</div>
 							</td>
 							<td>
@@ -2288,8 +2345,8 @@
 										</div>
 									{/if}
 									<span class="muted">
-										{formatBytes(d.used_bytes)} / {d.quota_bytes && d.quota_bytes > 0
-											? formatBytes(d.quota_bytes)
+										{formatBytes(d.used_bytes)} / {effectiveQuota !== null
+											? formatBytes(effectiveQuota)
 											: '∞'}
 									</span>
 								</div>
