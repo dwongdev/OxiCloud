@@ -11,8 +11,9 @@
 #      raw 500 (`AppError::internal_error(format!("Failed to store
 #      file: {}", e))`) instead of `AppError::from(e)` — a VIEWER
 #      (Read only, no Update) overwriting a file got a 500 leak
-#      instead of the anti-enum 404 the rest of the codebase relies
-#      on.
+#      instead of the graduated-denial 403 the rest of the codebase
+#      relies on (Read granted → visible → 403; no Read at all →
+#      hidden → 404 anti-enum).
 #   2. Cross-surface lock interop: PUT via `/remote.php/dav/` didn't
 #      consult the lock store a LOCK taken via the plain `/webdav/`
 #      surface writes to at all.
@@ -219,9 +220,12 @@ body == "XYZ"
 
 # ─────────────────────────────────────────────────────────────
 # Step A7 — VIEWER (has Read via the grant, but not Update) is
-#          denied → 404 anti-enum, not a raw 500. Before the fix,
-#          `handle_put`'s write step mapped every `DomainError`
-#          (including this authz denial) to
+#          denied, not a raw 500. Viewer CAN read the file, so
+#          the graduated-denial policy (authorization_ports.rs::
+#          require) surfaces 403, not the anti-enum 404 — that
+#          shape is reserved for callers with no Read at all.
+#          Before the fix, `handle_put`'s write step mapped every
+#          `DomainError` (including this authz denial) to
 #          `AppError::internal_error(...)`, leaking a 500.
 # ─────────────────────────────────────────────────────────────
 PUT {{base_url}}/remote.php/dav/files/{{nc_basic_viewer}}/ncput-file.txt
@@ -230,7 +234,7 @@ Content-Type: text/plain
 {{nc_basic_viewer}}: {{viewer_nc_password}}
 `NOP`
 
-HTTP 404
+HTTP 403
 
 
 # Cleanup Part A.

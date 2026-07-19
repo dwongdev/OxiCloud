@@ -272,14 +272,18 @@ body == "XYZ3456789"
 
 # ─────────────────────────────────────────────────────────────
 # Step A7 — VIEWER (has Read via the grant, but not Update) is
-#          denied → 404 anti-enum. The early authz.require(Read)
-#          the fix added is only an existence-proof gate; the
-#          actual write goes through `update_file_streaming_with_perms`,
-#          which independently requires Update. Before fixing the
-#          NC surface's error-mapping bug found via this test (see
-#          nextcloud/webdav_handler.rs's PATCH write-step error
-#          mapping), this denial leaked as a raw 500 instead of the
-#          anti-enum 404 the plain surface already gave.
+#          denied. The early authz.require(Read) the fix added is
+#          only an existence-proof gate; the actual write goes
+#          through `update_file_streaming_with_perms`, which
+#          independently requires Update. Since the Viewer CAN
+#          read the file, `require`'s graduated-denial policy
+#          (authorization_ports.rs::require) surfaces this as 403,
+#          not the anti-enum 404 — the caller can already see the
+#          resource, so hiding its existence leaks nothing new.
+#          Before fixing the NC surface's error-mapping bug found
+#          via this test (see nextcloud/webdav_handler.rs's PATCH
+#          write-step error mapping), this denial leaked as a raw
+#          500 instead of the correct 403.
 # ─────────────────────────────────────────────────────────────
 PATCH {{base_url}}/remote.php/dav/files/{{nc_basic_viewer}}/ncpatch-file.txt
 X-Update-Range: bytes=0-2
@@ -288,7 +292,7 @@ Content-Type: text/plain
 {{nc_basic_viewer}}: {{viewer_nc_password}}
 `NOP`
 
-HTTP 404
+HTTP 403
 
 
 # ─────────────────────────────────────────────────────────────
