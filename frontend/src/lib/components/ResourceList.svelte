@@ -496,27 +496,57 @@
 		for (let i = lo; i <= hi; i++) selected.add(order[i]);
 		onselectionchange?.(selected);
 	}
+	// True when the client is macOS. Sets which modifier toggles a row
+	// on click:
+	//   * macOS: ⌘ (metaKey) — because Ctrl+Click is reserved by the
+	//     OS/browser for the native contextmenu event. Intercepting
+	//     Ctrl+Click here would collide with the right-click menu; the
+	//     browser fires `contextmenu` BEFORE `click`, so both would run
+	//     and the user would see the menu AND a rogue toggle.
+	//   * Windows / Linux: Ctrl (ctrlKey) — standard file-manager
+	//     convention (Explorer, Nautilus, etc.). ⌘ (Win/Super key) also
+	//     accepted defensively; it never collides with anything on the
+	//     row itself.
+	const IS_MAC =
+		typeof navigator !== 'undefined' &&
+		/Mac|iPhone|iPad|iPod/i.test(navigator.platform || navigator.userAgent || '');
+
+	function isToggleModifier(e: MouseEvent | KeyboardEvent): boolean {
+		return IS_MAC ? e.metaKey : e.ctrlKey || e.metaKey;
+	}
+
 	/**
 	 * Left-click handler that either navigates (`onopen`) or manages
 	 * selection depending on modifiers + config. Returns `true` when
 	 * the click was consumed by selection, so callers can suppress the
-	 * open. Enabled only for `selectable + shiftRangeSelect` callers.
+	 * open.
+	 *
+	 * Selection gestures:
+	 *   * Shift+Click — range selection between the anchor and this row
+	 *     (requires `shiftRangeSelect` opt-in — the anchor is only
+	 *     tracked when that flag is on).
+	 *   * ⌘+Click (Mac) / Ctrl+Click (Win/Linux) — toggle a single row.
+	 *     Available whenever `selectable` is on; no `shiftRangeSelect`
+	 *     required, so sections that just want checkboxes get the
+	 *     shortcut too. See `IS_MAC` note above for why Ctrl+Click is
+	 *     NOT intercepted on macOS (native contextmenu conflict).
 	 */
 	function handleRowClick(e: MouseEvent, id: string): boolean {
-		if (!selectable || !shiftRangeSelect) return false;
-		if (e.shiftKey && selectionAnchor) {
+		if (!selectable) return false;
+		if (shiftRangeSelect && e.shiftKey && selectionAnchor) {
 			e.preventDefault();
 			selectRange(selectionAnchor, id);
 			return true;
 		}
-		if (e.metaKey || e.ctrlKey) {
+		if (isToggleModifier(e)) {
 			e.preventDefault();
 			toggleSelected(id);
-			selectionAnchor = id;
+			if (shiftRangeSelect) selectionAnchor = id;
 			return true;
 		}
-		// Plain click: only sets the anchor; open (if any) still fires.
-		selectionAnchor = id;
+		// Plain click: only sets the anchor (when range-select is on);
+		// `onopen` still fires so navigation works normally.
+		if (shiftRangeSelect) selectionAnchor = id;
 		return false;
 	}
 	function clearSelection() {
@@ -547,9 +577,12 @@
 	// /recent, /shared-with-me — with identical semantics. Only fires
 	// when `selectable` is on, and only when the focused element isn't
 	// a text input (typing inside a search box shouldn't hijack it).
+	// The modifier check goes through `isToggleModifier` so keyboard
+	// and mouse gestures agree on the platform (⌘ on Mac; Ctrl or ⌘
+	// on Win/Linux).
 	function onSelectAllShortcut(e: KeyboardEvent) {
 		if (!selectable) return;
-		if (!(e.ctrlKey || e.metaKey)) return;
+		if (!isToggleModifier(e)) return;
 		if (e.key.toLowerCase() !== 'a') return;
 		const tag = (e.target as HTMLElement | null)?.tagName;
 		if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
@@ -742,12 +775,14 @@
 		ondragover={dropTarget && onitemdragover ? (e) => onitemdragover(e, item) : undefined}
 		ondragleave={dropTarget && onitemdragleave ? (e) => onitemdragleave(e, item) : undefined}
 		ondrop={dropTarget && onitemdrop ? (e) => onitemdrop(e, item) : undefined}
-		onclick={onopen
+		onclick={onopen || selectable
 			? (e) => {
 					// Selection-first for shift/meta clicks; only "open" fires on a
-					// plain click when the click wasn't consumed by selection.
+					// plain click when the click wasn't consumed by selection. The
+					// handler runs even without `onopen` so ⌘/Ctrl+Click still
+					// toggles the row on selection-only surfaces (no navigation).
 					if (handleRowClick(e, item.id)) return;
-					if (!openOnDoubleClick) onopen(item);
+					if (onopen && !openOnDoubleClick) onopen(item);
 				}
 			: undefined}
 		ondblclick={onopen && openOnDoubleClick ? () => onopen(item) : undefined}
