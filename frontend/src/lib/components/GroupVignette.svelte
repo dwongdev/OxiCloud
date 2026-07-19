@@ -22,6 +22,7 @@
 	import { resolveRecipient } from '$lib/api/endpoints/recipients';
 	import { resolveUser } from '$lib/api/endpoints/users';
 	import { listMembers, type GroupMember } from '$lib/api/endpoints/groups';
+	import { SvelteMap } from 'svelte/reactivity';
 
 	interface Props {
 		groupId: string;
@@ -32,7 +33,7 @@
 
 	// Module-scoped cache of resolved members per group. Chips render N
 	// times on a busy /shared page; the shared cache avoids N × HTTP.
-	const memberCache = new Map<string, Promise<GroupMember[]>>();
+	const memberCache = new SvelteMap<string, Promise<GroupMember[]>>();
 	function loadMembers(id: string): Promise<GroupMember[]> {
 		let p = memberCache.get(id);
 		if (!p) {

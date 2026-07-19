@@ -1295,9 +1295,7 @@
 			const quota_bytes = result.unlimited ? null : result.bytes;
 			const persisted = await updateDriveQuota(driveQuotaModal.driveId, quota_bytes);
 			const driveId = driveQuotaModal.driveId;
-			drivesList = drivesList.map((d) =>
-				d.id === driveId ? { ...d, quota_bytes: persisted } : d
-			);
+			drivesList = drivesList.map((d) => (d.id === driveId ? { ...d, quota_bytes: persisted } : d));
 			// Sibling surfaces (sidebar picker, breadcrumb) read the
 			// cached `GET /api/drives`. Mirrors the policies-modal
 			// pattern above.
@@ -2267,34 +2265,50 @@
 								</div>
 							</td>
 							<td>
-								<span class="badge badge--{u.role === 'admin' ? 'admin' : 'user'}">
-									{#if u.role === 'admin'}<Icon name="shield-alt" />{/if}
-									{u.role}
-								</span>
-								{#if u.is_external}
-									<!-- Origin flag, orthogonal to `role`. Grant-only
-									     accounts (magic-link / OCM) can never be admin
-									     (DB CHECK `users_external_not_admin`) so the two
-									     badges never collide in practice — but the
-									     "External" badge stacks after the role badge so a
-									     future rules change wouldn't hide either signal. -->
-									<span
-										class="badge badge--external"
-										title={t(
-											'admin.external_user_hint',
-											'Grant-only account (magic-link or OCM). Cannot be admin and has no storage envelope.'
-										)}
-									>
-										<Icon name="building-circle-xmark" />
-										{t('admin.external_user', 'external')}
+								<!-- Two badges (role + optional external) live in this
+								     cell. `.role-badges` prevents them from splitting
+								     across lines when the column narrows: nowrap + a
+								     tiny gap keeps them shoulder-to-shoulder, and each
+								     badge is `white-space: nowrap` so the badge label
+								     itself never wraps mid-word either. -->
+								<div class="role-badges">
+									<span class="badge badge--{u.role === 'admin' ? 'admin' : 'user'}">
+										{#if u.role === 'admin'}<Icon name="shield-alt" />{/if}
+										{u.role}
 									</span>
-								{/if}
+									{#if u.is_external}
+										<!-- Origin flag, orthogonal to `role`. Grant-only
+										     accounts (magic-link / OCM) can never be admin
+										     (DB CHECK `users_external_not_admin`) so the two
+										     badges never collide in practice — but the
+										     "External" badge stacks after the role badge so a
+										     future rules change wouldn't hide either signal. -->
+										<span
+											class="badge badge--external"
+											title={t(
+												'admin.external_user_hint',
+												'Grant-only account (magic-link or OCM). Cannot be admin and has no storage envelope.'
+											)}
+										>
+											<Icon name="building-circle-xmark" />
+											{t('admin.external_user', 'external')}
+										</span>
+									{/if}
+								</div>
 							</td>
-							<td>
+							<!-- Auth cell — capped width. The OIDC provider label is
+							     free-form ("keycloak", "google-workspace", …) and
+							     drives the column arbitrarily wide when localized
+							     column headers ("Authentication" → "Authentification"
+							     in fr) also demand room. `.auth-cell` truncates the
+							     badge label with an ellipsis so the column stays
+							     narrow; the full provider stays reachable via the
+							     tooltip on the badge. -->
+							<td class="auth-cell">
 								{#if isOidcUser(u)}
 									<span class="badge badge--oidc" title={u.auth_provider}>
 										<Icon name="key" />
-										{u.auth_provider}
+										<span class="badge__label">{u.auth_provider}</span>
 									</span>
 								{:else}
 									<span class="badge badge--local">{t('admin.local', 'local')}</span>
@@ -2313,7 +2327,13 @@
 									     usage bar with `0 / 0` reads as "over quota"
 									     visually and is misleading; show an em-dash
 									     instead. -->
-									<span class="muted" title={t('admin.no_storage_for_external', 'External accounts have no storage envelope.')}>—</span>
+									<span
+										class="muted"
+										title={t(
+											'admin.no_storage_for_external',
+											'External accounts have no storage envelope.'
+										)}>—</span
+									>
 								{:else}
 									<div class="quota-cell">
 										<div class="quota-bar">
@@ -2347,10 +2367,7 @@
 											class="icon-btn icon-btn--success"
 											data-testid={`admin-user-promote-${u.id}`}
 											title={t('admin.promote_to_internal_title', 'Promote to internal user')}
-											aria-label={t(
-												'admin.promote_to_internal_title',
-												'Promote to internal user'
-											)}
+											aria-label={t('admin.promote_to_internal_title', 'Promote to internal user')}
 											onclick={() => promoteExternal(u)}
 										>
 											<Icon name="user-plus" />
@@ -2498,9 +2515,7 @@
 									? d.quota_bytes
 									: null}
 						{@const pct =
-							effectiveQuota !== null
-								? Math.min(100, (d.used_bytes / effectiveQuota) * 100)
-								: null}
+							effectiveQuota !== null ? Math.min(100, (d.used_bytes / effectiveQuota) * 100) : null}
 						<tr>
 							<td>
 								<div class="user-cell">
@@ -3231,9 +3246,7 @@
 			data-testid="admin-delete-user-confirm-btn"
 			disabled={!deleteUserEmailMatches || deleteUserBusy}
 		>
-			{deleteUserBusy
-				? t('admin.deleting', 'Deleting…')
-				: t('admin.delete_title', 'Delete user')}
+			{deleteUserBusy ? t('admin.deleting', 'Deleting…') : t('admin.delete_title', 'Delete user')}
 		</button>
 	{/snippet}
 </Modal>
@@ -3644,10 +3657,42 @@
 	   colour reuses `--color-warning-*` because "external" is the
 	   same "attention needed" family as "you". */
 	.badge--external {
-		margin-left: var(--space-1);
 		background: var(--color-warning-bg);
 		color: var(--color-warning-text);
 		text-transform: uppercase;
+	}
+
+	/* Wrapper for the (role + optional external) badge pair in the
+	   users table. Row-flex + nowrap keeps the two on a single line
+	   when the column narrows; the sibling badges themselves also
+	   set `white-space: nowrap` so the ".EXTERNAL" label never
+	   splits mid-word either. */
+	.role-badges {
+		display: flex;
+		flex-direction: row;
+		flex-wrap: nowrap;
+		align-items: center;
+		gap: var(--space-1, 0.25rem);
+	}
+	.role-badges .badge {
+		white-space: nowrap;
+	}
+
+	/* Authentication column. The OIDC provider label is free-form
+	   and can widen the column arbitrarily on hosts that use long
+	   identifiers ("google-workspace-prod"). Cap the column width
+	   and ellipsis the label so the row layout stays balanced; the
+	   full provider is still reachable via the badge tooltip. */
+	.auth-cell {
+		max-width: 12ch;
+	}
+	.auth-cell .badge__label {
+		display: inline-block;
+		max-width: 8ch;
+		overflow: hidden;
+		text-overflow: ellipsis;
+		white-space: nowrap;
+		vertical-align: bottom;
 	}
 
 	/* Enabled/disabled feature flag indicator on the dashboard cards. */
