@@ -864,7 +864,13 @@ impl FileHandler {
                 }
 
                 tracing::info!("Found {} files", files.len());
-                let mut resp = (StatusCode::OK, Json(files)).into_response();
+                // Pre-sized serialization — this listing is unbounded (no
+                // page cap), the axum Json 128-byte seed reallocs ~11 times
+                // on a big folder (benches/ROUND12.md §M1).
+                let mut resp = crate::interfaces::api::sized_json::sized_json(
+                    64 + files.len() * crate::interfaces::api::sized_json::EST_ROW_BYTES,
+                    &files,
+                );
                 resp.headers_mut()
                     .insert(header::ETAG, header::HeaderValue::from_str(&etag).unwrap());
                 resp

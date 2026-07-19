@@ -7,7 +7,6 @@ use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::application::ports::file_ports::FileUploadUseCase;
-use crate::application::ports::storage_ports::StorageUsagePort;
 use crate::common::di::AppState;
 use crate::common::mime_detect::filename_from_path;
 use crate::interfaces::errors::AppError;
@@ -52,10 +51,10 @@ async fn refuse_if_over_quota(
         // remains authoritative.
         return Ok(());
     };
-    svc.check_storage_quota(user_id, additional)
-        .await
-        .map_err(AppError::from)?;
-    svc.check_drive_quota(drive_id, additional)
+    // Fused single round-trip (user envelope + drive cap) — this gate runs
+    // on EVERY chunk PUT, and the serial pair cost two point reads per
+    // chunk (benches/ROUND12.md §6). Verdict precedence unchanged.
+    svc.check_upload_quotas(user_id, drive_id, additional)
         .await
         .map_err(AppError::from)
 }

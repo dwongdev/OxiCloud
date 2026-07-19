@@ -119,7 +119,11 @@ pub async fn list_photos(
                 })
                 .collect();
 
-            let mut response = Json(&dtos).into_response();
+            // Pre-sized serialization (benches/ROUND12.md §M1).
+            let mut response = crate::interfaces::api::sized_json::sized_json(
+                64 + dtos.len() * crate::interfaces::api::sized_json::EST_WRAPPED_ROW_BYTES,
+                &dtos,
+            );
             {
                 let h = response.headers_mut();
                 h.insert(header::ETAG, header::HeaderValue::from_str(&etag).unwrap());

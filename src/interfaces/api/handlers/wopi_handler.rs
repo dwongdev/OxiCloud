@@ -83,14 +83,21 @@ pub struct CheckFileInfoResponse {
 /// structured `audit` line on denial internally, so ops sees the real
 /// reason without the attacker being able to distinguish "gone" from
 /// "revoked".
+/// Shared id parsing for the WOPI authz paths: a malformed caller sub is a
+/// bad token (401), a malformed file id can't exist (404, anti-enum).
+fn parse_wopi_ids(caller_sub: &str, file_id: &str) -> Result<(uuid::Uuid, uuid::Uuid), StatusCode> {
+    let caller_uuid = uuid::Uuid::parse_str(caller_sub).map_err(|_| StatusCode::UNAUTHORIZED)?;
+    let file_uuid = uuid::Uuid::parse_str(file_id).map_err(|_| StatusCode::NOT_FOUND)?;
+    Ok((caller_uuid, file_uuid))
+}
+
 async fn require_wopi_perm(
     authz: &PgAclEngine,
     caller_sub: &str,
     file_id: &str,
     perm: Permission,
 ) -> Result<(uuid::Uuid, uuid::Uuid), StatusCode> {
-    let caller_uuid = uuid::Uuid::parse_str(caller_sub).map_err(|_| StatusCode::UNAUTHORIZED)?;
-    let file_uuid = uuid::Uuid::parse_str(file_id).map_err(|_| StatusCode::NOT_FOUND)?;
+    let (caller_uuid, file_uuid) = parse_wopi_ids(caller_sub, file_id)?;
     authz
         .require(Subject::User(caller_uuid), perm, Resource::File(file_uuid))
         .await
@@ -118,25 +125,52 @@ async fn check_file_info(
 
     // Redemption-time authz: even with a valid token, the caller must
     // still hold Read on this file. Catches revoked-grant-mid-session.
-    if let Err(status) = require_wopi_perm(
-        state.app_state.authorization.as_ref(),
-        &claims.sub,
-        &file_id,
-        Permission::Read,
-    )
-    .await
-    {
-        return status.into_response();
+    //
+    // The Read gate, the metadata fetch and the Update probe are three
+    // independent lookups keyed only off (caller, file) — overlapped with
+    // `tokio::join!` (benches/ROUND12.md §5). Results are evaluated in the
+    // original precedence: Read gate first, then file existence.
+    let (caller_uuid, file_uuid) = match parse_wopi_ids(&claims.sub, &file_id) {
+        Ok(ids) => ids,
+        Err(status) => return status.into_response(),
+    };
+    let authz = state.app_state.authorization.as_ref();
+    let (read_gate, file, can_write_now) = tokio::join!(
+        authz.require(
+            Subject::User(caller_uuid),
+            Permission::Read,
+            Resource::File(file_uuid)
+        ),
+        state
+            .app_state
+            .applications
+            .file_retrieval_service
+            .get_file(&file_id),
+        // `user_can_write` = actual current Update permission ∧ token's
+        // can_write flag. If the caller's Update was revoked since the
+        // token was minted (e.g. their grant was downgraded from Editor
+        // to Viewer), the editor sees the file as read-only and won't
+        // even attempt PutFile. The stricter `require_wopi_perm(Update)`
+        // in put_file is the actual gate; this field is a UI hint.
+        async {
+            if claims.can_write {
+                authz
+                    .check(
+                        Subject::User(caller_uuid),
+                        Permission::Update,
+                        Resource::File(file_uuid),
+                    )
+                    .await
+                    .unwrap_or(false)
+            } else {
+                false
+            }
+        }
+    );
+    if read_gate.is_err() {
+        return StatusCode::NOT_FOUND.into_response();
     }
-
-    // Fetch file metadata
-    let file = match state
-        .app_state
-        .applications
-        .file_retrieval_service
-        .get_file(&file_id)
-        .await
-    {
+    let file = match file {
         Ok(f) => f,
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
@@ -145,24 +179,6 @@ async fn check_file_info(
     let last_modified = chrono::DateTime::from_timestamp(file.modified_at as i64, 0)
         .map(|dt| dt.to_rfc3339())
         .unwrap_or_default();
-
-    // `user_can_write` = actual current Update permission ∧ token's
-    // can_write flag. If the caller's Update was revoked since the
-    // token was minted (e.g. their grant was downgraded from Editor
-    // to Viewer), the editor sees the file as read-only and won't
-    // even attempt PutFile. The stricter `require_wopi_perm(Update)`
-    // in put_file is the actual gate; this field is a UI hint.
-    let can_write_now = claims.can_write
-        && state
-            .app_state
-            .authorization
-            .check(
-                Subject::User(uuid::Uuid::parse_str(&claims.sub).unwrap_or(uuid::Uuid::nil())),
-                Permission::Update,
-                Resource::File(uuid::Uuid::parse_str(&file_id).unwrap_or(uuid::Uuid::nil())),
-            )
-            .await
-            .unwrap_or(false);
 
     let response = CheckFileInfoResponse {
         base_file_name: file.name.clone(),
@@ -550,34 +566,31 @@ async fn authorize_wopi_access<S: FileRetrievalUseCase>(
 ) -> Result<(crate::application::dtos::file_dto::FileDto, bool), StatusCode> {
     let file_uuid = uuid::Uuid::parse_str(file_id).map_err(|_| StatusCode::NOT_FOUND)?;
 
-    // Step 1 — Read is required to even open the file.
-    authz
-        .require(
+    // The Read gate (step 1), the metadata fetch and the Update probe
+    // (step 2) are independent — overlapped with `tokio::join!`
+    // (benches/ROUND12.md §5); results evaluated in the original order.
+    //
+    // Step 2 rationale — can_write reflects real Update, not the client's
+    // action-string. `check` returns bool without throwing; failure
+    // just means the caller lacks Update, so we degrade the token to
+    // read-only. Deliberately no `require` there — a Viewer opening
+    // the file is legitimate; only the write claim is suppressed.
+    let (read_gate, file, has_update) = tokio::join!(
+        authz.require(
             Subject::User(caller_id),
             Permission::Read,
             Resource::File(file_uuid),
-        )
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-
-    let file = file_retrieval
-        .get_file(file_id)
-        .await
-        .map_err(|_| StatusCode::NOT_FOUND)?;
-
-    // Step 2 — can_write reflects real Update, not the client's
-    // action-string. `check` returns bool without throwing; failure
-    // just means the caller lacks Update, so we degrade the token to
-    // read-only. Deliberately no `require` here — a Viewer opening
-    // the file is legitimate; only the write claim is suppressed.
-    let has_update = authz
-        .check(
+        ),
+        file_retrieval.get_file(file_id),
+        authz.check(
             Subject::User(caller_id),
             Permission::Update,
             Resource::File(file_uuid),
         )
-        .await
-        .unwrap_or(false);
+    );
+    read_gate.map_err(|_| StatusCode::NOT_FOUND)?;
+    let file = file.map_err(|_| StatusCode::NOT_FOUND)?;
+    let has_update = has_update.unwrap_or(false);
 
     // Step 3 — allow explicit view-mode downgrade for Editors.
     let can_write = has_update && requested_action != "view";

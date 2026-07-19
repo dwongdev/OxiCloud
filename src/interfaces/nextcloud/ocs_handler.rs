@@ -342,20 +342,21 @@ pub async fn handle_sharees_search(
         None => return sharees_response(vec![]).into_response(),
     };
 
-    // SQL-level ILIKE search with limit — avoids loading all users into memory.
-    let users = auth_service
-        .search_users(&search, 26)
+    // SQL-level ILIKE search with limit — avoids loading all users into
+    // memory. Username-only projection: the wide `search_users` row drags
+    // the up-to-512 KiB avatar `image` per matched user, per keystroke
+    // (benches/ROUND12.md §1). NULL-username (email-only signup) rows are
+    // already filtered by the service, preserving the old post-limit
+    // filtering semantics.
+    let usernames = auth_service
+        .search_sharee_usernames(&search, 26)
         .await
         .unwrap_or_default();
 
-    // Skip users with no claimed username — NC sharees autocomplete relies
-    // on a username being typeable; users still on the email-only signup
-    // path can't be addressed here. Also skip self (don't suggest sharing
-    // with yourself).
-    let matches: Vec<serde_json::Value> = users
+    // Skip self (don't suggest sharing with yourself).
+    let matches: Vec<serde_json::Value> = usernames
         .into_iter()
-        .filter_map(|u| {
-            let handle = u.username.clone()?;
+        .filter_map(|handle| {
             if handle.as_str() == &*user.username {
                 return None;
             }

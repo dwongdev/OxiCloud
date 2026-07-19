@@ -354,6 +354,31 @@ name = "bench_micro_allocs"
 path = "examples/bench_micro_allocs.rs"
 required-features = ["bench"]
 
+# Round-12 battery ────────────────────────────────────────────────────────────
+
+# Round-12 query-shape pack — sharee narrow read + trgm, login/email stamp
+# narrowing, session-rotation fused txn, WOPI triple join!, fused quota pair
+# (needs the dev Postgres up).
+[[example]]
+name = "bench_round12_queries"
+path = "examples/bench_round12_queries.rs"
+required-features = ["bench"]
+
+# Round-12 CPU/alloc micro-pack — sized listing JSON, single-pass compression
+# predicate, fused security-header middleware, media single-read extraction,
+# chunked-session fused lookups. No Postgres.
+[[example]]
+name = "bench_round12_micro"
+path = "examples/bench_round12_micro.rs"
+required-features = ["bench"]
+
+# Blob-cache index — Mutex<LruCache> vs moka byte-weigher (index scaling,
+# warm-hit reads, eviction-unlink + single-flight safety gates). No Postgres.
+[[example]]
+name = "bench_blob_cache_index"
+path = "examples/bench_blob_cache_index.rs"
+required-features = ["bench"]
+
 # Round-11 battery ────────────────────────────────────────────────────────────
 
 # Round-11 CPU/alloc micro-pack — download DTO hand-off, Last-Modified stack

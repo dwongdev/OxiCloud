@@ -39,6 +39,7 @@ vi.mock('$lib/api/endpoints/files', () => ({
 	deleteFile: vi.fn(),
 	fileDownloadUrl: () => '/dl',
 	fileThumbnailUrl: () => '/thumb',
+	thumbSizeForView: () => 'preview' as const,
 	moveFile: vi.fn(),
 	renameFile: vi.fn(),
 	uploadFile: vi.fn(),

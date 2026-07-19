@@ -28,6 +28,7 @@
 		fileThumbnailUrl,
 		moveFile,
 		renameFile,
+		thumbSizeForView,
 		uploadFileWithProgress
 	} from '$lib/api/endpoints/files';
 	import { folderZipUrl } from '$lib/api/endpoints/folders';
@@ -2137,7 +2138,7 @@
 				{#if canThumbnail(file)}
 					<img
 						class="file-thumb"
-						src={fileThumbnailUrl(file.id)}
+						src={fileThumbnailUrl(file.id, thumbSizeForView(filesStore.viewMode))}
 						alt=""
 						loading="lazy"
 						onerror={(e) => {

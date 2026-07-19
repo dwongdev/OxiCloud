@@ -18,6 +18,7 @@ vi.mock('$lib/api/endpoints/files', () => ({
 	// src for the fallback path; tests don't render actual thumbnails
 	// but the module import needs to succeed.
 	fileThumbnailUrl: () => '/thumb.png',
+	thumbSizeForView: () => 'preview' as const,
 	renameFile: vi.fn(),
 	deleteFile: vi.fn()
 }));

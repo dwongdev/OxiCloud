@@ -1067,6 +1067,81 @@ impl UserStoragePort for UserPgRepository {
             .map_err(DomainError::from)
     }
 
+    async fn search_usernames(
+        &self,
+        query: &str,
+        limit: i64,
+        include_external: bool,
+    ) -> Result<Vec<Option<String>>, DomainError> {
+        // Same predicate / order / limit as `search_users`, username-only
+        // projection — the sharee autocomplete path reads nothing else, and
+        // the wide row drags the avatar `image` per matched user.
+        let pattern = format!("%{}%", query);
+        let rows = sqlx::query(
+            r#"
+            SELECT username
+            FROM auth.users
+            WHERE (username ILIKE $1 OR email ILIKE $1)
+              AND ($3 OR is_external = FALSE)
+            ORDER BY username
+            LIMIT $2
+            "#,
+        )
+        .bind(&pattern)
+        .bind(limit)
+        .bind(include_external)
+        .fetch_all(&*self.pool)
+        .await
+        .map_err(Self::map_sqlx_error)
+        .map_err(DomainError::from)?;
+        Ok(rows.into_iter().map(|row| row.get("username")).collect())
+    }
+
+    async fn mark_email_verified(&self, user_id: Uuid) -> Result<(), DomainError> {
+        // SQL twin of `User::mark_email_verified` — stamps once, keeps the
+        // first timestamp, and touches only the two columns involved.
+        sqlx::query(
+            r#"
+            UPDATE auth.users
+            SET email_verified_at = NOW(), updated_at = NOW()
+            WHERE id = $1 AND email_verified_at IS NULL
+            "#,
+        )
+        .bind(user_id)
+        .execute(&*self.pool)
+        .await
+        .map_err(Self::map_sqlx_error)
+        .map_err(DomainError::from)?;
+        Ok(())
+    }
+
+    async fn sync_oidc_login_profile(
+        &self,
+        user_id: Uuid,
+        image: Option<&str>,
+    ) -> Result<(), DomainError> {
+        // `IS DISTINCT FROM` guard (the `update_storage_usage` pattern): the
+        // common repeat-login case — same IdP avatar, already verified —
+        // writes nothing at all (no dead tuple, no WAL).
+        sqlx::query(
+            r#"
+            UPDATE auth.users
+            SET image = $2,
+                email_verified_at = COALESCE(email_verified_at, NOW()),
+                updated_at = NOW()
+            WHERE id = $1
+              AND (image IS DISTINCT FROM $2 OR email_verified_at IS NULL)
+            "#,
+        )
+        .bind(user_id)
+        .bind(image)
+        .execute(&*self.pool)
+        .await
+        .map_err(Self::map_sqlx_error)
+        .map_err(DomainError::from)?;
+        Ok(())
+    }
+
     async fn list_users_by_role(&self, role: &str) -> Result<Vec<User>, DomainError> {
         UserRepository::list_users_by_role(self, role)
             .await

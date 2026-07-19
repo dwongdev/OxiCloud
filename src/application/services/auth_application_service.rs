@@ -786,9 +786,14 @@ impl AuthApplicationService {
             lc.dispatch_login(&user).await;
         }
 
-        // Update last login
+        // Update last login (in-memory only — the DTO below carries it).
+        // The full-row `update_user` this path used to issue was 100%
+        // redundant: `create_session` stamps `last_login_at`/`updated_at`
+        // in its own transaction right below, and nothing re-reads the row
+        // in between. Dropping it removes one transaction + a 17-column
+        // rewrite (incl. the up-to-512 KiB avatar) per password login
+        // (benches/ROUND12.md §2, 4.45x).
         user.register_login();
-        self.user_storage.update_user(user.clone()).await?;
 
         // Generate tokens using the injected token service
         let access_token = self.token_service.generate_access_token(&user)?;
@@ -1017,9 +1022,12 @@ impl AuthApplicationService {
         // PR 23: clicking the magic-link IS proof of email control —
         // stamp the verification (idempotent, preserves the first
         // timestamp). Applies to both invitation and login-via-email
-        // tokens.
+        // tokens. Narrow single-column write: `last_login_at` is stamped
+        // by `create_session` below, so the full-row `update_user` this
+        // path used to issue only ever contributed the verification
+        // timestamp (benches/ROUND12.md §3, 8.9x).
         user.mark_email_verified();
-        self.user_storage.update_user(user.clone()).await?;
+        self.user_storage.mark_email_verified(user.id()).await?;
 
         let access_token = self.token_service.generate_access_token(&user)?;
         let refresh_token = self.token_service.generate_refresh_token();
@@ -1163,15 +1171,15 @@ impl AuthApplicationService {
             ));
         }
 
-        // Revoke current session before issuing the next token in the family
-        self.session_storage.revoke_session(session.id()).await?;
-
         // Generate new tokens
         let access_token = self.token_service.generate_access_token(&user)?;
         let new_refresh_token = self.token_service.generate_refresh_token();
 
         // New session inherits the family_id so reuse of any ancestor triggers
-        // full-family revocation
+        // full-family revocation. Revoking the old session and inserting the
+        // new one happen in ONE transaction (`rotate_session`) — this path
+        // used to pay two BEGIN/COMMIT pairs per refresh, and DAV clients
+        // rotate constantly (benches/ROUND12.md §4).
         let new_session = Session::new(
             user.id(),
             new_refresh_token.clone(),
@@ -1181,7 +1189,9 @@ impl AuthApplicationService {
             session.family_id(),
         );
 
-        self.session_storage.create_session(new_session).await?;
+        self.session_storage
+            .rotate_session(session.id(), new_session)
+            .await?;
 
         Ok(AuthResponseDto {
             user: UserDto::from(user),
@@ -2030,6 +2040,24 @@ impl AuthApplicationService {
         Ok(users.into_iter().map(UserDto::from).collect())
     }
 
+    /// Username-only search for the NC sharee autocomplete: identical
+    /// predicate / order / limit to [`search_users`], but the repository
+    /// projects just `username` — no 21-column hydration (incl. the
+    /// up-to-512 KiB avatar `image`) per matched row, per keystroke
+    /// (benches/ROUND12.md §1). NULL usernames (email-only signups) are
+    /// filtered app-side, exactly like the wide flow's post-limit filter.
+    pub async fn search_sharee_usernames(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> Result<Vec<String>, DomainError> {
+        let names = self
+            .user_storage
+            .search_usernames(query, limit, false)
+            .await?;
+        Ok(names.into_iter().flatten().collect())
+    }
+
     // ========================================================================
     // Admin User Management Methods
     // ========================================================================
@@ -2607,6 +2635,15 @@ impl AuthApplicationService {
                 if let Some(lc) = &self.user_lifecycle {
                     lc.dispatch_login(&existing_user).await;
                 }
+                // Decide BEFORE mutating: the row just fetched already
+                // carries the stored avatar + verification stamp, so the
+                // repeat-login common case (same IdP picture, already
+                // verified) skips the DB entirely — the old shape rewrote
+                // all 17 columns per login, and even a guarded UPDATE
+                // would ship the avatar over the wire just to compare it
+                // (benches/ROUND12.md §3b).
+                let needs_profile_sync = existing_user.email_verified_at().is_none()
+                    || existing_user.image() != claims.picture.as_deref();
                 existing_user.register_login();
                 existing_user.set_image(claims.picture.clone());
                 // PR 23: retroactive email verification for OIDC users
@@ -2615,7 +2652,16 @@ impl AuthApplicationService {
                 // any user reaching this branch has a verified email
                 // by the IdP's word; stamping is safe and idempotent.
                 existing_user.mark_email_verified();
-                self.user_storage.update_user(existing_user.clone()).await?;
+                // Narrow guarded sync instead of the 17-column row rewrite:
+                // persists the IdP avatar + the verification stamp only
+                // when either actually changed; `last_login_at` is stamped
+                // by `create_session` at the end of this flow
+                // (benches/ROUND12.md §3).
+                if needs_profile_sync {
+                    self.user_storage
+                        .sync_oidc_login_profile(existing_user.id(), claims.picture.as_deref())
+                        .await?;
+                }
                 existing_user
             }
             Err(_) => {

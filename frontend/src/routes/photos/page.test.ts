@@ -15,7 +15,8 @@ vi.mock('$lib/api/endpoints/photos', () => ({
 vi.mock('$lib/api/endpoints/people', () => ({ peopleEnabled: vi.fn() }));
 vi.mock('$lib/api/endpoints/files', () => ({
 	fileDownloadUrl: () => '/dl',
-	fileThumbnailUrl: () => '/thumb'
+	fileThumbnailUrl: () => '/thumb',
+	thumbSizeForView: () => 'preview' as const
 }));
 
 import { fetchPhotos } from '$lib/api/endpoints/photos';

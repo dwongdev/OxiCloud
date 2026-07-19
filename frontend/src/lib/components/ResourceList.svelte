@@ -78,7 +78,7 @@
 	import { formatBytes } from '$lib/utils/format';
 	import { formatDate, iconNameFromClass, fileIconKindClass } from '$lib/utils/display';
 	import { gridColumns } from '$lib/utils/grid';
-	import { fileThumbnailUrl } from '$lib/api/endpoints/files';
+	import { fileThumbnailUrl, thumbSizeForView } from '$lib/api/endpoints/files';
 	import {
 		canThumbnailClientSide,
 		preloadPdf,
@@ -621,7 +621,7 @@
 				{#if enableThumbnails && kind === 'file' && mimeVal && canThumbnailClientSide( { id: item.id, name: item.name, mime_type: mimeVal } )}
 					<img
 						class="file-thumb"
-						src={fileThumbnailUrl(item.id)}
+						src={fileThumbnailUrl(item.id, thumbSizeForView(filesStore.viewMode))}
 						alt=""
 						loading="lazy"
 						onerror={(e) => {

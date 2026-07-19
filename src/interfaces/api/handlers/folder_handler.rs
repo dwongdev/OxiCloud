@@ -551,11 +551,15 @@ pub async fn list_folder_resources(
                 })
                 .collect();
 
-            (
-                StatusCode::OK,
-                Json(FolderResourcesDto::with_cursor(items, next_cursor)),
-            )
-                .into_response()
+            {
+                // Pre-sized serialization (benches/ROUND12.md §M1).
+                let body = FolderResourcesDto::with_cursor(items, next_cursor);
+                crate::interfaces::api::sized_json::sized_json(
+                    128 + body.items.len()
+                        * crate::interfaces::api::sized_json::EST_WRAPPED_ROW_BYTES,
+                    &body,
+                )
+            }
         }
         Err(e) => AppError::from(e).into_response(),
     }

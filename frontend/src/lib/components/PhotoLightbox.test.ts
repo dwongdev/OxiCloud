@@ -4,7 +4,8 @@ vi.mock('$lib/api/endpoints/files', () => ({
 	deleteFile: vi.fn(),
 	fileDownloadUrl: () => '/d',
 	fileInlineUrl: () => '/i',
-	fileThumbnailUrl: () => '/t'
+	fileThumbnailUrl: () => '/t',
+	thumbSizeForView: () => 'preview' as const
 }));
 vi.mock('$lib/api/endpoints/favorites', () => ({ addFavorite: vi.fn() }));
 vi.mock('$lib/api/endpoints/photos', () => ({ fetchFileMetadata: vi.fn() }));

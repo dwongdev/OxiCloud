@@ -16,6 +16,10 @@ use uuid::Uuid;
  * Storage usage is calculated directly from the `storage.files` table
  * by summing file sizes for each user (using the `user_id` column).
  */
+/// Fused quota-gate row: `(user_used, user_quota, drive_used, drive_quota,
+/// drive_found)` — see [`StorageUsageService::check_upload_quotas`].
+type QuotaPairRow = (i64, i64, Option<i64>, Option<i64>, bool);
+
 pub struct StorageUsageService {
     pool: Arc<PgPool>,
     user_repository: Arc<UserPgRepository>,
@@ -372,6 +376,18 @@ impl StorageUsageService {
             // first, so this branch fires only on a deleted-drive race.
             return Err(DomainError::not_found("Drive", drive_id.to_string()));
         };
+        Self::eval_drive_cap(used, quota, additional_bytes)
+    }
+
+    /// Drive-cap verdict over already-fetched counters. Shared by
+    /// [`Self::check_drive_quota`] and the fused
+    /// [`Self::check_upload_quotas`] pair so both produce byte-identical
+    /// errors.
+    fn eval_drive_cap(
+        used: i64,
+        quota: Option<i64>,
+        additional_bytes: u64,
+    ) -> Result<(), DomainError> {
         let Some(quota) = quota else {
             return Ok(()); // unlimited
         };
@@ -389,6 +405,123 @@ impl StorageUsageService {
             ));
         }
         Ok(())
+    }
+
+    /// User-envelope verdict over already-fetched counters. Shared by
+    /// `check_storage_quota` and the fused [`Self::check_upload_quotas`]
+    /// pair so both produce byte-identical errors.
+    fn eval_user_envelope(used: i64, quota: i64, additional_bytes: u64) -> Result<(), DomainError> {
+        // Quota of 0 means unlimited
+        if quota <= 0 {
+            return Ok(());
+        }
+
+        let additional = additional_bytes as i64;
+
+        // Case 1: the single file alone exceeds the entire quota
+        if additional > quota {
+            let quota_fmt = format_bytes(quota);
+            let file_fmt = format_bytes(additional);
+            return Err(DomainError::quota_exceeded(format!(
+                "File size ({}) exceeds your total storage quota ({})",
+                file_fmt, quota_fmt
+            )));
+        }
+
+        // Case 2: the upload would push usage over the quota
+        if used + additional > quota {
+            let available = (quota - used).max(0);
+            let avail_fmt = format_bytes(available);
+            let file_fmt = format_bytes(additional);
+            return Err(DomainError::quota_exceeded(format!(
+                "Not enough storage space. File size: {}, available: {}",
+                file_fmt, avail_fmt
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Fused pre-upload gate: user envelope + drive cap in ONE round-trip.
+    ///
+    /// Upload entry points used to run `check_storage_quota` then
+    /// `check_drive_quota` as two serial point reads — and the NC chunked
+    /// PUT pays that pair on EVERY chunk. One `LEFT JOIN` row carries both
+    /// counter pairs; verdict precedence (user envelope first, then drive
+    /// existence, then drive cap) and every error shape are identical to
+    /// the two-call sequence (benches/ROUND12.md §6, 1.81x).
+    ///
+    /// Row shape shared with [`Self::check_upload_quotas_by_folder`]:
+    /// `(user_used, user_quota, drive_used, drive_quota, drive_found)`.
+    pub async fn check_upload_quotas(
+        &self,
+        user_id: Uuid,
+        drive_id: Uuid,
+        additional_bytes: u64,
+    ) -> Result<(), DomainError> {
+        let row: Option<QuotaPairRow> = sqlx::query_as(
+            r#"
+            SELECT u.storage_used_bytes, u.storage_quota_bytes,
+                   d.used_bytes, d.quota_bytes, (d.id IS NOT NULL)
+            FROM auth.users u
+            LEFT JOIN storage.drives d ON d.id = $2
+            WHERE u.id = $1
+            "#,
+        )
+        .bind(user_id)
+        .bind(drive_id)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| {
+            DomainError::internal_error("StorageUsage", format!("upload quota lookup: {e}"))
+        })?;
+
+        let Some((uused, uquota, dused, dquota, drive_found)) = row else {
+            return Err(DomainError::not_found("User", user_id.to_string()));
+        };
+        Self::eval_user_envelope(uused, uquota, additional_bytes)?;
+        if !drive_found {
+            return Err(DomainError::not_found("Drive", drive_id.to_string()));
+        }
+        Self::eval_drive_cap(dused.unwrap_or(0), dquota, additional_bytes)
+    }
+
+    /// [`Self::check_upload_quotas`] with the drive resolved from a parent
+    /// folder id — for the REST upload paths, which hold `folder_id`.
+    /// A missing folder (or a folder whose drive vanished mid-race) maps to
+    /// `not_found("Folder")`, exactly like `check_drive_quota_by_folder`.
+    pub async fn check_upload_quotas_by_folder(
+        &self,
+        user_id: Uuid,
+        folder_id: Uuid,
+        additional_bytes: u64,
+    ) -> Result<(), DomainError> {
+        let row: Option<QuotaPairRow> = sqlx::query_as(
+            r#"
+            SELECT u.storage_used_bytes, u.storage_quota_bytes,
+                   d.used_bytes, d.quota_bytes, (d.id IS NOT NULL)
+            FROM auth.users u
+            LEFT JOIN storage.folders f ON f.id = $2
+            LEFT JOIN storage.drives d ON d.id = f.drive_id
+            WHERE u.id = $1
+            "#,
+        )
+        .bind(user_id)
+        .bind(folder_id)
+        .fetch_optional(self.pool.as_ref())
+        .await
+        .map_err(|e| {
+            DomainError::internal_error("StorageUsage", format!("upload quota lookup: {e}"))
+        })?;
+
+        let Some((uused, uquota, dused, dquota, drive_found)) = row else {
+            return Err(DomainError::not_found("User", user_id.to_string()));
+        };
+        Self::eval_user_envelope(uused, uquota, additional_bytes)?;
+        if !drive_found {
+            return Err(DomainError::not_found("Folder", folder_id.to_string()));
+        }
+        Self::eval_drive_cap(dused.unwrap_or(0), dquota, additional_bytes)
     }
 
     /// Same as [`Self::check_drive_quota`] but resolves the drive id
@@ -563,36 +696,7 @@ impl StorageUsagePort for StorageUsageService {
         // Narrow 2-column read — the full user row carries the up-to-512 KiB
         // avatar `image` column, paid on every upload quota check otherwise.
         let (used, quota) = self.user_repository.get_storage_usage(user_id).await?;
-
-        // Quota of 0 means unlimited
-        if quota <= 0 {
-            return Ok(());
-        }
-
-        let additional = additional_bytes as i64;
-
-        // Case 1: the single file alone exceeds the entire quota
-        if additional > quota {
-            let quota_fmt = format_bytes(quota);
-            let file_fmt = format_bytes(additional);
-            return Err(DomainError::quota_exceeded(format!(
-                "File size ({}) exceeds your total storage quota ({})",
-                file_fmt, quota_fmt
-            )));
-        }
-
-        // Case 2: the upload would push usage over the quota
-        if used + additional > quota {
-            let available = (quota - used).max(0);
-            let avail_fmt = format_bytes(available);
-            let file_fmt = format_bytes(additional);
-            return Err(DomainError::quota_exceeded(format!(
-                "Not enough storage space. File size: {}, available: {}",
-                file_fmt, avail_fmt
-            )));
-        }
-
-        Ok(())
+        Self::eval_user_envelope(used, quota, additional_bytes)
     }
 
     async fn get_user_storage_info(&self, user_id: Uuid) -> Result<(i64, i64), DomainError> {

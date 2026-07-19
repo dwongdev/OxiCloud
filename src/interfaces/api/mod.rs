@@ -2,6 +2,7 @@ pub mod cookie_auth;
 pub mod deserializer;
 pub mod handlers;
 pub mod routes;
+pub mod sized_json;
 
 pub use routes::create_api_routes;
 pub use routes::create_health_routes;

@@ -131,6 +131,37 @@ pub trait UserStoragePort: Send + Sync + 'static {
         include_external: bool,
     ) -> Result<Vec<User>, DomainError>;
 
+    /// Username-only projection of [`search_users`] — same WHERE / ORDER /
+    /// LIMIT semantics, but skips hydrating the 21-column row (incl. the
+    /// up-to-512 KiB avatar `image`) when the caller only needs handles.
+    /// Rows whose username is NULL are returned as `None` so callers can
+    /// keep the wide flow's post-limit filtering semantics.
+    async fn search_usernames(
+        &self,
+        query: &str,
+        limit: i64,
+        include_external: bool,
+    ) -> Result<Vec<Option<String>>, DomainError>;
+
+    /// Stamps `email_verified_at = NOW()` iff it is still NULL (idempotent,
+    /// preserves the first timestamp — the SQL twin of
+    /// `User::mark_email_verified`). Narrow single-column write; avoids the
+    /// full-row [`update_user`] (incl. the avatar `image`) on the
+    /// magic-link redemption path.
+    async fn mark_email_verified(&self, user_id: Uuid) -> Result<(), DomainError>;
+
+    /// OIDC repeat-login profile sync: persists the IdP-provided avatar and
+    /// stamps `email_verified_at` (guarded, idempotent) in ONE narrow
+    /// statement. The `IS DISTINCT FROM` guard makes the common case (same
+    /// avatar, already verified) a zero-write no-op — vs the full 17-column
+    /// row rewrite this path used to pay per login. `last_login_at` is NOT
+    /// touched here: session creation stamps it, as on every login path.
+    async fn sync_oidc_login_profile(
+        &self,
+        user_id: Uuid,
+        image: Option<&str>,
+    ) -> Result<(), DomainError>;
+
     /// Lists users by role (e.g., "admin" or "user")
     async fn list_users_by_role(&self, role: &str) -> Result<Vec<User>, DomainError>;
 
@@ -238,6 +269,16 @@ pub trait OidcServicePort: Send + Sync + 'static {
 pub trait SessionStoragePort: Send + Sync + 'static {
     /// Creates a new session
     async fn create_session(&self, session: Session) -> Result<Session, DomainError>;
+
+    /// Refresh-token rotation: revokes `old_session_id` and creates
+    /// `new_session` in ONE transaction (the refresh path used to pay two
+    /// full BEGIN/COMMIT round-trip pairs per rotation). Also stamps the
+    /// user's `last_login_at` exactly like [`create_session`] does.
+    async fn rotate_session(
+        &self,
+        old_session_id: Uuid,
+        new_session: Session,
+    ) -> Result<Session, DomainError>;
 
     /// Gets a session by refresh token
     async fn get_session_by_refresh_token(

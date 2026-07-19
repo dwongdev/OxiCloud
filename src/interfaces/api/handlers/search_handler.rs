@@ -84,7 +84,14 @@ impl SearchHandler {
                     results.files.len(),
                     results.folders.len()
                 );
-                (StatusCode::OK, Json(&*results)).into_response()
+                {
+                    // Pre-sized serialization (benches/ROUND12.md §M1).
+                    let rows = results.files.len() + results.folders.len();
+                    crate::interfaces::api::sized_json::sized_json(
+                        256 + rows * crate::interfaces::api::sized_json::EST_WRAPPED_ROW_BYTES,
+                        &*results,
+                    )
+                }
             }
             Err(err) => {
                 error!("Search error: {}", err);
@@ -125,7 +132,14 @@ impl SearchHandler {
                     results.files.len(),
                     results.folders.len()
                 );
-                (StatusCode::OK, Json(&*results)).into_response()
+                {
+                    // Pre-sized serialization (benches/ROUND12.md §M1).
+                    let rows = results.files.len() + results.folders.len();
+                    crate::interfaces::api::sized_json::sized_json(
+                        256 + rows * crate::interfaces::api::sized_json::EST_WRAPPED_ROW_BYTES,
+                        &*results,
+                    )
+                }
             }
             Err(err) => {
                 error!("Search error: {}", err);

@@ -24,7 +24,6 @@ use oxicloud::access_log;
 use oxicloud::interfaces::middleware::trace_span::{ClientIpMakeSpan, UuidRequestId};
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::request_id::{PropagateRequestIdLayer, SetRequestIdLayer};
-use tower_http::set_header::SetResponseHeaderLayer;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
@@ -918,11 +917,37 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     //   • form-action 'https:': the WOPI office editor is launched by POSTing a
     //     token form to a cross-origin, admin-configured Collabora/OnlyOffice
     //     host. Mirrors the SPA meta policy in frontend/svelte.config.js.
+    // The four static security headers ride in the same response pass —
+    // they used to be four separate `SetResponseHeaderLayer`s stacked on
+    // top of this middleware (5 tower layers per response). Folding them
+    // here measured 1.43x per request / −26 allocs with a byte-identical
+    // header set, including on 304s (benches/ROUND12.md §M3). They are
+    // inserted BEFORE the 304 early-return below because the standalone
+    // layers stamped 304s too.
     async fn content_security_policy(
         req: axum::extract::Request,
         next: axum::middleware::Next,
     ) -> axum::response::Response {
         let mut res = next.run(req).await;
+        {
+            let h = res.headers_mut();
+            h.insert(
+                HeaderName::from_static("x-content-type-options"),
+                HeaderValue::from_static("nosniff"),
+            );
+            h.insert(
+                HeaderName::from_static("x-frame-options"),
+                HeaderValue::from_static("DENY"),
+            );
+            h.insert(
+                HeaderName::from_static("referrer-policy"),
+                HeaderValue::from_static("strict-origin-when-cross-origin"),
+            );
+            h.insert(
+                HeaderName::from_static("permissions-policy"),
+                HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+            );
+        }
         // A 304 Not Modified carries no entity headers (no Content-Type) since
         // there's no body — `is_html` would read `None` and misclassify it as
         // "not html", attaching the strict headerless CSP below. Browsers merge
@@ -982,24 +1007,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         res
     }
 
-    app = app
-        .layer(axum::middleware::from_fn(content_security_policy))
-        .layer(SetResponseHeaderLayer::overriding(
-            HeaderName::from_static("x-content-type-options"),
-            HeaderValue::from_static("nosniff"),
-        ))
-        .layer(SetResponseHeaderLayer::overriding(
-            HeaderName::from_static("x-frame-options"),
-            HeaderValue::from_static("DENY"),
-        ))
-        .layer(SetResponseHeaderLayer::overriding(
-            HeaderName::from_static("referrer-policy"),
-            HeaderValue::from_static("strict-origin-when-cross-origin"),
-        ))
-        .layer(SetResponseHeaderLayer::overriding(
-            HeaderName::from_static("permissions-policy"),
-            HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
-        ));
+    app = app.layer(axum::middleware::from_fn(content_security_policy));
 
     // Warn once at startup if auth cookies are not Secure.
     // HttpOnly + SameSite protection is nullified over plain HTTP because tokens
