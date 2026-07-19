@@ -349,6 +349,14 @@ impl TantivyContentIndex {
             .search(&query, &TopDocs::with_limit(limit.max(1)).order_by_score())
             .map_err(|e| DomainError::internal_error("ContentIndex", format!("search: {e}")))?;
 
+        // No hits → no documents to highlight. `SnippetGenerator::create`
+        // compiles the query against the index (term lookups + weight build);
+        // for a query that matched nothing that is pure waste on the search
+        // request path, and the per-hit loop below never runs. Return early.
+        if top_docs.is_empty() {
+            return Ok(Vec::new());
+        }
+
         // Snippets highlight CONTENT matches; an empty fragment means the hit
         // came from the name (or a fuzzy variant) — no snippet then.
         let snippet_generator = SnippetGenerator::create(&searcher, &*query, fields.content)

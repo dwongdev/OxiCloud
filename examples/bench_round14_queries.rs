@@ -57,7 +57,11 @@ fn bytes_to_embedding(b: &[u8]) -> Vec<f32> {
 /// hydrate the full 10-column row (decoding the 2 KiB embedding like
 /// `row_to_face`), then filter `user_id == caller` in Rust and keep only
 /// `(id, person_id, bbox)`.
-async fn boxes_before(pool: &PgPool, file_id: Uuid, caller: Uuid) -> Vec<(Uuid, Option<Uuid>, Vec<f32>)> {
+async fn boxes_before(
+    pool: &PgPool,
+    file_id: Uuid,
+    caller: Uuid,
+) -> Vec<(Uuid, Option<Uuid>, Vec<f32>)> {
     let rows = sqlx::query(
         "SELECT id, file_id, user_id, person_id, bbox, det_score, quality, embedding, blob_hash, created_at
            FROM faces.faces WHERE file_id = $1",
@@ -83,7 +87,11 @@ async fn boxes_before(pool: &PgPool, file_id: Uuid, caller: Uuid) -> Vec<(Uuid, 
 }
 
 /// AFTER: narrow projection, caller filter in SQL.
-async fn boxes_after(pool: &PgPool, file_id: Uuid, caller: Uuid) -> Vec<(Uuid, Option<Uuid>, Vec<f32>)> {
+async fn boxes_after(
+    pool: &PgPool,
+    file_id: Uuid,
+    caller: Uuid,
+) -> Vec<(Uuid, Option<Uuid>, Vec<f32>)> {
     let rows = sqlx::query(
         "SELECT id, person_id, bbox FROM faces.faces WHERE file_id = $1 AND user_id = $2",
     )
@@ -200,8 +208,12 @@ async fn section_face_boxes(pool: &PgPool) {
     let wire_after = n * (16 + 16 + 16 + 8);
     println!("\n## [Q1] Lightbox face boxes — group photo, {n} faces");
     println!("| arm | mean ms | p50 ms | p95 ms | ~bytes/req |");
-    println!("| BEFORE wide row (incl. embedding) | {wm:>7.3} | {wp50:>6.3} | {wp95:>6.3} | {wire_before:>9} |");
-    println!("| AFTER  narrow (id,person,bbox)    | {nm:>7.3} | {np50:>6.3} | {np95:>6.3} | {wire_after:>9} |");
+    println!(
+        "| BEFORE wide row (incl. embedding) | {wm:>7.3} | {wp50:>6.3} | {wp95:>6.3} | {wire_before:>9} |"
+    );
+    println!(
+        "| AFTER  narrow (id,person,bbox)    | {nm:>7.3} | {np50:>6.3} | {np95:>6.3} | {wire_after:>9} |"
+    );
     println!(
         "# {:.2}x faster; ~{} KiB embedding/columns off the wire per lightbox open (scales with face count)",
         wm / nm,

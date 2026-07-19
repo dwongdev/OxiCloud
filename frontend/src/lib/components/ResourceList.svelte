@@ -78,6 +78,7 @@
 	import { formatBytes } from '$lib/utils/format';
 	import { formatDate, iconNameFromClass, fileIconKindClass } from '$lib/utils/display';
 	import { gridColumns } from '$lib/utils/grid';
+	import { ResourceSectionsBuilder } from '$lib/utils/resourceSections';
 	import { fileThumbnailUrl, thumbSizeForView } from '$lib/api/endpoints/files';
 	import {
 		canThumbnailClientSide,
@@ -369,29 +370,24 @@
 	/**
 	 * Partition the visible items into grouped sections when a `bucketOf` is
 	 * active. Server order is preserved within and across buckets (first-seen).
+	 *
+	 * `ResourceSectionsBuilder` re-buckets only the freshly-appended page rather
+	 * than the whole accumulated list, and hands `VirtualList` the same rows
+	 * array reference for every untouched bucket so it skips re-rendering it. An
+	 * infinite-scroll drain of a grouped listing (trash / recent / favorites /
+	 * shared-with-me) collapses from Σ O(N²/page) to O(N) bucketing work
+	 * (benches/ROUND15.md §F1). Held off the reactive graph — a plain
+	 * accumulator keyed by the append cursor, not $state; `sync` is idempotent,
+	 * so if the derive re-fires without an actual append it safely full-rebuilds
+	 * to the same output the pure `buildResourceSections` reference produces.
 	 */
-	const sections = $derived.by(
-		(): Array<{ key: string; label: string; rows: Array<FileItem | FolderItem> }> => {
-			const bucketOf = activeGroup?.bucketOf;
-			if (!bucketOf) return [{ key: '', label: '', rows: visibleItems }];
-			const order: string[] = [];
-			// Transient bucketing map computed inside $derived.by — not reactive state.
-			// eslint-disable-next-line svelte/prefer-svelte-reactivity
-			const map = new Map<string, Array<FileItem | FolderItem>>();
-			for (const item of visibleItems) {
-				const k = bucketOf(item, ctxOf(item.id)) ?? '∅';
-				if (!map.has(k)) {
-					map.set(k, []);
-					order.push(k);
-				}
-				map.get(k)!.push(item);
-			}
-			return order.map((k) => ({
-				key: k,
-				label: activeGroup?.labelOf?.(k) ?? k,
-				rows: map.get(k)!
-			}));
-		}
+	const sectionsBuilder = new ResourceSectionsBuilder<FileItem | FolderItem, ItemContext>();
+	const sections = $derived.by(() =>
+		sectionsBuilder.sync(visibleItems, {
+			bucketOf: activeGroup?.bucketOf,
+			labelOf: activeGroup?.labelOf,
+			ctxOf: (item) => ctxOf(item.id)
+		})
 	);
 	const grouped = $derived(!!activeGroup?.bucketOf);
 

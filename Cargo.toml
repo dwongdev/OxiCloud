@@ -354,6 +354,24 @@ name = "bench_micro_allocs"
 path = "examples/bench_micro_allocs.rs"
 required-features = ["bench"]
 
+# Round-15 battery ────────────────────────────────────────────────────────────
+
+# Round-15 CPU/alloc micro-pack — exif Make/Model in-place trim (drop the
+# throwaway display String), content-index worker single supports() classify
+# per file (was called twice per drain batch). No Postgres.
+[[example]]
+name = "bench_round15_micro"
+path = "examples/bench_round15_micro.rs"
+required-features = ["bench"]
+
+# Round-15 tantivy zero-hit snippet skip — the SnippetGenerator::create the
+# search path builds even when the query matched no documents (pure waste on a
+# no-hit content search). Builds a RAM index; no Postgres.
+[[example]]
+name = "bench_round15_tantivy"
+path = "examples/bench_round15_tantivy.rs"
+required-features = ["bench"]
+
 # Round-14 battery ────────────────────────────────────────────────────────────
 
 # Round-14 query-shape pack — lightbox face-box narrow projection (drop the

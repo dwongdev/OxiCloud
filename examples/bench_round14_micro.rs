@@ -64,7 +64,10 @@ unsafe impl GlobalAlloc for CountingAlloc {
 static GLOBAL: CountingAlloc = CountingAlloc;
 
 fn env_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-    env::var(key).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+    env::var(key)
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(default)
 }
 
 struct Measured {
@@ -80,11 +83,17 @@ fn measure<F: FnMut()>(iters: usize, mut f: F) -> Measured {
     }
     let wall = t.elapsed().as_nanos() as f64 / iters as f64;
     let allocs = (ALLOC_CALLS.load(Ordering::Relaxed) - a0) as f64 / iters as f64;
-    Measured { wall_ns_per_op: wall, allocs_per_op: allocs }
+    Measured {
+        wall_ns_per_op: wall,
+        allocs_per_op: allocs,
+    }
 }
 
 fn print_row(label: &str, m: &Measured) {
-    println!("| {:<40} | {:>12.1} | {:>10.2} |", label, m.wall_ns_per_op, m.allocs_per_op);
+    println!(
+        "| {:<40} | {:>12.1} | {:>10.2} |",
+        label, m.wall_ns_per_op, m.allocs_per_op
+    );
 }
 
 fn header_footer(name: &str, before: &Measured, after: &Measured) {
@@ -107,12 +116,15 @@ fn section_cookie() {
 
     let iters: usize = env_or("BENCH_ITERS", 200_000);
     let name = "oxicloud_access";
-    let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMTIzNDU2Nzg5YWJjZGVmIn0.c2lnbmF0dXJlLXBsYWNlaG9sZGVy";
+    let jwt =
+        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIwMTIzNDU2Nzg5YWJjZGVmIn0.c2lnbmF0dXJlLXBsYWNlaG9sZGVy";
     let mut headers = HeaderMap::new();
     headers.insert(
         header::COOKIE,
-        HeaderValue::from_str(&format!("{name}={jwt}; oxicloud_csrf=3f2504e0-4f89-41d3-9a0c-0305e82c3301"))
-            .unwrap(),
+        HeaderValue::from_str(&format!(
+            "{name}={jwt}; oxicloud_csrf=3f2504e0-4f89-41d3-9a0c-0305e82c3301"
+        ))
+        .unwrap(),
     );
 
     // Gate: byte-identical value.
@@ -221,7 +233,10 @@ fn section_relevance() {
             "relevance differs for ({name:?}, {q:?})"
         );
     }
-    println!("# [A2] gate: ASCII fast path matches Unicode lowercase across {} cases — OK", corpus.len());
+    println!(
+        "# [A2] gate: ASCII fast path matches Unicode lowercase across {} cases — OK",
+        corpus.len()
+    );
 
     let m_before = measure(iters, || {
         for (name, q) in corpus {
@@ -234,7 +249,10 @@ fn section_relevance() {
         }
     });
 
-    println!("\n## [A2] compute_relevance over a {}-row result page (per search / keystroke)", corpus.len());
+    println!(
+        "\n## [A2] compute_relevance over a {}-row result page (per search / keystroke)",
+        corpus.len()
+    );
     header_footer("relevance whole corpus", &m_before, &m_after);
     if m_after.wall_ns_per_op >= m_before.wall_ns_per_op {
         eprintln!("GATE FAIL [A2]: ASCII fast path not faster — rollback");
@@ -252,7 +270,11 @@ fn section_sub_parse() {
     let pre_parsed = Uuid::parse_str(&sub).unwrap();
 
     // Gate: the pre-parsed uuid equals a fresh parse.
-    assert_eq!(Uuid::parse_str(&sub).unwrap(), pre_parsed, "uuid parse differs");
+    assert_eq!(
+        Uuid::parse_str(&sub).unwrap(),
+        pre_parsed,
+        "uuid parse differs"
+    );
     println!("# [A3] gate: pre-parsed sub_id equals per-request parse — OK");
 
     let m_before = measure(iters, || {
@@ -279,18 +301,41 @@ fn section_sub_parse() {
 fn build_request_headers() -> HeaderMap {
     // A representative authed browser request.
     let mut h = HeaderMap::new();
-    h.insert(header::AUTHORIZATION, HeaderValue::from_static("Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig"));
+    h.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_static("Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig"),
+    );
     h.insert(
         header::COOKIE,
-        HeaderValue::from_static("oxicloud_access=eyJ.payload.sig; oxicloud_csrf=3f2504e0-4f89-41d3-9a0c-0305e82c3301"),
+        HeaderValue::from_static(
+            "oxicloud_access=eyJ.payload.sig; oxicloud_csrf=3f2504e0-4f89-41d3-9a0c-0305e82c3301",
+        ),
     );
     h.insert(header::HOST, HeaderValue::from_static("cloud.example.com"));
-    h.insert(header::USER_AGENT, HeaderValue::from_static("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"));
-    h.insert(header::ACCEPT, HeaderValue::from_static("application/json, text/plain, */*"));
-    h.insert(header::ACCEPT_ENCODING, HeaderValue::from_static("gzip, deflate, br"));
-    h.insert(header::ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
-    h.insert(header::REFERER, HeaderValue::from_static("https://cloud.example.com/files"));
-    h.insert("x-csrf-token", HeaderValue::from_static("3f2504e0-4f89-41d3-9a0c-0305e82c3301"));
+    h.insert(
+        header::USER_AGENT,
+        HeaderValue::from_static("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"),
+    );
+    h.insert(
+        header::ACCEPT,
+        HeaderValue::from_static("application/json, text/plain, */*"),
+    );
+    h.insert(
+        header::ACCEPT_ENCODING,
+        HeaderValue::from_static("gzip, deflate, br"),
+    );
+    h.insert(
+        header::ACCEPT_LANGUAGE,
+        HeaderValue::from_static("en-US,en;q=0.9"),
+    );
+    h.insert(
+        header::REFERER,
+        HeaderValue::from_static("https://cloud.example.com/files"),
+    );
+    h.insert(
+        "x-csrf-token",
+        HeaderValue::from_static("3f2504e0-4f89-41d3-9a0c-0305e82c3301"),
+    );
     h.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
     h
 }
@@ -302,9 +347,13 @@ fn section_headermap_clone() {
     // Gate: the token extracted from a cloned map equals that from the borrowed map.
     let from_clone = {
         let c = headers.clone();
-        c.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).map(str::to_string)
+        c.get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string)
     };
-    let from_borrow = headers.get(header::AUTHORIZATION).and_then(|v| v.to_str().ok());
+    let from_borrow = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
     assert_eq!(from_clone.as_deref(), from_borrow, "authorization differs");
     println!("# [A4] gate: token from cloned map == token from borrowed map — OK");
 
@@ -358,7 +407,10 @@ fn section_caldav_rfc2822() {
     }
     println!("# [A5] gate: stack rfc2822_utc byte-identical to chrono to_rfc2822 — OK");
 
-    let dts: Vec<DateTime<Utc>> = secs.iter().map(|&s| DateTime::<Utc>::from_timestamp(s, 0).unwrap()).collect();
+    let dts: Vec<DateTime<Utc>> = secs
+        .iter()
+        .map(|&s| DateTime::<Utc>::from_timestamp(s, 0).unwrap())
+        .collect();
 
     let m_before = measure(iters, || {
         for dt in &dts {
@@ -372,7 +424,10 @@ fn section_caldav_rfc2822() {
         }
     });
 
-    println!("\n## [A5] CalDAV getlastmodified render ({} events, per REPORT/PROPFIND)", secs.len());
+    println!(
+        "\n## [A5] CalDAV getlastmodified render ({} events, per REPORT/PROPFIND)",
+        secs.len()
+    );
     header_footer("rfc2822 chrono/stack", &m_before, &m_after);
     if m_after.allocs_per_op >= m_before.allocs_per_op {
         eprintln!("GATE FAIL [A5]: stack render did not remove allocations — rollback");
@@ -389,7 +444,12 @@ fn section_caldav_href_etag() {
     let base_href = "/caldav/alice/personal/";
     // A page of events (uid, id) like write_report_page iterates.
     let events: Vec<(String, Uuid)> = (0..40)
-        .map(|i| (format!("event-uid-{i:04}-abcdef@oxicloud"), Uuid::from_u128(0x1000 + i as u128)))
+        .map(|i| {
+            (
+                format!("event-uid-{i:04}-abcdef@oxicloud"),
+                Uuid::from_u128(0x1000 + i as u128),
+            )
+        })
         .collect();
 
     // Gate: reused-buffer output identical to the per-event format! pair.
@@ -426,7 +486,10 @@ fn section_caldav_href_etag() {
         }
     });
 
-    println!("\n## [A6] CalDAV per-event href + etag ({} events/page, per REPORT/PROPFIND)", events.len());
+    println!(
+        "\n## [A6] CalDAV per-event href + etag ({} events/page, per REPORT/PROPFIND)",
+        events.len()
+    );
     header_footer("href+etag per page", &m_before, &m_after);
     if m_after.allocs_per_op >= m_before.allocs_per_op {
         eprintln!("GATE FAIL [A6]: reused buffer did not reduce allocations — rollback");

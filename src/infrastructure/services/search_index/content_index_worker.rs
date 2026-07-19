@@ -264,13 +264,21 @@ impl ContentIndexWorker {
         let found: HashSet<Uuid> = files.iter().map(|f| f.0).collect();
         deletes.extend(upsert_candidates.iter().filter(|id| !found.contains(id)));
 
+        // `supports` lowercases the MIME (and, on a generic MIME, the extension)
+        // — 1–2 allocations per call. Classify each file ONCE here and thread the
+        // flag through both the wanted-hashes filter and the per-file records
+        // loop below, where it used to be re-derived a second time per file.
+        let supported: Vec<bool> = files
+            .iter()
+            .map(|(_, _, name, _, mime, _)| text_extractor::supports(name, mime))
+            .collect();
+
         // Per-blob text: batch-read the extraction cache, extract misses.
         let wanted_hashes: Vec<String> = files
             .iter()
-            .filter(|(_, _, name, _, mime, size)| {
-                text_extractor::supports(name, mime) && *size as u64 <= self.max_extract_file_bytes
-            })
-            .map(|f| f.3.clone())
+            .zip(&supported)
+            .filter(|&(f, sup)| *sup && f.5 as u64 <= self.max_extract_file_bytes)
+            .map(|(f, _)| f.3.clone())
             .collect();
         let mut text_by_hash: HashMap<String, Option<String>> = HashMap::new();
         if !wanted_hashes.is_empty() {
@@ -287,8 +295,9 @@ impl ContentIndexWorker {
         }
 
         let mut records = Vec::with_capacity(files.len());
-        for (file_id, drive_id, name, blob_hash, mime, size) in files {
-            let supported = text_extractor::supports(&name, &mime);
+        for ((file_id, drive_id, name, blob_hash, mime, size), supported) in
+            files.into_iter().zip(supported)
+        {
             let content = if !supported {
                 None
             } else if let Some(cached) = text_by_hash.get(&blob_hash) {
