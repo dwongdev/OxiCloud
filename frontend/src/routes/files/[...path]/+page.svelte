@@ -1101,6 +1101,12 @@
 	// ── Drag-to-move ─────────────────────────────────────────────────────────
 	const DRAG_TYPE = 'application/x-oxi-item';
 	let dropFolderId = $state<string | null>(null);
+	// Highlighted breadcrumb crumb during an OxiCloud drag. Holds the
+	// crumb's folder id, or the sentinel `'__home__'` for the home link
+	// (which doesn't have a stable folder id — depends on the caller's
+	// home folder resolution).
+	const CRUMB_HOME_ID = '__home__';
+	let dropCrumbId = $state<string | null>(null);
 
 	/**
 	 * Begin dragging an item. When the dragged row is part of the current
@@ -1113,7 +1119,12 @@
 		e.dataTransfer?.setData(DRAG_TYPE, JSON.stringify(items));
 		if (e.dataTransfer) {
 			e.dataTransfer.effectAllowed = 'move';
-			if (items.length > 1) showDragGhost(e.dataTransfer, items);
+			// Custom drag ghost for both single and multi-item drags —
+			// consistent UX. The `.dragged-items-badge` always shows
+			// the count (reads "1" on a single-item drag) so the user
+			// gets the same visual feedback shape regardless of how
+			// many rows they're moving.
+			showDragGhost(e.dataTransfer, items);
 			// Drag-out-to-OS download: the OS reads `DownloadURL` (a GET URL) and
 			// downloads the dragged item(s) — a single file directly, a folder or a
 			// multi-selection as one server-zipped archive.
@@ -1761,14 +1772,26 @@
 				     the user's drive root). `buildCrumbs` returns only the path folders,
 				     so this is the single always-present "go home" affordance. Both the
 				     home link and every crumb accept row drops via the same
-				     `application/x-oxi-item` MIME the item-drag uses. -->
+				     `application/x-oxi-item` MIME the item-drag uses. The
+				     `.drop-target` class visually highlights the crumb during a
+				     hover-over so the user sees WHICH crumb the drop will land on. -->
 				<a
 					href={resolve('/files')}
 					class="breadcrumb-item breadcrumb-home breadcrumb-link"
+					class:drop-target={dropCrumbId === CRUMB_HOME_ID}
 					title={t('breadcrumb.home', 'Home')}
 					data-testid="files-breadcrumb-home-link"
 					ondragover={(e) => e.dataTransfer?.types.includes(DRAG_TYPE) && e.preventDefault()}
-					ondrop={(e) => session.homeFolderId && onCrumbDrop(e, session.homeFolderId)}
+					ondragenter={(e) => {
+						if (e.dataTransfer?.types.includes(DRAG_TYPE)) dropCrumbId = CRUMB_HOME_ID;
+					}}
+					ondragleave={() => {
+						if (dropCrumbId === CRUMB_HOME_ID) dropCrumbId = null;
+					}}
+					ondrop={(e) => {
+						dropCrumbId = null;
+						if (session.homeFolderId) onCrumbDrop(e, session.homeFolderId);
+					}}
 				>
 					<Icon name={rootIcon} />
 				</a>
@@ -1780,9 +1803,19 @@
 						<a
 							href={resolve(`/files/${pathSegments.slice(0, i + 1).join('/')}`)}
 							class="breadcrumb-item breadcrumb-link"
+							class:drop-target={dropCrumbId === c.id}
 							data-testid={`files-breadcrumb-${c.id}`}
 							ondragover={(e) => e.dataTransfer?.types.includes(DRAG_TYPE) && e.preventDefault()}
-							ondrop={(e) => onCrumbDrop(e, c.id)}
+							ondragenter={(e) => {
+								if (e.dataTransfer?.types.includes(DRAG_TYPE)) dropCrumbId = c.id;
+							}}
+							ondragleave={() => {
+								if (dropCrumbId === c.id) dropCrumbId = null;
+							}}
+							ondrop={(e) => {
+								dropCrumbId = null;
+								onCrumbDrop(e, c.id);
+							}}
 						>
 							{c.name}
 						</a>
