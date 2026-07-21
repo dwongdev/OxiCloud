@@ -1664,7 +1664,9 @@ mod mount_authz_integration {
         let fs = FolderService::new(
             Arc::new(FolderDbRepository::new(pool.clone())),
             acl(pool),
-            Arc::new(crate::application::services::file_lifecycle_service::FileLifecycleService::new()),
+            Arc::new(
+                crate::application::services::file_lifecycle_service::FileLifecycleService::new(),
+            ),
             router,
         );
         (fs, p.mount_folder_id.to_string(), p.owner_id)
@@ -1860,7 +1862,9 @@ mod mount_authz_integration {
         let folder_service = FolderService::new(
             Arc::new(FolderDbRepository::new(pool.clone())),
             acl(&pool),
-            Arc::new(crate::application::services::file_lifecycle_service::FileLifecycleService::new()),
+            Arc::new(
+                crate::application::services::file_lifecycle_service::FileLifecycleService::new(),
+            ),
             router.clone(),
         );
         let retrieval = FileRetrievalService::new_with_authz_for_test(
@@ -1910,7 +1914,12 @@ mod mount_authz_integration {
 
         // PROPFIND Depth:1 file loop: list files of the mount root.
         let files = retrieval
-            .list_files_batch_with_perms(Some(&p.mount_folder_id.to_string()), p.owner_id, None, 100)
+            .list_files_batch_with_perms(
+                Some(&p.mount_folder_id.to_string()),
+                p.owner_id,
+                None,
+                100,
+            )
             .await
             .expect("list mount files");
         assert_eq!(
@@ -1995,7 +2004,9 @@ mod mount_authz_integration {
         let folder_service = FolderService::new(
             Arc::new(FolderDbRepository::new(pool.clone())),
             acl(&pool),
-            Arc::new(crate::application::services::file_lifecycle_service::FileLifecycleService::new()),
+            Arc::new(
+                crate::application::services::file_lifecycle_service::FileLifecycleService::new(),
+            ),
             router.clone(),
         );
 
