@@ -22,6 +22,7 @@ use crate::application::ports::file_ports::{
     FileManagementUseCase, FileRetrievalUseCase, FileUploadUseCase,
 };
 use crate::application::ports::folder_ports::FolderUseCase;
+use crate::application::ports::storage_ports::StorageUsagePort;
 use crate::application::ports::trash_ports::TrashUseCase;
 use crate::common::di::AppState;
 use crate::common::mime_detect::filename_from_path;
@@ -29,12 +30,15 @@ use crate::domain::services::authorization::{Permission, Resource, Subject};
 use crate::infrastructure::services::path_resolver_service::ResolvedResource;
 use crate::infrastructure::services::webdav_dead_property_store::ResourceRef;
 use crate::interfaces::api::handlers::webdav_handler::{
-    PROPFIND_BATCH_SIZE, dead_props_for, file_dead_props, files_dead_props_map, folder_dead_props,
-    folders_dead_props_map,
+    PROPFIND_BATCH_SIZE, cas_write_patch, dead_props_for, enforce_native_lock, file_dead_props,
+    files_dead_props_map, folder_dead_props, folders_dead_props_map, if_match_precondition_fails,
+    if_none_match_precondition_fails, parse_update_range, splice_patch_streams,
 };
 use crate::interfaces::errors::AppError;
 use crate::interfaces::range_requests::{not_modified_response, range_response};
-use crate::interfaces::upload_ingest::ingest_body_to_cas;
+use crate::interfaces::upload_ingest::{
+    PatchIngestBudget, discard_ingested, ingest_body_to_cas, ingest_range_patch_to_cas,
+};
 
 /// Extension trait to map XML write errors to `String` concisely.
 trait XmlResultExt<T> {
@@ -74,15 +78,24 @@ const HEADER_DAV: HeaderName = HeaderName::from_static("dav");
 /// Replaces the pre-D0 hardcoded `"My Folder - {username}/"` prefix.
 pub fn nc_to_internal_path(chroot: &FolderDto, subpath: &str) -> Result<String, AppError> {
     let subpath = subpath.trim_matches('/');
+    // `chroot.path` comes from `Folder::path_string()` /
+    // `StoragePath::to_string()`, which prepends a leading `/` (e.g.
+    // `"/Personal"`) — trim it so the result matches the leading-
+    // slash-free convention `storage.folders.path` (and the plain
+    // WebDAV surface's `db_path`) actually use. Without this, exact-
+    // string comparisons against a plain-surface path (e.g. the
+    // in-memory WebDAV lock store's key) silently mismatch even
+    // though DB-backed lookups tolerate the discrepancy.
+    let chroot_path = chroot.path.trim_start_matches('/');
     if subpath.is_empty() {
-        return Ok(chroot.path.clone());
+        return Ok(chroot_path.to_string());
     }
     // Reject path traversal attempts.
     if subpath.split('/').any(|seg| seg == ".." || seg == ".") {
         return Err(AppError::bad_request("Invalid path: traversal not allowed"));
     }
 
-    Ok(format!("{}/{}", chroot.path, subpath))
+    Ok(format!("{}/{}", chroot_path, subpath))
 }
 
 /// Strip the caller's chroot prefix from an internal
@@ -263,6 +276,7 @@ pub async fn handle_nc_webdav(
         "PROPFIND" => handle_propfind(state, req, &session, &subpath).await,
         "GET" => handle_get(state, &session, &subpath, req.headers()).await,
         "PUT" => handle_put(state, req, &session, &subpath).await,
+        "PATCH" => handle_patch(state, req, &session, &subpath).await,
         "MKCOL" => handle_mkcol(state, &session, &subpath).await,
         "DELETE" => handle_delete(state, &session, &subpath).await,
         "MOVE" => handle_move(state, req, &session, &subpath).await,
@@ -298,7 +312,7 @@ fn handle_options() -> Result<Response<Body>, AppError> {
         .header(HEADER_DAV, "1, 3")
         .header(
             header::ALLOW,
-            "OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, MOVE, PROPFIND, PROPPATCH, REPORT, SEARCH",
+            "OPTIONS, GET, HEAD, PUT, PATCH, DELETE, MKCOL, MOVE, PROPFIND, PROPPATCH, REPORT, SEARCH",
         )
         .body(Body::empty())
         .unwrap())
@@ -821,55 +835,6 @@ async fn handle_proppatch(
 
 // ──────────────────── PUT ────────────────────
 
-/// Strip the optional `W/` weak prefix and surrounding double-quotes
-/// from one ETag value in an `If-Match` / `If-None-Match` list. Returns
-/// `(is_weak, inner)`.
-fn parse_etag_value(raw: &str) -> (bool, &str) {
-    let trimmed = raw.trim();
-    if let Some(rest) = trimmed.strip_prefix("W/") {
-        (true, rest.trim().trim_matches('"'))
-    } else {
-        (false, trimmed.trim_matches('"'))
-    }
-}
-
-/// RFC 7232 §3.2 — `If-None-Match` fails for PUT when:
-///   - the header value is `*` and a current representation exists, OR
-///   - any listed ETag matches the current representation (weak comparison
-///     — weak validators in the request are equivalent to strong for the
-///     match itself, only If-Match is required to be strong).
-fn if_none_match_precondition_fails(header: &str, current_etag: Option<&str>) -> bool {
-    let v = header.trim();
-    if v == "*" {
-        return current_etag.is_some();
-    }
-    let Some(current) = current_etag else {
-        return false;
-    };
-    v.split(',').any(|tag| {
-        let (_, parsed) = parse_etag_value(tag);
-        !parsed.is_empty() && parsed == current
-    })
-}
-
-/// RFC 7232 §3.1 — `If-Match` fails for PUT when:
-///   - the resource doesn't currently exist (no strong validator to match), OR
-///   - the header isn't `*` and no listed ETag strong-matches the current one
-///     (weak validators in the request never satisfy a strong-match).
-fn if_match_precondition_fails(header: &str, current_etag: Option<&str>) -> bool {
-    let v = header.trim();
-    let Some(current) = current_etag else {
-        return true;
-    };
-    if v == "*" {
-        return false;
-    }
-    !v.split(',').any(|tag| {
-        let (is_weak, parsed) = parse_etag_value(tag);
-        !is_weak && !parsed.is_empty() && parsed == current
-    })
-}
-
 fn precondition_failed_response() -> Response<Body> {
     Response::builder()
         .status(StatusCode::PRECONDITION_FAILED)
@@ -901,6 +866,13 @@ async fn handle_put(
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.parse::<i64>().ok());
 
+    // Extract before consuming `req` into the body stream further down.
+    let if_header = req
+        .headers()
+        .get("If")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
     // ── Conditional preconditions (RFC 7232 §3.1 / §3.2) ─────────────
     // Evaluated BEFORE body ingestion so a rejected PUT doesn't waste
     // bandwidth or disk I/O on a body the server is going to throw away.
@@ -927,6 +899,49 @@ async fn handle_put(
         && if_match_precondition_fails(value, current_etag)
     {
         return Ok(precondition_failed_response());
+    }
+
+    // ── Existence-check depth (RFC 4918 §9.7.1) ───────────────────────
+    // Mirrors the plain WebDAV surface's `handle_put`: PUT to an existing
+    // directory is 400, PUT under a missing parent is 409 (not the generic
+    // 500 a downstream `NotFound` would otherwise surface as).
+    if existing.is_none() {
+        if state
+            .applications
+            .folder_service
+            .get_folder_by_path(&internal_path, chroot.drive_id)
+            .await
+            .is_ok()
+        {
+            return Err(AppError::bad_request("Cannot PUT to a directory"));
+        }
+        let parent_path = internal_path
+            .rfind('/')
+            .map(|i| &internal_path[..i])
+            .unwrap_or("");
+        if !parent_path.is_empty() {
+            state
+                .applications
+                .folder_service
+                .get_folder_by_path(parent_path, chroot.drive_id)
+                .await
+                .map_err(|_| {
+                    AppError::conflict(format!("Parent folder not found: {}", parent_path))
+                })?;
+        }
+    }
+
+    // ── Active-lock guard (RFC 4918 §10.4 If: evaluation) ─────────────
+    // Shared with the plain WebDAV surface and with this surface's own
+    // `handle_patch`, so a LOCK taken via /webdav/ also protects the same
+    // file reached through /remote.php/dav/.
+    if let Some(resp) = enforce_native_lock(
+        &state.webdav_lock_store,
+        if_header.as_deref(),
+        &internal_path,
+        current_etag,
+    ) {
+        return Ok(resp);
     }
 
     // ── Direct PUT cap ───────────────────────────────────────────────
@@ -961,13 +976,35 @@ async fn handle_put(
     // using the lookup already done above for the precondition check.
     let existed = existing.is_some();
 
+    // ── Quota enforcement ─────────────────────────────────────────────
+    if let Some(storage_svc) = state.storage_usage_service.as_ref()
+        && let Err(err) = storage_svc
+            .check_storage_quota(session.user.id, ingested.size)
+            .await
+    {
+        discard_ingested(&state.core.dedup_service, &ingested).await;
+        tracing::warn!(
+            "⛔ NC WEBDAV PUT REJECTED (quota): user={}, file={}, size={}",
+            session.user.id,
+            internal_path,
+            ingested.size
+        );
+        return Err(AppError::new(
+            StatusCode::INSUFFICIENT_STORAGE,
+            err.message,
+            "QuotaExceeded",
+        ));
+    }
+
     // Single streaming path — handles both update and create internally,
     // swapping the file row onto the already-ingested blob.
     // AuthZ audit #6 (2026-07-12): route `_with_perms` errors through
     // `AppError::from` so authz denials surface as 404 (the anti-enum
     // shape) instead of a `map_err → internal_error` 500 that gives a
     // probing caller an "exists-but-denied" oracle. Also preserves
-    // `QuotaExceeded → 507`, `AlreadyExists → 409`, `InvalidInput → 400`.
+    // `QuotaExceeded → 507`, `AlreadyExists → 409`, `InvalidInput → 400` —
+    // matching this surface's own `handle_patch` and the plain WebDAV
+    // `handle_put`.
     let stored = upload_service
         .update_file_streaming_with_perms(
             &internal_path,
@@ -976,6 +1013,7 @@ async fn handle_put(
             &content_type,
             oc_mtime,
             session.user.id,
+            None,
         )
         .await
         .map_err(AppError::from)?;
@@ -990,6 +1028,224 @@ async fn handle_put(
         .status(status)
         .header(header::ETAG, format!("\"{}\"", stored.etag))
         .header("oc-etag", format!("\"{}\"", stored.etag))
+        .body(Body::empty())
+        .unwrap())
+}
+
+// ──────────────────── PATCH ────────────────────
+
+/// Handles PATCH requests (RFC 5789) for partial byte-range content
+/// updates on the NextCloud file surface — extends the plain WebDAV
+/// surface's `X-Update-Range` mechanism (see
+/// `api/handlers/webdav_handler.rs::handle_patch` / `parse_update_range`)
+/// here. New content is assembled by splicing the request body between
+/// the file's untouched prefix/suffix byte ranges and re-ingesting the
+/// result as one continuous stream through the same content-addressable
+/// pipeline `handle_put` uses ([`ingest_range_patch_to_cas`]) — unedited
+/// chunks on either side of the edit typically dedup for free.
+///
+/// Shares an active-lock guard with the plain WebDAV surface (see below) so
+/// a LOCK taken via `/webdav/` also protects the same file reached through
+/// `/remote.php/dav/`.
+async fn handle_patch(
+    state: Arc<AppState>,
+    req: Request<Body>,
+    session: &crate::interfaces::nextcloud::session::NcSession,
+    subpath: &str,
+) -> Result<Response<Body>, AppError> {
+    let chroot = session.require_chroot()?;
+    let internal_path = nc_to_internal_path(chroot, subpath)?;
+    let file_service = &state.applications.file_retrieval_service;
+    let upload_service = &state.applications.file_upload_service;
+
+    if subpath.is_empty() || subpath == "/" {
+        return Err(AppError::bad_request("Cannot PATCH the root folder"));
+    }
+
+    // RFC 5789 doesn't define Content-Range semantics; this server uses a
+    // dedicated `X-Update-Range` header instead (see `parse_update_range`)
+    // to avoid ambiguity with HTTP Range-Request semantics.
+    if req.headers().contains_key(header::CONTENT_RANGE) {
+        return Err(AppError::bad_request(
+            "PATCH must not use Content-Range; use the X-Update-Range header instead",
+        ));
+    }
+
+    let update_range_header = req
+        .headers()
+        .get("X-Update-Range")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .ok_or_else(|| AppError::bad_request("PATCH requires an X-Update-Range header"))?;
+
+    // Extract all headers before consuming `req` into the body stream.
+    let if_none_match = req
+        .headers()
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let if_match = req
+        .headers()
+        .get(header::IF_MATCH)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let content_length = req
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    let claimed_type = req
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+    let if_header = req
+        .headers()
+        .get("If")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let max_upload = state.core.config.storage.direct_put_max_bytes;
+
+    // ── Existence check ───────────────────────────────────────────────
+    // Unlike PUT, PATCH requires an existing file — a partial update of
+    // nothing isn't meaningful. On lookup failure, distinguish "it's a
+    // directory" (409, matching the plain WebDAV surface) from "it
+    // doesn't exist at all" (404) instead of collapsing both to 404.
+    let file = match file_service
+        .get_file_by_path(&internal_path, chroot.drive_id)
+        .await
+    {
+        Ok(file) => file,
+        Err(_) => {
+            if state
+                .applications
+                .folder_service
+                .get_folder_by_path(&internal_path, chroot.drive_id)
+                .await
+                .is_ok()
+            {
+                return Err(AppError::conflict("Cannot PATCH a directory"));
+            }
+            return Err(AppError::not_found(format!(
+                "File not found: {}",
+                internal_path
+            )));
+        }
+    };
+
+    // `get_file_by_path` performs no authorization check (see its own
+    // doc comment) — mirrors the plain WebDAV surface's explicit
+    // defense-in-depth Read check right after resolving the file, so a
+    // caller without Read on this specific file can't learn its size or
+    // ETag via the precondition/range-bounds responses below.
+    let file_uuid = Uuid::parse_str(&file.id)
+        .map_err(|_| AppError::not_found(format!("File not found: {}", internal_path)))?;
+    state
+        .authorization
+        .require(
+            Subject::User(session.user.id),
+            Permission::Read,
+            Resource::File(file_uuid),
+        )
+        .await?;
+
+    // ── Active-lock guard (RFC 4918 §10.4 If: evaluation) ─────────────
+    // Shared with the plain WebDAV surface so a LOCK taken via /webdav/
+    // also protects the same file reached through /remote.php/dav/.
+    if let Some(resp) = enforce_native_lock(
+        &state.webdav_lock_store,
+        if_header.as_deref(),
+        &internal_path,
+        Some(&file.etag),
+    ) {
+        return Ok(resp);
+    }
+
+    // ── RFC 7232 conditional preconditions ────────────────────────────
+    let current_etag = Some(file.etag.as_str());
+    if let Some(ref value) = if_none_match
+        && if_none_match_precondition_fails(value, current_etag)
+    {
+        return Ok(precondition_failed_response());
+    }
+    if let Some(ref value) = if_match
+        && if_match_precondition_fails(value, current_etag)
+    {
+        return Ok(precondition_failed_response());
+    }
+
+    // ── Range parsing + validation ─────────────────────────────────────
+    let (start, end) = parse_update_range(&update_range_header, file.size)?;
+    if let (Some(end), Some(len)) = (end, content_length) {
+        let expected = end - start + 1;
+        if len != expected {
+            return Err(AppError::bad_request(format!(
+                "Content-Length {len} does not match X-Update-Range span {expected}"
+            )));
+        }
+    }
+
+    // ── Splice prefix/suffix around the patched span ───────────────────
+    let (prefix_segment, suffix_segment) = splice_patch_streams(
+        file_service,
+        &file.id,
+        session.user.id,
+        start,
+        end,
+        file.size,
+    )
+    .await?;
+    let filename = filename_from_path(subpath).to_string();
+    let ingested = ingest_range_patch_to_cas(
+        prefix_segment,
+        req.into_body(),
+        suffix_segment,
+        &state.core.dedup_service,
+        &filename,
+        &claimed_type,
+        PatchIngestBudget {
+            max_bytes: max_upload,
+            expected_body_len: end.map(|end| end - start + 1),
+        },
+    )
+    .await?;
+
+    // ── Quota enforcement + atomic store, compare-and-swap on the
+    // pre-splice content hash ─────────────────────────────────────────
+    // `file.content_hash` was snapshotted before the (potentially slow)
+    // splice + CAS-ingest above. Passing it as `expected_hash` makes the
+    // write itself a compare-and-swap: the repository checks and applies
+    // under the same row lock, so nothing else can write to this file
+    // between the check and the write. This is what actually closes the
+    // race two concurrent PATCHes to disjoint ranges could otherwise hit
+    // — each individually passing its own If-Match check against the
+    // same stale snapshot, then blindly overwriting each other.
+    let new_size = ingested.size;
+    let stored = cas_write_patch(
+        &state,
+        upload_service,
+        &internal_path,
+        chroot.drive_id,
+        &ingested,
+        session.user.id,
+        &file.content_hash,
+        "NC WEBDAV PATCH",
+    )
+    .await?;
+
+    // Everything from `start` to the new EOF reflects the patch (the
+    // untouched suffix, if any, may have shifted when the body's length
+    // differs from the replaced span).
+    let range_end = new_size.saturating_sub(1);
+    Ok(Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .header(header::ETAG, format!("\"{}\"", stored.etag))
+        .header("oc-etag", format!("\"{}\"", stored.etag))
+        .header(
+            header::CONTENT_RANGE,
+            format!("bytes {}-{}/{}", start, range_end, new_size),
+        )
         .body(Body::empty())
         .unwrap())
 }
@@ -2170,6 +2426,23 @@ mod tests {
             nc_to_internal_path(&home, "/Photos/").unwrap(),
             "My Folder - alice/Photos"
         );
+    }
+
+    /// Regression: `chroot.path` as returned by `folder_service.get_folder`
+    /// in production carries a leading `/` (from `StoragePath::to_string()`
+    /// — see `Folder::path_string`), unlike this module's `stub_folder`
+    /// test helper which builds the path directly. A real chroot must
+    /// still map to the leading-slash-free convention the plain WebDAV
+    /// surface's `db_path` uses, or exact-string comparisons against it
+    /// (e.g. the WebDAV lock store's key) silently mismatch.
+    #[test]
+    fn test_strips_leading_slash_from_chroot_path() {
+        let home = stub_folder("/Personal");
+        assert_eq!(
+            nc_to_internal_path(&home, "report.pdf").unwrap(),
+            "Personal/report.pdf"
+        );
+        assert_eq!(nc_to_internal_path(&home, "").unwrap(), "Personal");
     }
 
     #[test]
