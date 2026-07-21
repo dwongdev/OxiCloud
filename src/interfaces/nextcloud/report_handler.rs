@@ -24,8 +24,8 @@ use crate::interfaces::api::handlers::webdav_handler::{
 };
 use crate::interfaces::errors::AppError;
 use crate::interfaces::nextcloud::webdav_handler::{
-    batch_resolve_ids, format_oc_id_into, nc_href, nc_id_of, write_file_response,
-    write_folder_response,
+    batch_resolve_ids, format_oc_id_into, nc_collection_href_into, nc_href_into, nc_id_of,
+    write_file_response, write_folder_response,
 };
 
 /// Handle WebDAV REPORT and SEARCH methods for Nextcloud compatibility.
@@ -177,6 +177,12 @@ async fn handle_filter_files(
         // owner-id stays canonical via `&user.username`.
         // One oc:id buffer reused across both emit loops (benches/ROUND27.md §H1).
         let mut oc_buf = String::new();
+        // One href buffer reused across both emit loops, with the URL-encoded
+        // user computed once for the page instead of re-encoded per row — the
+        // reused-buffer shape the PROPFIND child loop already uses
+        // (benches/ROUND29.md §A).
+        let encoded_user = urlencoding::encode(url_user);
+        let mut href_buf = String::new();
         for file in &files {
             // Skip favorites that live outside the caller's chroot
             // (other-drive favorites); reachable via REST if needed.
@@ -189,7 +195,7 @@ async fn handle_filter_files(
                 );
                 continue;
             };
-            let href = nc_href(url_user, subpath);
+            nc_href_into(&mut href_buf, &encoded_user, subpath);
             let fid = nc_id_of(&file_id_map, &file.id);
             let oc_id: Option<&str> = match fid {
                 Some(id) => {
@@ -202,7 +208,7 @@ async fn handle_filter_files(
             write_file_response(
                 &mut xml,
                 file,
-                &href,
+                &href_buf,
                 (fid, oc_id),
                 &user.username,
                 &favorite_ids,
@@ -221,7 +227,7 @@ async fn handle_filter_files(
                 );
                 continue;
             };
-            let href = format!("{}/", nc_href(url_user, subpath));
+            nc_collection_href_into(&mut href_buf, &encoded_user, subpath);
             let fid = nc_id_of(&folder_id_map, &folder.id);
             let oc_id: Option<&str> = match fid {
                 Some(id) => {
@@ -234,7 +240,7 @@ async fn handle_filter_files(
             write_folder_response(
                 &mut xml,
                 folder,
-                &href,
+                &href_buf,
                 (fid, oc_id),
                 &user.username,
                 &favorite_ids,
@@ -334,6 +340,12 @@ async fn handle_search(
         // Files.
         // One oc:id buffer reused across both emit loops (benches/ROUND27.md §H1).
         let mut oc_buf = String::new();
+        // One href buffer reused across both emit loops, with the URL-encoded
+        // user computed once for the page instead of re-encoded per row — the
+        // reused-buffer shape the PROPFIND child loop already uses
+        // (benches/ROUND29.md §A).
+        let encoded_user = urlencoding::encode(url_user);
+        let mut href_buf = String::new();
         for file in &files {
             let Some(subpath) = strip_home_prefix(chroot, &file.path, home_prefix) else {
                 tracing::debug!(
@@ -344,7 +356,7 @@ async fn handle_search(
                 );
                 continue;
             };
-            let href = nc_href(url_user, subpath);
+            nc_href_into(&mut href_buf, &encoded_user, subpath);
             let fid = nc_id_of(&file_id_map, &file.id);
             let oc_id: Option<&str> = match fid {
                 Some(id) => {
@@ -357,7 +369,7 @@ async fn handle_search(
             write_file_response(
                 &mut xml,
                 file,
-                &href,
+                &href_buf,
                 (fid, oc_id),
                 &user.username,
                 &favorite_ids,
@@ -377,7 +389,7 @@ async fn handle_search(
                 );
                 continue;
             };
-            let href = format!("{}/", nc_href(url_user, subpath));
+            nc_collection_href_into(&mut href_buf, &encoded_user, subpath);
             let fid = nc_id_of(&folder_id_map, &folder.id);
             let oc_id: Option<&str> = match fid {
                 Some(id) => {
@@ -390,7 +402,7 @@ async fn handle_search(
             write_folder_response(
                 &mut xml,
                 folder,
-                &href,
+                &href_buf,
                 (fid, oc_id),
                 &user.username,
                 &favorite_ids,
