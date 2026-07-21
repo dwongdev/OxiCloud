@@ -810,6 +810,15 @@ impl UserRepository for UserPgRepository {
         Ok(())
     }
 
+    /// Counts users by role with a scalar `COUNT(*)` — no row hydration.
+    async fn count_users_by_role(&self, role: &str) -> UserRepositoryResult<i64> {
+        sqlx::query_scalar("SELECT COUNT(*) FROM auth.users WHERE role::text = $1")
+            .bind(role)
+            .fetch_one(&*self.pool)
+            .await
+            .map_err(Self::map_sqlx_error)
+    }
+
     /// Lists users by role
     async fn list_users_by_role(&self, role: &str) -> UserRepositoryResult<Vec<User>> {
         let rows = sqlx::query(
@@ -1153,6 +1162,12 @@ impl UserStoragePort for UserPgRepository {
 
     async fn list_users_by_role(&self, role: &str) -> Result<Vec<User>, DomainError> {
         UserRepository::list_users_by_role(self, role)
+            .await
+            .map_err(DomainError::from)
+    }
+
+    async fn count_users_by_role(&self, role: &str) -> Result<i64, DomainError> {
+        UserRepository::count_users_by_role(self, role)
             .await
             .map_err(DomainError::from)
     }

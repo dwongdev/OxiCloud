@@ -2118,21 +2118,11 @@ impl AuthApplicationService {
     // Method to count how many admin users exist in the system
     // Used to determine if we have multiple admins or just the default one
     pub async fn count_admin_users(&self) -> Result<i64, DomainError> {
-        // Use the list_users_by_role method or similar from user_storage port
-        // For now, we'll use a basic implementation that counts all users with role = "admin"
-        let admin_users = self
-            .user_storage
-            .list_users_by_role("admin")
-            .await
-            .map_err(|e| {
-                DomainError::new(
-                    ErrorKind::InternalError,
-                    "User",
-                    format!("Error counting admin users: {}", e),
-                )
-            })?;
-
-        Ok(admin_users.len() as i64)
+        // Scalar COUNT(*) — the old form fetched every admin's FULL row (incl.
+        // the up-to-512 KiB avatar `image` + `ui_preferences` JSONB) only to
+        // call `.len()`, on a status/init endpoint that is polled at bootstrap
+        // (benches/ROUND29.md §G).
+        self.user_storage.count_users_by_role("admin").await
     }
 
     /// Lists internal users only. External (grant-only) users are filtered

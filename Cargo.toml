@@ -358,6 +358,17 @@ name = "bench_micro_allocs"
 path = "examples/bench_micro_allocs.rs"
 required-features = ["bench"]
 
+# Round-29 battery ────────────────────────────────────────────────────────────
+
+# Round-29 CPU/alloc micro-pack (no Postgres) — NC REPORT per-row href String(s)
+# → reused buffer via nc_href_into with a once-encoded user (A); cache-serve fast
+# path eager get_or_load args (etag/key/id) built before the borrow-probe hit (B);
+# read_full single-frame BytesMut concat → zero-copy passthrough (C).
+[[example]]
+name = "bench_round29_micro"
+path = "examples/bench_round29_micro.rs"
+required-features = ["bench"]
+
 # Round-27 battery ────────────────────────────────────────────────────────────
 
 # Round-27 CPU/alloc micro-pack (no Postgres) — NC PROPFIND per-row oc:id String

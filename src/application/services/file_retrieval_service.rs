@@ -111,7 +111,26 @@ impl FileRetrievalService {
     ) -> Result<Bytes, DomainError> {
         let stream = file_read.get_file_stream(id).await?;
         let mut stream = Pin::from(stream);
-        let mut buf = BytesMut::with_capacity(capacity);
+        // Most sub-threshold reads arrive as ONE owned contiguous frame from the
+        // backend (the local ReaderStream emits ≤256 KiB frames, and a
+        // sub-threshold blob fits in one). Return that frame directly instead of
+        // copying the whole payload a second time into a fresh BytesMut; only a
+        // multi-frame read pays the pre-sized concat — byte-identical output
+        // (benches/ROUND29.md §C).
+        let Some(first) = stream.next().await else {
+            return Ok(Bytes::new());
+        };
+        let first = first.map_err(|e| {
+            DomainError::internal_error("File", format!("Stream read error: {}", e))
+        })?;
+        let Some(second) = stream.next().await else {
+            return Ok(first);
+        };
+        let mut buf = BytesMut::with_capacity(capacity.max(first.len()));
+        buf.extend_from_slice(&first);
+        buf.extend_from_slice(&second.map_err(|e| {
+            DomainError::internal_error("File", format!("Stream read error: {}", e))
+        })?);
         while let Some(chunk) = stream.next().await {
             buf.extend_from_slice(&chunk.map_err(|e| {
                 DomainError::internal_error("File", format!("Stream read error: {}", e))
@@ -202,7 +221,6 @@ impl FileRetrievalService {
     ) -> Result<(FileDto, OptimizedFileContent), DomainError> {
         let mime_type = dto.mime_type.clone();
         let file_size = dto.size;
-        let file_name = dto.name.clone();
         // The content cache is content-addressed: keyed by the blob hash, not
         // the file id. Identical content deduplicated to one blob on disk is
         // then cached ONCE in RAM and shared by every file/user that references
@@ -210,34 +228,39 @@ impl FileRetrievalService {
         // construction, so entries never go stale (no invalidation needed). A
         // stub DTO without a hash disables caching for that request rather than
         // colliding every hash-less file on the key "".
-        let cache_key = dto.content_hash.clone();
-        let cacheable = !cache_key.is_empty();
+        let cacheable = !dto.content_hash.is_empty();
         let do_transcode = accept_webp && !prefer_original;
 
         // ── Tier 1: Hot cache + transcode (<10 MB) ──────────
         if file_size < CACHE_THRESHOLD {
-            // Fetch the raw blob bytes. When cacheable, `get_or_load` serves
-            // from the content cache on a hit and, on a miss, coalesces every
-            // concurrent request for the same blob hash into a SINGLE disk read
-            // (single-flight) — no thundering herd under load. Hash-less stub
-            // DTOs are uncacheable and stream straight from disk.
+            // Probe the content cache with a BORROW first: a hit serves the blob
+            // straight from RAM, and only a miss builds the owned load arguments
+            // (the quoted-etag / key / id Strings) that a hit would otherwise
+            // allocate and immediately discard (benches/ROUND29.md §B). On a miss
+            // `load_and_cache` still coalesces concurrent requests for the same
+            // blob hash into a SINGLE disk read (single-flight) — no thundering
+            // herd. Hash-less stub DTOs are uncacheable and stream from disk.
             let content_bytes = if cacheable && let Some(cache) = &self.content_cache {
-                let etag: Arc<str> = format!("\"{}\"", cache_key).into();
-                let ct: Arc<str> = mime_type.clone();
-                let file_read = Arc::clone(&self.file_read);
-                let id_owned = id.to_string();
-                let cap = file_size as usize;
-                let (bytes, _etag, _ct) = cache
-                    .get_or_load(cache_key.clone(), etag, ct, async move {
-                        debug!("💾 TIER 1 Cache MISS: {} – loading from disk", id_owned);
-                        Self::read_full(&file_read, &id_owned, cap).await
-                    })
-                    .await?;
-                bytes
+                if let Some((bytes, ..)) = cache.get(&dto.content_hash).await {
+                    bytes
+                } else {
+                    let etag: Arc<str> = format!("\"{}\"", dto.content_hash).into();
+                    let ct: Arc<str> = mime_type.clone();
+                    let file_read = Arc::clone(&self.file_read);
+                    let id_owned = id.to_string();
+                    let cap = file_size as usize;
+                    let (bytes, ..) = cache
+                        .load_and_cache(dto.content_hash.to_string(), etag, ct, async move {
+                            debug!("💾 TIER 1 Cache MISS: {} – loading from disk", id_owned);
+                            Self::read_full(&file_read, &id_owned, cap).await
+                        })
+                        .await?;
+                    bytes
+                }
             } else {
                 debug!(
                     "💾 TIER 1 (uncacheable): {} – streaming from disk",
-                    file_name
+                    dto.name
                 );
                 Self::read_full(&self.file_read, id, file_size as usize).await?
             };
@@ -269,7 +292,7 @@ impl FileRetrievalService {
         // ── Tier 2 + 3: Streaming (≥10 MB) ──────────────────
         info!(
             "📡 TIER 2 STREAMING: {} ({} MB)",
-            file_name,
+            dto.name,
             file_size / (1024 * 1024)
         );
         let stream = self.file_read.get_file_stream(id).await?;
@@ -353,17 +376,27 @@ impl FileRetrievalService {
     ) -> Result<RangeContent, DomainError> {
         let cacheable = dto.size < CACHE_THRESHOLD && !dto.content_hash.is_empty();
         if cacheable && let Some(cache) = &self.content_cache {
-            let etag: Arc<str> = format!("\"{}\"", dto.content_hash).into();
-            let ct: Arc<str> = dto.mime_type.clone();
-            let file_read = Arc::clone(&self.file_read);
-            let id_owned = dto.id.clone();
-            let cap = dto.size as usize;
-            let (bytes, _etag, _ct) = cache
-                .get_or_load(dto.content_hash.to_string(), etag, ct, async move {
-                    debug!("💾 Range cache MISS: {} – loading from disk", id_owned);
-                    Self::read_full(&file_read, &id_owned, cap).await
-                })
-                .await?;
+            // Probe with a BORROW first: the video-scrub steady state is a cache
+            // hit, and a hit must not allocate the owned load args (quoted-etag /
+            // key / id Strings) it would immediately discard — those are built
+            // only on the miss branch (benches/ROUND29.md §B). A miss still
+            // populates via the same single-flight coalescing.
+            let bytes = if let Some((bytes, ..)) = cache.get(&dto.content_hash).await {
+                bytes
+            } else {
+                let etag: Arc<str> = format!("\"{}\"", dto.content_hash).into();
+                let ct: Arc<str> = dto.mime_type.clone();
+                let file_read = Arc::clone(&self.file_read);
+                let id_owned = dto.id.clone();
+                let cap = dto.size as usize;
+                let (bytes, ..) = cache
+                    .load_and_cache(dto.content_hash.to_string(), etag, ct, async move {
+                        debug!("💾 Range cache MISS: {} – loading from disk", id_owned);
+                        Self::read_full(&file_read, &id_owned, cap).await
+                    })
+                    .await?;
+                bytes
+            };
             let len = bytes.len() as u64;
             let s = start.min(len) as usize;
             let e = end.unwrap_or(len).min(len) as usize;

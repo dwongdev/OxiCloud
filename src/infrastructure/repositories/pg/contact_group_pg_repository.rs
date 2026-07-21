@@ -196,10 +196,10 @@ impl ContactGroupRepository for ContactGroupPgRepository {
     ) -> ContactRepositoryResult<Vec<Contact>> {
         let rows = sqlx::query(
             r#"
-            SELECT 
+            SELECT
                 c.id, c.address_book_id, c.uid, c.full_name, c.first_name, c.last_name, c.nickname,
                 c.email, c.phone, c.address, c.organization, c.title, c.notes, c.photo_url,
-                c.birthday, c.anniversary, c.vcard, c.etag, c.created_at, c.updated_at
+                c.birthday, c.anniversary, c.etag, c.created_at, c.updated_at
             FROM carddav.contacts c
             INNER JOIN carddav.group_memberships gm ON c.id = gm.contact_id
             WHERE gm.group_id = $1
@@ -253,7 +253,13 @@ impl ContactGroupRepository for ContactGroupPgRepository {
                 row.get::<Option<String>, _>("photo_url"),
                 row.get("birthday"),
                 row.get("anniversary"),
-                row.get("vcard"),
+                // vcard column intentionally NOT selected — the sole live caller
+                // (`list_contacts_in_group`) maps to `ContactDto`, which has no
+                // vcard field, so fetching the multi-KB serialized vCard (with an
+                // embedded base64 PHOTO) only to drop it wastes bandwidth + a
+                // per-row String. Mirrors `row_to_contact_lite` (benches/ROUND29.md
+                // §F / ROUND25 §Q2, applied to the LIVE group method this time).
+                String::new(),
                 row.get("etag"),
                 row.get("created_at"),
                 row.get("updated_at"),

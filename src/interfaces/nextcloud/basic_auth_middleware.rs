@@ -109,7 +109,12 @@ pub async fn basic_auth_middleware(
     // at the auth boundary rather than treating them as "missing
     // marker" — they are unambiguous typos that would otherwise
     // silently fall into a different code path.
-    let (username, drive_marker): (String, Option<String>) = match raw_username.split_once('~') {
+    // Borrow the prefix / marker out of the already-owned `raw_username`
+    // (`split_once` yields `&str` slices) instead of allocating a duplicate
+    // `String` per request — `username` is only ever passed by reference, and
+    // `raw_username` outlives every use before it moves into `NcSession`
+    // (benches/ROUND29.md §E).
+    let (username, drive_marker): (&str, Option<&str>) = match raw_username.split_once('~') {
         Some(("", _)) => {
             tracing::warn!(
                 "[NC] 401 malformed composite username (empty prefix): {}",
@@ -124,15 +129,15 @@ pub async fn basic_auth_middleware(
             );
             return Err(NextcloudAuthError::Unauthorized);
         }
-        Some((u, m)) => (u.to_string(), Some(m.to_string())),
-        None => (raw_username.clone(), None),
+        Some((u, m)) => (u, Some(m)),
+        None => (raw_username.as_str(), None),
     };
 
     // Check account lockout before attempting password verification (saves CPU).
     // The lockout is per (account, IP), see #323 for rationale.
     let client_ip = crate::interfaces::middleware::rate_limit::extract_client_ip(&request);
     if let Some(auth_svc) = state.auth_service.as_ref()
-        && let Err(secs) = auth_svc.login_lockout.check(&username, &client_ip)
+        && let Err(secs) = auth_svc.login_lockout.check(username, &client_ip)
     {
         tracing::warn!(
             username = %username,
@@ -150,13 +155,13 @@ pub async fn basic_auth_middleware(
 
     match nextcloud
         .app_passwords
-        .verify_basic_auth(&username, &password)
+        .verify_basic_auth(username, &password)
         .await
     {
         Ok((user_id, uname, email, role)) => {
             // Reset lockout counter on success
             if let Some(auth_svc) = state.auth_service.as_ref() {
-                auth_svc.login_lockout.record_success(&username, &client_ip);
+                auth_svc.login_lockout.record_success(username, &client_ip);
             }
             // External users must never authenticate against the NC
             // surface — that whole subtree (WebDAV files, uploads,
@@ -222,7 +227,7 @@ pub async fn basic_auth_middleware(
             // is the right one: name-independent, secondary-drive-safe.
             use crate::application::ports::folder_ports::FolderUseCase;
             use crate::domain::repositories::drive_repository::DriveRepository;
-            let chroot = match drive_marker.as_deref() {
+            let chroot = match drive_marker {
                 None => {
                     match state
                         .drive_repo
@@ -287,7 +292,7 @@ pub async fn basic_auth_middleware(
         Err(_) => {
             // Record failed attempt for lockout tracking
             if let Some(auth_svc) = state.auth_service.as_ref() {
-                auth_svc.login_lockout.record_failure(&username, &client_ip);
+                auth_svc.login_lockout.record_failure(username, &client_ip);
             }
             Err(NextcloudAuthError::Unauthorized)
         }

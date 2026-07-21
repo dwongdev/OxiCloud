@@ -167,12 +167,10 @@ pub fn strip_drive_root_segment(internal_path: &str) -> &str {
 /// surfaces as `Network request error "Erreur inconnue" HTTP status
 /// 207` in the client log. Files use [`nc_href`] (no trailing slash).
 pub fn nc_collection_href(username: &str, subpath: &str) -> String {
-    let h = nc_href(username, subpath);
-    if h.ends_with('/') {
-        h
-    } else {
-        format!("{}/", h)
-    }
+    let encoded_user = urlencoding::encode(username);
+    let mut out = String::new();
+    nc_collection_href_into(&mut out, &encoded_user, subpath);
+    out
 }
 
 /// Build the Nextcloud DAV href for a resource.
@@ -184,17 +182,33 @@ pub fn nc_collection_href(username: &str, subpath: &str) -> String {
 /// a **collection** must use [`nc_collection_href`] (or append `/`
 /// manually) to satisfy RFC 4918 §5.2 and the NC client's parser.
 pub fn nc_href(username: &str, subpath: &str) -> String {
-    let subpath = subpath.trim_matches('/');
     let encoded_user = urlencoding::encode(username);
+    let mut out = String::new();
+    nc_href_into(&mut out, &encoded_user, subpath);
+    out
+}
+
+/// Per-row form of [`nc_href`]: write the href into a REUSED buffer given the
+/// already-URL-encoded username.
+///
+/// The emit loops (PROPFIND children, REPORT results) call this instead of
+/// [`nc_href`] so each row rewrites one buffer rather than allocating a fresh
+/// `String`, and the constant `encoded_user` is encoded ONCE per page instead of
+/// re-encoded for every row (benches/ROUND29.md §A — the same reused-buffer shape
+/// the PROPFIND child loop already uses for its href prefix). Byte-identical to
+/// [`nc_href`].
+pub fn nc_href_into(out: &mut String, encoded_user: &str, subpath: &str) {
+    let subpath = subpath.trim_matches('/');
     // Write the prefix, user and each encoded segment straight into one
     // pre-sized buffer — avoids the per-segment `Vec<Cow>`, the joined String and
     // the `format!` result the previous `.map(...).collect().join("/")` allocated
     // on every NC PROPFIND/REPORT href (mirrors the native `encode_uri_path`).
     // Keeps `urlencoding::encode` so the emitted bytes are unchanged.
     const PREFIX: &str = "/remote.php/dav/files/";
-    let mut out = String::with_capacity(PREFIX.len() + encoded_user.len() + subpath.len() + 8);
+    out.clear();
+    out.reserve(PREFIX.len() + encoded_user.len() + subpath.len() + 8);
     out.push_str(PREFIX);
-    out.push_str(&encoded_user);
+    out.push_str(encoded_user);
     out.push('/');
     // No empty-segment filter: `split('/')` on an empty (root) subpath yields a
     // single "" whose encode is "" — leaving the trailing slash above intact —
@@ -206,7 +220,16 @@ pub fn nc_href(username: &str, subpath: &str) -> String {
         }
         out.push_str(&urlencoding::encode(seg));
     }
-    out
+}
+
+/// Per-row form of [`nc_collection_href`]: [`nc_href_into`] plus the trailing
+/// `/` RFC 4918 §5.2 / the NC client require for a collection. Byte-identical to
+/// [`nc_collection_href`].
+pub fn nc_collection_href_into(out: &mut String, encoded_user: &str, subpath: &str) {
+    nc_href_into(out, encoded_user, subpath);
+    if !out.ends_with('/') {
+        out.push('/');
+    }
 }
 
 /// Dispatch Nextcloud WebDAV request to the appropriate handler.
