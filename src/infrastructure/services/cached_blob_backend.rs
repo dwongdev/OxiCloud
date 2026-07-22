@@ -299,7 +299,7 @@ impl BlobStorageBackend for CachedBlobBackend {
                         .map_err(|e| {
                             DomainError::internal_error("BlobCache", format!("seek: {e}"))
                         })?;
-                    let take_len = end.map(|e| e - start + 1).unwrap_or(u64::MAX);
+                    let take_len = end.map(|e| e.saturating_sub(start)).unwrap_or(u64::MAX);
                     let limited = file.take(take_len);
                     let stream: BlobStream =
                         Box::pin(ReaderStream::with_capacity(limited, STREAM_CHUNK_SIZE));
@@ -319,7 +319,7 @@ impl BlobStorageBackend for CachedBlobBackend {
             file.seek(std::io::SeekFrom::Start(start))
                 .await
                 .map_err(|e| DomainError::internal_error("BlobCache", format!("seek: {e}")))?;
-            let take_len = end.map(|e| e - start + 1).unwrap_or(u64::MAX);
+            let take_len = end.map(|e| e.saturating_sub(start)).unwrap_or(u64::MAX);
             let limited = file.take(take_len);
             let stream: BlobStream =
                 Box::pin(ReaderStream::with_capacity(limited, STREAM_CHUNK_SIZE));
@@ -537,5 +537,63 @@ impl CachedBlobBackend {
             .insert(hash.to_string(), CacheEntry { size: total });
 
         Ok(dest)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infrastructure::services::local_blob_backend::LocalBlobBackend;
+    use futures::StreamExt;
+
+    async fn read_range(
+        backend: &dyn BlobStorageBackend,
+        hash: &str,
+        start: u64,
+        end: Option<u64>,
+    ) -> Vec<u8> {
+        let mut stream = backend
+            .get_blob_range_stream(hash, start, end)
+            .await
+            .expect("open range stream");
+        let mut output = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            output.extend_from_slice(&chunk.expect("read range chunk"));
+        }
+        output
+    }
+
+    #[tokio::test]
+    async fn range_end_is_exclusive_on_cold_and_hot_cache_reads() {
+        let data = Bytes::from_static(b"abcdef");
+        let hash = blake3::hash(&data).to_hex().to_string();
+
+        let inner_root = tempfile::tempdir().expect("inner tempdir");
+        let inner = Arc::new(LocalBlobBackend::new(inner_root.path()));
+        inner.initialize().await.expect("initialize inner");
+        inner
+            .put_blob_from_bytes(&hash, data)
+            .await
+            .expect("seed inner");
+
+        let cache_root = tempfile::tempdir().expect("cache tempdir");
+        let cached = CachedBlobBackend::new(
+            inner.clone(),
+            &BlobCacheConfig {
+                cache_dir: cache_root.path().to_path_buf(),
+                max_cache_bytes: 1024 * 1024,
+            },
+        );
+        cached.initialize().await.expect("initialize cache");
+
+        // Cold read fills the cache and must honor the exclusive end.
+        assert_eq!(read_range(&cached, &hash, 0, Some(1)).await, b"a");
+        assert!(cached.local_blob_path(&hash).is_some());
+
+        // Remove the origin so every remaining assertion proves a hot-cache read.
+        inner.delete_blob(&hash).await.expect("remove origin");
+        assert_eq!(read_range(&cached, &hash, 1, Some(3)).await, b"bc");
+        assert!(read_range(&cached, &hash, 3, Some(3)).await.is_empty());
+        assert_eq!(read_range(&cached, &hash, 2, None).await, b"cdef");
     }
 }

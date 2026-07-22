@@ -87,9 +87,17 @@ async fn fsync_paths_parallel(paths: Vec<PathBuf>, strict: bool) -> Result<(), D
         return Ok(());
     }
     let group_size = paths.len().div_ceil(SYNC_SWEEP_CONCURRENCY);
-    let mut tasks = Vec::with_capacity(SYNC_SWEEP_CONCURRENCY);
-    for group in paths.chunks(group_size) {
-        let group = group.to_vec();
+    let task_count = paths.len().min(SYNC_SWEEP_CONCURRENCY);
+    let mut source = paths.into_iter();
+    let mut tasks = Vec::with_capacity(task_count);
+    loop {
+        // `paths` is owned by this function. Move each PathBuf into its task
+        // group instead of cloning every allocation merely to satisfy the
+        // blocking task's `'static` lifetime.
+        let group: Vec<PathBuf> = source.by_ref().take(group_size).collect();
+        if group.is_empty() {
+            break;
+        }
         tasks.push(tokio::task::spawn_blocking(
             move || -> Result<(), (PathBuf, std::io::Error)> {
                 for path in &group {
@@ -120,6 +128,25 @@ async fn fsync_paths_parallel(paths: Vec<PathBuf>, strict: bool) -> Result<(), D
             })?;
     }
     Ok(())
+}
+
+#[inline]
+fn hex_prefix_symbol(byte: u8) -> Option<usize> {
+    match byte {
+        b'0'..=b'9' => Some((byte - b'0') as usize),
+        b'a'..=b'f' => Some((byte - b'a' + 10) as usize),
+        // Preserve the exact directory spelling.  On a case-sensitive
+        // filesystem `af/` and `AF/` are different durability domains; folding
+        // them into one bitmap slot could omit one parent-directory fsync.
+        b'A'..=b'F' => Some((byte - b'A' + 16) as usize),
+        _ => None,
+    }
+}
+
+#[inline]
+fn hash_prefix_slot(hash: &str) -> Option<usize> {
+    let bytes = hash.as_bytes();
+    Some(hex_prefix_symbol(*bytes.first()?)? * 22 + hex_prefix_symbol(*bytes.get(1)?)?)
 }
 
 /// Create `blob_path` and write `data` into it.
@@ -398,22 +425,45 @@ impl BlobStorageBackend for LocalBlobBackend {
         &self,
         hashes: &[String],
     ) -> Pin<Box<dyn std::future::Future<Output = Result<(), DomainError>> + Send + '_>> {
-        let paths: Vec<PathBuf> = hashes.iter().map(|h| self.blob_path(h)).collect();
-        Box::pin(async move {
-            if paths.is_empty() {
-                return Ok(());
+        if hashes.is_empty() {
+            return Box::pin(async { Ok(()) });
+        }
+        let mut paths = Vec::with_capacity(hashes.len());
+        let mut dirs = Vec::with_capacity(hashes.len().min(HEX_PREFIXES.len()));
+        if let [hash] = hashes {
+            // Common tiny upload: reuse the already-built path's parent.  This
+            // preserves the old one-item cost and avoids zeroing a bitmap whose
+            // O(1) advantage only starts once there is something to deduplicate.
+            let path = self.blob_path(hash);
+            if let Some(parent) = path.parent() {
+                dirs.push(parent.to_owned());
             }
-
+            paths.push(path);
+        } else {
+            // 10 digits + 6 lowercase + 6 uppercase symbols per position.  The
+            // 484-byte bitmap is still stack-only/O(1), while preserving exact
+            // parent paths on case-sensitive filesystems.
+            let mut seen_prefix = [false; 22 * 22];
+            for hash in hashes {
+                paths.push(self.blob_path(hash));
+                if let Some(slot) = hash_prefix_slot(hash) {
+                    if !seen_prefix[slot] {
+                        seen_prefix[slot] = true;
+                        dirs.push(self.blob_root.join(&hash[..2]));
+                    }
+                } else {
+                    // `blob_path` already requires an ASCII two-byte prefix, and
+                    // content hashes are canonical hex.  Retain the old behaviour
+                    // for a non-hex caller without panicking here: syncing a
+                    // duplicate invalid parent is safer than silently omitting it.
+                    dirs.push(self.blob_root.join(&hash[..2]));
+                }
+            }
+        }
+        Box::pin(async move {
             // Each distinct prefix directory is fsync'd exactly once —
             // chunks of one upload land in at most 256 prefix dirs, so
             // this replaces one dir fsync *per chunk* with ≤256 total.
-            let mut dirs: Vec<PathBuf> = paths
-                .iter()
-                .filter_map(|p| p.parent().map(Path::to_path_buf))
-                .collect();
-            dirs.sort_unstable();
-            dirs.dedup();
-
             // Files first (hard requirement), then dirents (best-effort,
             // same tier as fsync_parent_dir).
             fsync_paths_parallel(paths, true).await?;
@@ -646,5 +696,22 @@ mod tests {
         backend.initialize().await.unwrap();
 
         backend.sync_blobs(&[]).await.unwrap();
+    }
+
+    #[test]
+    fn prefix_slots_cover_lowercase_hex_space_and_preserve_case() {
+        let mut seen = [false; 22 * 22];
+        for prefix in HEX_PREFIXES {
+            let hash = format!("{prefix}{}", "0".repeat(62));
+            let slot = hash_prefix_slot(&hash).unwrap();
+            assert!(!seen[slot]);
+            seen[slot] = true;
+        }
+        assert_eq!(seen.into_iter().filter(|value| *value).count(), 256);
+        assert_ne!(
+            hash_prefix_slot(&fake_hash("af")),
+            hash_prefix_slot(&fake_hash("aF"))
+        );
+        assert_eq!(hash_prefix_slot("gg"), None);
     }
 }

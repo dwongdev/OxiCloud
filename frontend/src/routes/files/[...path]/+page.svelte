@@ -611,14 +611,17 @@
 		const total = items.length;
 		const owned = await resolveOwnedHashes(items.map((it) => it.file));
 		const frac = new Array<number>(total).fill(0);
+		let progressSum = 0;
 		let savedBytes = 0;
 		let failures = 0;
 		let next = 0;
 
 		const refresh = () => {
-			let sum = 0;
-			for (const x of frac) sum += x;
-			ui.updateProgress(nid, Math.round((sum / total) * 100), label(Math.round(sum)));
+			ui.updateProgress(
+				nid,
+				Math.round((progressSum / total) * 100),
+				label(Math.round(progressSum))
+			);
 		};
 
 		const worker = async () => {
@@ -626,7 +629,11 @@
 				const i = next++;
 				const { file, folderId } = items[i];
 				const report = (f: number) => {
-					if (!Number.isNaN(f)) frac[i] = Math.min(1, f);
+					if (!Number.isNaN(f)) {
+						const updated = Math.min(1, f);
+						progressSum += updated - frac[i];
+						frac[i] = updated;
+					}
 					refresh();
 				};
 				try {
@@ -637,6 +644,7 @@
 					// work so we don't fire hundreds of doomed uploads.
 					if ((e as { isQuota?: boolean } | null)?.isQuota) next = total;
 				} finally {
+					progressSum += 1 - frac[i];
 					frac[i] = 1;
 					refresh();
 				}

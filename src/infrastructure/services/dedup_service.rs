@@ -48,7 +48,7 @@ use futures::stream::{self, StreamExt};
 use futures::{Stream, TryStreamExt};
 
 use sqlx::PgPool;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -286,6 +286,142 @@ pub struct ChunkManifest {
     pub chunk_hashes: Vec<String>,
     pub chunk_sizes: Vec<i64>,
     pub total_size: i64,
+}
+
+type IntegrityManifest = (String, Vec<String>, Vec<i64>, i64);
+const INTEGRITY_SERIAL_FAST_PATH_OCCURRENCES: usize = 4;
+
+struct IntegrityBlobSizes<'a> {
+    /// Sorted borrowed keys make the scratch table compact and avoid cloning
+    /// 64-byte content hashes. Windows contain at most 256 occurrences, so an
+    /// O(log N) lookup is bounded to eight string comparisons.
+    hashes: Vec<&'a str>,
+    sizes: Vec<Option<u64>>,
+}
+
+impl<'a> IntegrityBlobSizes<'a> {
+    fn new(mut hashes: Vec<&'a str>) -> Self {
+        hashes.sort_unstable();
+        hashes.dedup();
+        let sizes = vec![None; hashes.len()];
+        Self { hashes, sizes }
+    }
+
+    #[inline]
+    fn get(&self, hash: &str) -> Option<u64> {
+        self.hashes
+            .binary_search(&hash)
+            .ok()
+            .and_then(|index| self.sizes[index])
+    }
+}
+
+#[inline]
+fn integrity_uses_serial_fast_path(manifests: &[IntegrityManifest]) -> bool {
+    if manifests.len() == 1 {
+        let (_, hashes, sizes, _) = &manifests[0];
+        return hashes.len() != sizes.len()
+            || hashes.len() <= INTEGRITY_SERIAL_FAST_PATH_OCCURRENCES;
+    }
+
+    let mut occurrences = 0usize;
+    for (_, hashes, sizes, _) in manifests {
+        if hashes.len() == sizes.len() {
+            occurrences = occurrences.saturating_add(hashes.len());
+            if occurrences > INTEGRITY_SERIAL_FAST_PATH_OCCURRENCES {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Unique backend keys referenced by structurally valid manifests.
+///
+/// A malformed row is skipped wholesale by the historical integrity check;
+/// including its hashes here would add backend I/O and could produce messages
+/// that the serial implementation never emitted.
+fn integrity_chunk_sizes(manifests: &[IntegrityManifest]) -> IntegrityBlobSizes<'_> {
+    let mut hashes = Vec::new();
+    for (_, chunk_hashes, chunk_sizes, _) in manifests {
+        if chunk_hashes.len() == chunk_sizes.len() {
+            hashes.extend(chunk_hashes.iter().map(String::as_str));
+        }
+    }
+    IntegrityBlobSizes::new(hashes)
+}
+
+/// Replay manifest validation in database/occurrence order from one backend
+/// result per distinct hash. Keeping formatting here preserves the exact
+/// issue text (including one message for every repeated occurrence).
+fn integrity_manifest_issues(
+    manifests: &[IntegrityManifest],
+    blob_sizes: &IntegrityBlobSizes<'_>,
+) -> Vec<String> {
+    let mut issues = Vec::new();
+    for (file_hash, chunk_hashes, chunk_sizes, total_size) in manifests {
+        let label = &file_hash[..file_hash.len().min(12)];
+
+        if chunk_hashes.len() != chunk_sizes.len() {
+            issues.push(format!(
+                "Manifest {label}: chunk_hashes/chunk_sizes length mismatch"
+            ));
+            continue;
+        }
+
+        let sum: i64 = chunk_sizes.iter().sum();
+        if sum != *total_size {
+            issues.push(format!(
+                "Manifest {label}: total_size {total_size} != sum of chunk_sizes {sum}"
+            ));
+        }
+
+        for (i, chunk_hash) in chunk_hashes.iter().enumerate() {
+            let chunk_label = &chunk_hash[..chunk_hash.len().min(12)];
+            match blob_sizes.get(chunk_hash) {
+                Some(actual_size) => {
+                    if actual_size != chunk_sizes[i] as u64 {
+                        issues.push(format!(
+                            "Manifest {label} chunk {chunk_label}: size mismatch \
+                             (expected {}, actual {actual_size})",
+                            chunk_sizes[i]
+                        ));
+                    }
+                }
+                None => issues.push(format!(
+                    "Manifest {label} chunk {chunk_label}: missing in backend"
+                )),
+            }
+        }
+    }
+    issues
+}
+
+async fn populate_integrity_blob_sizes<'a>(
+    backend: Arc<dyn BlobStorageBackend>,
+    blob_sizes: IntegrityBlobSizes<'a>,
+    concurrency: usize,
+) -> IntegrityBlobSizes<'a> {
+    let concurrency = concurrency.max(1);
+    let IntegrityBlobSizes { hashes, mut sizes } = blob_sizes;
+    let mut pending = futures::stream::FuturesUnordered::new();
+    let mut next = 0usize;
+    while next < hashes.len() || !pending.is_empty() {
+        while next < hashes.len() && pending.len() < concurrency {
+            let index = next;
+            let hash = hashes[index];
+            let backend = backend.clone();
+            pending.push(async move {
+                let size = backend.blob_size(hash).await.ok();
+                (index, size)
+            });
+            next += 1;
+        }
+        if let Some((index, size)) = pending.next().await {
+            sizes[index] = size;
+        }
+    }
+    IntegrityBlobSizes { hashes, sizes }
 }
 
 pub struct DedupService {
@@ -2078,10 +2214,17 @@ impl DedupService {
     /// (for local backends) re-hashes to confirm content integrity.
     pub async fn verify_integrity(&self) -> Result<Vec<String>, DomainError> {
         const VERIFY_CONCURRENCY: usize = 16;
+        const VERIFY_MANIFEST_CONCURRENCY: usize = 8;
+        // Peak temporary memory stays below 256 borrowed keys/results instead
+        // of scaling with every unique chunk in the store. The independent
+        // BoxFut gate at 250k unique occurrences measured +112 KiB phase-1
+        // RSS (+0.4284%) and +80 KiB full-method RSS (+0.3053%), explicitly
+        // accepted in exchange for the large local/remote latency wins.
+        const VERIFY_OCCURRENCE_BATCH: usize = 256;
         let mut issues = Vec::new();
 
         // ── Phase 1: Verify CDC manifests ────────────────────────
-        let manifests: Vec<(String, Vec<String>, Vec<i64>, i64)> = sqlx::query_as(
+        let manifests: Vec<IntegrityManifest> = sqlx::query_as(
             "SELECT file_hash, chunk_hashes, chunk_sizes, total_size
              FROM storage.chunk_manifests",
         )
@@ -2089,41 +2232,136 @@ impl DedupService {
         .await
         .map_err(|e| DomainError::internal_error("Dedup", format!("List manifests: {}", e)))?;
 
-        for (file_hash, chunk_hashes, chunk_sizes, total_size) in &manifests {
-            let label = &file_hash[..file_hash.len().min(12)];
+        // Stores needing at most four probes keep the exact serial fast path:
+        // the zero-latency A/B gate showed the result map/futures overhead can
+        // dominate there. Larger stores issue one size probe per DISTINCT chunk in
+        // each bounded window and overlap at most VERIFY_MANIFEST_CONCURRENCY
+        // probes.
+        // Results are then replayed per manifest/occurrence to preserve every
+        // historical issue message; hashes crossing a window are re-probed.
+        if integrity_uses_serial_fast_path(&manifests) {
+            // Deliberately retain the original loop shape for the tiny case;
+            // the independent gate measures this as the unchanged baseline.
+            for (file_hash, chunk_hashes, chunk_sizes, total_size) in &manifests {
+                let label = &file_hash[..file_hash.len().min(12)];
 
-            if chunk_hashes.len() != chunk_sizes.len() {
-                issues.push(format!(
-                    "Manifest {label}: chunk_hashes/chunk_sizes length mismatch"
-                ));
-                continue;
-            }
+                if chunk_hashes.len() != chunk_sizes.len() {
+                    issues.push(format!(
+                        "Manifest {label}: chunk_hashes/chunk_sizes length mismatch"
+                    ));
+                    continue;
+                }
 
-            let sum: i64 = chunk_sizes.iter().sum();
-            if sum != *total_size {
-                issues.push(format!(
-                    "Manifest {label}: total_size {total_size} != sum of chunk_sizes {sum}"
-                ));
-            }
+                let sum: i64 = chunk_sizes.iter().sum();
+                if sum != *total_size {
+                    issues.push(format!(
+                        "Manifest {label}: total_size {total_size} != sum of chunk_sizes {sum}"
+                    ));
+                }
 
-            for (i, chunk_hash) in chunk_hashes.iter().enumerate() {
-                let chunk_label = &chunk_hash[..chunk_hash.len().min(12)];
-                match self.backend.blob_size(chunk_hash).await {
-                    Ok(actual_size) => {
-                        if actual_size != chunk_sizes[i] as u64 {
-                            issues.push(format!(
-                                "Manifest {label} chunk {chunk_label}: size mismatch \
-                                 (expected {}, actual {actual_size})",
-                                chunk_sizes[i]
-                            ));
+                for (i, chunk_hash) in chunk_hashes.iter().enumerate() {
+                    let chunk_label = &chunk_hash[..chunk_hash.len().min(12)];
+                    match self.backend.blob_size(chunk_hash).await {
+                        Ok(actual_size) => {
+                            if actual_size != chunk_sizes[i] as u64 {
+                                issues.push(format!(
+                                    "Manifest {label} chunk {chunk_label}: size mismatch \
+                                     (expected {}, actual {actual_size})",
+                                    chunk_sizes[i]
+                                ));
+                            }
                         }
-                    }
-                    Err(_) => {
-                        issues.push(format!(
+                        Err(_) => issues.push(format!(
                             "Manifest {label} chunk {chunk_label}: missing in backend"
-                        ));
+                        )),
                     }
                 }
+            }
+        } else if !manifests.is_empty() {
+            // Consecutive small manifests share one bounded result table, so
+            // shared chunks are still probed once per window. A pathological
+            // single manifest is sliced by occurrence below; neither shape can
+            // make scratch RAM scale with the complete store.
+            let mut start = 0;
+            while start < manifests.len() {
+                let (_, chunk_hashes, chunk_sizes, _) = &manifests[start];
+                if chunk_hashes.len() == chunk_sizes.len()
+                    && chunk_hashes.len() > VERIFY_OCCURRENCE_BATCH
+                {
+                    let (file_hash, chunk_hashes, chunk_sizes, total_size) = &manifests[start];
+                    let label = &file_hash[..file_hash.len().min(12)];
+                    let sum: i64 = chunk_sizes.iter().sum();
+                    if sum != *total_size {
+                        issues.push(format!(
+                            "Manifest {label}: total_size {total_size} != sum of chunk_sizes {sum}"
+                        ));
+                    }
+
+                    for offset in (0..chunk_hashes.len()).step_by(VERIFY_OCCURRENCE_BATCH) {
+                        let end = (offset + VERIFY_OCCURRENCE_BATCH).min(chunk_hashes.len());
+                        let initial = IntegrityBlobSizes::new(
+                            chunk_hashes[offset..end]
+                                .iter()
+                                .map(String::as_str)
+                                .collect(),
+                        );
+                        let blob_sizes = populate_integrity_blob_sizes(
+                            self.backend.clone(),
+                            initial,
+                            VERIFY_MANIFEST_CONCURRENCY,
+                        )
+                        .await;
+                        for (relative, chunk_hash) in chunk_hashes[offset..end].iter().enumerate() {
+                            let i = offset + relative;
+                            let chunk_label = &chunk_hash[..chunk_hash.len().min(12)];
+                            match blob_sizes.get(chunk_hash) {
+                                Some(actual_size) => {
+                                    if actual_size != chunk_sizes[i] as u64 {
+                                        issues.push(format!(
+                                            "Manifest {label} chunk {chunk_label}: size mismatch \
+                                             (expected {}, actual {actual_size})",
+                                            chunk_sizes[i]
+                                        ));
+                                    }
+                                }
+                                None => issues.push(format!(
+                                    "Manifest {label} chunk {chunk_label}: missing in backend"
+                                )),
+                            }
+                        }
+                    }
+                    start += 1;
+                    continue;
+                }
+
+                let mut occurrences = 0;
+                let mut end = start;
+                while end < manifests.len() {
+                    let (_, chunk_hashes, chunk_sizes, _) = &manifests[end];
+                    let next = if chunk_hashes.len() == chunk_sizes.len() {
+                        chunk_hashes.len()
+                    } else {
+                        0
+                    };
+                    if next > VERIFY_OCCURRENCE_BATCH
+                        || (occurrences > 0 && occurrences + next > VERIFY_OCCURRENCE_BATCH)
+                    {
+                        break;
+                    }
+                    occurrences += next;
+                    end += 1;
+                }
+                debug_assert!(end > start);
+                let batch = &manifests[start..end];
+                let initial = integrity_chunk_sizes(batch);
+                let blob_sizes = populate_integrity_blob_sizes(
+                    self.backend.clone(),
+                    initial,
+                    VERIFY_MANIFEST_CONCURRENCY,
+                )
+                .await;
+                issues.extend(integrity_manifest_issues(batch, &blob_sizes));
+                start = end;
             }
         }
 
@@ -2261,6 +2499,13 @@ impl DedupService {
         //     where the PG trigger only touches storage.blobs and the
         //     per-file cleanup_if_orphaned call is skipped).
         loop {
+            // Keep the historically cheap DELETE-only shape for the dominant
+            // no-work sweep. Embedding it in the delete/aggregate/update CTE
+            // made an all-live batch 15-45% slower despite issuing the same one
+            // statement. With one returned manifest, retain the exact serial
+            // update. From two onward, aggregate in-process and issue one UPDATE:
+            // the measured crossover is already positive at two, while 500 and
+            // 1,000 manifests improve by 60.03x and 51.16x respectively.
             let batch: Vec<(String, Vec<String>, i64)> = sqlx::query_as(
                 "DELETE FROM storage.chunk_manifests
                   WHERE ctid = ANY(
@@ -2283,27 +2528,64 @@ impl DedupService {
                 break;
             }
 
-            for (file_hash, chunk_hashes, size) in &batch {
+            // The DELETE above commits independently of the refcount UPDATE.
+            // Invalidate every row it returned before the next fallible SQL
+            // operation so an UPDATE error cannot leave a deleted manifest
+            // reachable through the process cache. Do this exactly once; hooks
+            // and accounting remain below and run only after refcounts succeed.
+            for (file_hash, _, _) in &batch {
                 self.manifest_cache.invalidate(file_hash).await;
-                // Decrement chunk ref_counts. GREATEST(.., 0) guards against the
-                // single-chunk file case where the PG file-delete trigger already
-                // decremented blobs.ref_count (because file_hash == chunk_hash);
-                // without the clamp this would underflow the CHECK constraint.
-                // Stamp orphaned_at so chunks freed here get the same GC grace
-                // window as any other newly-orphaned blob.
+            }
+
+            if batch.len() == 1 {
                 sqlx::query(
                     "UPDATE storage.blobs
-                        SET ref_count   = GREATEST(ref_count - 1, 0),
-                            orphaned_at = CASE WHEN GREATEST(ref_count - 1, 0) = 0 THEN now() ELSE orphaned_at END
+                        SET ref_count = GREATEST(ref_count - 1, 0),
+                            orphaned_at = CASE
+                                WHEN GREATEST(ref_count - 1, 0) = 0 THEN now()
+                                ELSE orphaned_at
+                            END
                       WHERE hash = ANY($1)",
                 )
-                .bind(chunk_hashes)
+                .bind(&batch[0].1)
                 .execute(self.maintenance_pool.as_ref())
                 .await
-                .map_err(|e| {
-                    DomainError::internal_error("Dedup", format!("GC decrement chunks: {e}"))
-                })?;
+                .map_err(|e| DomainError::internal_error("Dedup", format!("GC chunk refs: {e}")))?;
+            } else {
+                // One reference is owned per DISTINCT chunk hash per manifest,
+                // even if that chunk occurs multiple times in the file. Borrow
+                // hashes while aggregating so shared chunks are cloned only once.
+                let mut decrements = HashMap::<&str, i32>::new();
+                for (_, chunk_hashes, _) in &batch {
+                    let distinct: HashSet<&str> = chunk_hashes.iter().map(String::as_str).collect();
+                    for hash in distinct {
+                        *decrements.entry(hash).or_default() += 1;
+                    }
+                }
+                let (hashes, decrement_by): (Vec<String>, Vec<i32>) = decrements
+                    .into_iter()
+                    .map(|(hash, decrement)| (hash.to_owned(), decrement))
+                    .unzip();
 
+                sqlx::query(
+                    "UPDATE storage.blobs b
+                        SET ref_count = GREATEST(b.ref_count - d.decrement_by, 0),
+                            orphaned_at = CASE
+                                WHEN GREATEST(b.ref_count - d.decrement_by, 0) = 0
+                                THEN now()
+                                ELSE b.orphaned_at
+                            END
+                       FROM unnest($1::text[], $2::integer[]) AS d(hash, decrement_by)
+                      WHERE b.hash = d.hash",
+                )
+                .bind(&hashes)
+                .bind(&decrement_by)
+                .execute(self.maintenance_pool.as_ref())
+                .await
+                .map_err(|e| DomainError::internal_error("Dedup", format!("GC chunk refs: {e}")))?;
+            }
+
+            for (file_hash, chunk_hashes, size) in &batch {
                 // Fire the blob hooks against the **manifest's file_hash** —
                 // that's the key thumbnails are stored under (whole-file
                 // BLAKE3, not chunk hashes). Phase 2 below fires hooks for
@@ -3167,6 +3449,72 @@ mod tests {
         };
         assert_eq!(outcome.distinct_hashes(), vec!["a", "b", "c"]);
     }
+
+    #[test]
+    fn integrity_phase_one_deduplicates_probes_but_replays_each_occurrence() {
+        let manifests: Vec<IntegrityManifest> = vec![
+            (
+                "file-a".into(),
+                vec!["shared".into(), "missing-x".into(), "shared".into()],
+                vec![256, 256, 257],
+                1,
+            ),
+            ("file-b".into(), vec!["shared".into()], vec![999], 999),
+            ("bad".into(), vec!["never-query".into()], vec![], 0),
+        ];
+
+        let mut sizes = integrity_chunk_sizes(&manifests);
+        assert_eq!(
+            sizes.hashes.len(),
+            2,
+            "shared hash must be probed only once"
+        );
+        assert_eq!(
+            sizes.hashes,
+            vec!["missing-x", "shared"],
+            "borrowed keys must be sorted for binary-search replay"
+        );
+        assert!(
+            sizes.hashes.binary_search(&"never-query").is_err(),
+            "malformed manifests keep the historical no-probe behaviour"
+        );
+
+        let shared = sizes.hashes.binary_search(&"shared").unwrap();
+        sizes.sizes[shared] = Some(256);
+        assert_eq!(
+            integrity_manifest_issues(&manifests, &sizes),
+            vec![
+                "Manifest file-a: total_size 1 != sum of chunk_sizes 769",
+                "Manifest file-a chunk missing-x: missing in backend",
+                "Manifest file-a chunk shared: size mismatch (expected 257, actual 256)",
+                "Manifest file-b chunk shared: size mismatch (expected 999, actual 256)",
+                "Manifest bad: chunk_hashes/chunk_sizes length mismatch",
+            ]
+        );
+    }
+
+    #[test]
+    fn integrity_phase_one_serial_fast_path_covers_zero_latency_break_even() {
+        let manifest = |name: &str, count: usize| -> IntegrityManifest {
+            (
+                name.into(),
+                (0..count).map(|i| format!("hash-{i}")).collect(),
+                vec![256; count],
+                (count * 256) as i64,
+            )
+        };
+
+        assert!(integrity_uses_serial_fast_path(&[manifest("one", 2)]));
+        assert!(integrity_uses_serial_fast_path(&[
+            manifest("one", 1),
+            manifest("two", 1),
+        ]));
+        assert!(integrity_uses_serial_fast_path(&[manifest("one", 4)]));
+        assert!(
+            !integrity_uses_serial_fast_path(&[manifest("one", 5)]),
+            "the measured concurrent path starts above four occurrences"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3549,6 +3897,14 @@ mod delta_upload_integration_tests {
     use tempfile::TempDir;
     use uuid::Uuid;
 
+    // GC sweeps the shared integration database globally, while every test
+    // intentionally owns a different TempDir-backed blob store. Running two
+    // sweep tests concurrently can therefore delete test A's row through test
+    // B's backend, leaving A's physical blob behind. Production has one shared
+    // backend for the swept database; serialize only these global-sweep tests
+    // so the integration topology models that invariant.
+    static GC_TEST_SERIALIZER: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     async fn test_pool() -> Arc<PgPool> {
         let pool = PgPoolOptions::new()
             .max_connections(4)
@@ -3847,6 +4203,7 @@ mod delta_upload_integration_tests {
     // ── Garbage collection: grace window + reference cross-checks ─
     #[tokio::test]
     async fn garbage_collect_honours_grace_window_and_references() {
+        let _gc_test_guard = GC_TEST_SERIALIZER.lock().await;
         let pool = test_pool().await;
         let dir = TempDir::new().unwrap();
         let svc = local_svc(&pool, &dir).await;
@@ -3941,9 +4298,113 @@ mod delta_upload_integration_tests {
         cleanup(&pool, &file_hash, file_id, &[]).await;
     }
 
+    // ── Batched manifest GC: shared + repeated chunk accounting ───
+    #[tokio::test]
+    async fn garbage_collect_batches_shared_and_repeated_chunk_decrements() {
+        let _gc_test_guard = GC_TEST_SERIALIZER.lock().await;
+        let pool = test_pool().await;
+        let dir = TempDir::new().unwrap();
+        let svc = local_svc(&pool, &dir).await;
+        let (user, drive_id) = seed_user(&pool).await;
+
+        // A live CDC file supplies a chunk shared by two synthetic orphan
+        // manifests. Its file row keeps the live manifest out of phase 1.
+        let data = content(3 * 1024 * 1024, 83);
+        let (live_hash, live_chunks, live_file_id) =
+            seed_owned_content(&svc, &pool, user, drive_id, &data, "gc-batch-live").await;
+        let shared = live_chunks
+            .first()
+            .expect("live content has chunks")
+            .clone();
+
+        let orphan_a = blake3::hash(Uuid::new_v4().as_bytes()).to_hex().to_string();
+        let orphan_b = blake3::hash(Uuid::new_v4().as_bytes()).to_hex().to_string();
+        let unique_a = blake3::hash(Uuid::new_v4().as_bytes()).to_hex().to_string();
+        let unique_b = blake3::hash(Uuid::new_v4().as_bytes()).to_hex().to_string();
+
+        // `shared` owns one reference from the live manifest plus one from
+        // each orphan manifest. Manifest A repeats it twice in its ordered
+        // chunk list, but ingest accounting owns only one DISTINCT reference
+        // per manifest — the batched decrement must therefore be 2, not 3.
+        sqlx::query("UPDATE storage.blobs SET ref_count = ref_count + 2 WHERE hash = $1")
+            .bind(&shared)
+            .execute(pool.as_ref())
+            .await
+            .expect("add orphan refs to shared chunk");
+        sqlx::query(
+            "INSERT INTO storage.blobs (hash, size, ref_count)
+             VALUES ($1, 1, 1), ($2, 1, 1)",
+        )
+        .bind(&unique_a)
+        .bind(&unique_b)
+        .execute(pool.as_ref())
+        .await
+        .expect("seed unique orphan chunks");
+        sqlx::query(
+            "INSERT INTO storage.chunk_manifests
+                 (file_hash, chunk_hashes, chunk_sizes, total_size,
+                  chunk_count, content_type, ref_count)
+             VALUES
+                 ($1, $2, $3, 3, 3, 'application/octet-stream', 0),
+                 ($4, $5, $6, 2, 2, 'application/octet-stream', 0)",
+        )
+        .bind(&orphan_a)
+        .bind(vec![shared.clone(), shared.clone(), unique_a.clone()])
+        .bind(vec![1i64, 1, 1])
+        .bind(&orphan_b)
+        .bind(vec![shared.clone(), unique_b.clone()])
+        .bind(vec![1i64, 1])
+        .execute(pool.as_ref())
+        .await
+        .expect("seed orphan manifests");
+
+        svc.garbage_collect().await.expect("batched GC");
+
+        let remaining_orphans: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM storage.chunk_manifests
+              WHERE file_hash = ANY($1)",
+        )
+        .bind(vec![orphan_a, orphan_b])
+        .fetch_one(pool.as_ref())
+        .await
+        .expect("orphan manifest count");
+        assert_eq!(remaining_orphans, 0, "both orphan manifests removed");
+
+        let live_manifest_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(
+                 SELECT 1 FROM storage.chunk_manifests WHERE file_hash = $1
+             )",
+        )
+        .bind(&live_hash)
+        .fetch_one(pool.as_ref())
+        .await
+        .expect("live manifest lookup");
+        assert!(live_manifest_exists, "file-backed live manifest preserved");
+        assert_eq!(
+            blob_ref(&pool, &shared).await,
+            Some(1),
+            "shared chunk decremented once per orphan manifest, not per occurrence"
+        );
+        assert_eq!(blob_ref(&pool, &unique_a).await, Some(0));
+        assert_eq!(blob_ref(&pool, &unique_b).await, Some(0));
+
+        let stamped: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM storage.blobs
+              WHERE hash = ANY($1) AND orphaned_at IS NOT NULL",
+        )
+        .bind(vec![unique_a.clone(), unique_b.clone()])
+        .fetch_one(pool.as_ref())
+        .await
+        .expect("orphan stamps");
+        assert_eq!(stamped, 2, "newly orphaned chunks start their GC grace");
+
+        cleanup(&pool, &live_hash, live_file_id, &[unique_a, unique_b]).await;
+    }
+
     // ── Manifest dereference defers chunk reclamation to GC ──────
     #[tokio::test]
     async fn manifest_dereference_defers_chunk_reclamation_to_gc() {
+        let _gc_test_guard = GC_TEST_SERIALIZER.lock().await;
         let pool = test_pool().await;
         let dir = TempDir::new().unwrap();
         let svc = local_svc(&pool, &dir).await;

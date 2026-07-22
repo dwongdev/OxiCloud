@@ -1,0 +1,98 @@
+{
+  "date": "2026-07-22",
+  "status": "accepted",
+  "scope": "CachedBlobBackend range reads",
+  "contract": {
+    "range_semantics": "[start, end)",
+    "production_change": "Replace end - start + 1 with end.saturating_sub(start) on cold and hot cached reads."
+  },
+  "baseline_correctness_probe": {
+    "ranges": [
+      "[0, 1)",
+      "[1, 3)",
+      "[3, 3)",
+      "[2, EOF)"
+    ],
+    "expected_lengths": [
+      1,
+      2,
+      0,
+      4
+    ],
+    "local_backend_lengths": [
+      1,
+      2,
+      0,
+      4
+    ],
+    "historical_cached_backend_lengths": [
+      2,
+      3,
+      1,
+      4
+    ],
+    "cold_fill": {
+      "remote_gets": 1,
+      "remote_bytes": 6,
+      "elapsed_us": 408.5
+    },
+    "hot_read_loop": {
+      "iterations": 500,
+      "local_bytes": 1000,
+      "historical_cached_bytes": 1500,
+      "local_average_us": 32.16,
+      "historical_cached_average_us": 30.839
+    },
+    "outcome": "failed: the cached backend returned one extra byte whenever end was present"
+  },
+  "candidate_correctness": {
+    "cached_backend_lengths": [
+      1,
+      2,
+      0,
+      4
+    ],
+    "cold_fill_remote_gets": 1,
+    "cold_fill_remote_bytes": 6,
+    "hot_read_loop_bytes": 1000,
+    "focused_test": "cargo test --lib cached_blob_backend::tests::range_end_is_exclusive_on_cold_and_hot_cache_reads",
+    "focused_test_result": "1 passed; 0 failed"
+  },
+  "standalone_ab": {
+    "source": "tools/perf-audit/cached_range_ab.rs",
+    "command": "cargo run --release --manifest-path tools/perf-audit/Cargo.toml --bin cached_range_ab",
+    "environment": {
+      "os": "macos",
+      "arch": "aarch64"
+    },
+    "range": {
+      "start": 1,
+      "end_exclusive": 3
+    },
+    "warmups_per_variant": 1000,
+    "iterations_per_variant": 10000,
+    "historical_inclusive": {
+      "bytes": 30000,
+      "bytes_per_read": 3,
+      "p50_us": 8.459,
+      "p95_us": 28.292,
+      "checksum": 2970000
+    },
+    "corrected_exclusive": {
+      "bytes": 20000,
+      "bytes_per_read": 2,
+      "p50_us": 8.459,
+      "p95_us": 26.917,
+      "checksum": 1970000
+    },
+    "delta_percent": {
+      "bytes": -33.333,
+      "p50_latency": 0.0,
+      "p95_latency": -4.86
+    }
+  },
+  "decision": {
+    "status": "accepted",
+    "reason": "The candidate restores the exclusive-end contract, removes exactly one surplus byte per bounded cached range, adds no remote request or round trip, and is latency-neutral at p50 while improving this sample's p95."
+  }
+}

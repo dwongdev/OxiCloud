@@ -1,5 +1,6 @@
 use crate::common::errors::DomainError;
 use crate::domain::entities::user::{User, UserRole};
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 #[derive(Debug, thiserror::Error)]
@@ -24,6 +25,29 @@ pub enum UserRepositoryError {
 }
 
 pub type UserRepositoryResult<T> = Result<T, UserRepositoryError>;
+
+/// Narrow projection for user-directory tables that do not need secrets,
+/// profile pictures, or the cross-device UI-preferences document.
+///
+/// The full [`User`] row intentionally carries all of those fields for account
+/// detail and the system address book.  Reusing it for the paginated admin
+/// table made PostgreSQL detoast and transfer an avatar of up to 512 KiB per
+/// row, only for the handler to serialize it back to the browser where the
+/// table never reads it.  Keeping the projection explicit prevents a future
+/// full-row field from silently returning to that hot path.
+#[derive(Debug, Clone)]
+pub struct UserListEntry {
+    pub id: Uuid,
+    pub username: Option<String>,
+    pub email: String,
+    pub role: UserRole,
+    pub storage_quota_bytes: i64,
+    pub storage_used_bytes: i64,
+    pub last_login_at: Option<DateTime<Utc>>,
+    pub active: bool,
+    pub oidc_provider: Option<String>,
+    pub is_external: bool,
+}
 
 // Conversion from UserRepositoryError to DomainError
 impl From<UserRepositoryError> for DomainError {
@@ -87,6 +111,16 @@ pub trait UserRepository: Send + Sync + 'static {
         offset: i64,
         include_external: bool,
     ) -> UserRepositoryResult<Vec<User>>;
+
+    /// Lists the columns needed by compact user-management tables.  Unlike
+    /// [`Self::list_users`], this never fetches password hashes, OIDC subjects,
+    /// avatars, names, locale state, or UI preferences.
+    async fn list_user_summaries(
+        &self,
+        limit: i64,
+        offset: i64,
+        include_external: bool,
+    ) -> UserRepositoryResult<Vec<UserListEntry>>;
 
     /// Searches users by username or email (SQL ILIKE) with a limit.
     /// See [`list_users`] for the meaning of `include_external`.

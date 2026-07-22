@@ -30,6 +30,9 @@ const SLICE_BYTES = 8 * 1024 * 1024;
 const NEGOTIATE_BATCH = 256;
 /** Group missing chunks into PUT bodies of at most this many bytes. */
 const UPLOAD_BATCH_BYTES = 8 * 1024 * 1024;
+/** Reclaim consumed queue slots periodically. A head cursor makes dequeue O(1);
+ *  compaction bounds the backing array when hashing stays ahead of the network. */
+const UPLOAD_QUEUE_COMPACT_AT = 4096;
 /** Concurrent chunk-PUT requests. Kept at 1: several folder files upload through
  *  their own workers at once, and the browser only grants ~6 connections per
  *  host. Combined with serialized negotiate (below) each worker holds at most
@@ -102,8 +105,9 @@ workerScope.onmessage = async (event) => {
     };
 
     // ── Upload stage: bounded-concurrency drain of uploadByHash ──
-    /** @type {WorkerChunk[]} */
+    /** @type {(WorkerChunk | undefined)[]} */
     const uploadQueue = [];
+    let uploadHead = 0;
     /** @type {Promise<void>[]} */
     const uploadWorkers = [];
     let uploadsClosed = false;
@@ -139,10 +143,23 @@ workerScope.onmessage = async (event) => {
             /** @type {WorkerChunk[]} */
             const batch = [];
             let bytes = 0;
-            while (uploadQueue.length > 0 && bytes < UPLOAD_BATCH_BYTES) {
-                const c = /** @type {WorkerChunk} */ (uploadQueue.shift());
+            while (uploadHead < uploadQueue.length && bytes < UPLOAD_BATCH_BYTES) {
+                const c = /** @type {WorkerChunk} */ (uploadQueue[uploadHead]);
+                uploadQueue[uploadHead] = undefined;
+                uploadHead++;
                 batch.push(c);
                 bytes += c.s;
+            }
+            if (uploadHead === uploadQueue.length) {
+                uploadQueue.length = 0;
+                uploadHead = 0;
+            } else if (
+                uploadHead >= UPLOAD_QUEUE_COMPACT_AT &&
+                uploadHead * 2 >= uploadQueue.length
+            ) {
+                uploadQueue.copyWithin(0, uploadHead);
+                uploadQueue.length -= uploadHead;
+                uploadHead = 0;
             }
             if (batch.length === 0) {
                 if (uploadsClosed) return;

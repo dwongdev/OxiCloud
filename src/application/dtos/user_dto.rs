@@ -1,4 +1,5 @@
 use crate::domain::entities::user::User;
+use crate::domain::repositories::user_repository::UserListEntry;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use smol_str::SmolStr;
@@ -71,6 +72,44 @@ pub struct UserDto {
     /// `frontend/src/lib/stores/preferences.svelte.ts`). Always present
     /// on the wire; empty bag is `{}`, never `null`.
     pub ui_preferences: serde_json::Value,
+}
+
+/// Compact row returned by the paginated admin user table.
+///
+/// Account-detail fields deliberately do not appear here.  In particular,
+/// omitting `image` and `ui_preferences` prevents a 100-row page from turning
+/// into tens of MiB when users have uploaded avatars.  `GET /api/admin/users/:id`
+/// remains the full-detail endpoint.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct AdminUserSummaryDto {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    pub email: String,
+    pub role: String,
+    pub storage_quota_bytes: i64,
+    pub storage_used_bytes: i64,
+    pub last_login_at: Option<DateTime<Utc>>,
+    pub active: bool,
+    pub auth_provider: String,
+    pub is_external: bool,
+}
+
+impl From<UserListEntry> for AdminUserSummaryDto {
+    fn from(entry: UserListEntry) -> Self {
+        Self {
+            id: entry.id.to_string(),
+            username: entry.username,
+            email: entry.email,
+            role: entry.role.to_string(),
+            storage_quota_bytes: entry.storage_quota_bytes,
+            storage_used_bytes: entry.storage_used_bytes,
+            last_login_at: entry.last_login_at,
+            active: entry.active,
+            auth_provider: entry.oidc_provider.unwrap_or_else(|| "local".to_string()),
+            is_external: entry.is_external,
+        }
+    }
 }
 
 impl From<User> for UserDto {

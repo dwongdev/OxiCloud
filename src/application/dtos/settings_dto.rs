@@ -113,6 +113,9 @@ pub struct AdminResetPasswordDto {
 pub struct ListUsersQueryDto {
     pub limit: Option<i64>,
     pub offset: Option<i64>,
+    /// Return only the fields rendered by the paginated management table.
+    /// Defaults to `false` so existing API clients keep the full user shape.
+    pub summary: Option<bool>,
 }
 
 /// Dashboard statistics

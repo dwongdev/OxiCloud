@@ -1,0 +1,175 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-22",
+  "decisions": {
+    "adminUserProjection": "accepted: conservative component-path gate passed latency, JSON bytes, exact fields/counts, and fresh-process RSS for minimal and heavy profiles",
+    "adminCreatedAtIndex": "accepted_by_explicit_user_tradeoff: after the tied fixture was superseded, the user explicitly accepted representative unique timestamps at 11,255,808 bytes and +0.680 us per inserted user (24.21x-266.13x read gains), plus burst10 at 4,751,360 bytes and +0.582 us per user; the later representative compound candidate was rejected",
+    "adminCountWindowFusion": "rejected; no production change",
+    "localSyncPreparation": "accepted; empty fast return and every measured non-empty size improved; path/directory equivalence passed"
+  },
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "cpu": "Apple M4 Pro",
+    "rustc": "1.93.0",
+    "postgres": "oxicloud-postgres-1 local Docker container"
+  },
+  "adminUserProjection": {
+    "timingScope": "psql query execution, row transfer, and client decoding; excludes HTTP/Serde and the service-layer authorization check",
+    "fixture": {
+      "users": 100,
+      "avatarBytesPerUser": 524288,
+      "preferencesBytesPerUser": 8192
+    },
+    "current": {
+      "jsonBytes": 53315361,
+      "samplesMs": [79.871, 64.878, 42.010, 63.094, 59.987],
+      "medianMs": 63.094
+    },
+    "compactSummary": {
+      "jsonBytes": 31671,
+      "samplesMs": [0.764, 0.535, 0.660, 0.304, 0.524],
+      "medianMs": 0.535
+    },
+    "speedup": 117.93,
+    "byteReductionPercent": 99.9406,
+    "decision": "accepted"
+  },
+  "adminCountWindowFusion": {
+    "fixtureUsers": 100000,
+    "currentPagePlusCountSamplesMs": [11.081, 5.255, 5.604, 10.597, 5.237],
+    "currentMedianMs": 5.604,
+    "countWindowSamplesMs": [61.966, 39.277, 36.788, 42.287, 64.007],
+    "countWindowMedianMs": 42.287,
+    "candidateSlowdown": 7.55,
+    "decision": "rejected; no production change"
+  },
+  "adminCreatedAtIndex": {
+    "fixtureUsers": 500000,
+    "tiedTimestampGroups": 5000,
+    "allOrdersMatch": true,
+    "timestampIndexBytes": 3448832,
+    "timestampIndexBytesPerUser": 6.90,
+    "compoundIndexBytes": 20332544,
+    "compoundIndexBytesPerUser": 40.67,
+    "firstPage": {
+      "noIndexSamplesMs": [162.111, 181.379, 185.911, 193.284, 193.223],
+      "noIndexMedianMs": 185.911,
+      "timestampSamplesMs": [0.368, 0.316, 0.397, 0.173, 0.438],
+      "timestampMedianMs": 0.368,
+      "timestampSpeedup": 505.19,
+      "compoundSamplesMs": [0.178, 0.397, 0.234, 0.245, 0.240],
+      "compoundMedianMs": 0.240,
+      "compoundSpeedup": 774.63
+    },
+    "offset50000": {
+      "noIndexSamplesMs": [343.654, 333.319, 343.129, 363.514, 347.188],
+      "noIndexMedianMs": 343.654,
+      "timestampSamplesMs": [21.305, 24.210, 26.183, 24.117, 20.882],
+      "timestampMedianMs": 24.117,
+      "timestampSpeedup": 14.25,
+      "compoundSamplesMs": [6.530, 9.761, 5.968, 8.284, 8.557],
+      "compoundMedianMs": 8.284,
+      "compoundSpeedup": 41.48
+    },
+    "insert10000Rows": {
+      "noIndexSamplesMs": [5.916, 8.354, 10.674, 5.658, 9.169],
+      "noIndexMedianMs": 8.354,
+      "timestampSamplesMs": [16.209, 14.310, 12.504, 11.911, 16.665],
+      "timestampMedianMs": 14.310,
+      "timestampExtraMicrosecondsPerUser": 0.596,
+      "compoundSamplesMs": [18.748, 19.204, 19.819, 17.212, 21.492],
+      "compoundMedianMs": 19.204,
+      "compoundExtraMicrosecondsPerUser": 1.085
+    },
+    "decision": "evidence_only_superseded_by_representative_gate: tied-timestamp read results remain valid, but posting-list deduplication understated timestamp-only resource cost and invalidated the original compound comparison",
+    "representativeGateResult": "admin-user-index-representative-postgres18-macos-arm64.json"
+  },
+  "localSyncEmpty": {
+    "paths": 0,
+    "processes": 11,
+    "samplesPerProcess": 31,
+    "repetitionsPerSample": 100000,
+    "historicalProcessMediansNs": [26.501, 25.283, 26.715, 30.093, 29.759, 24.388, 25.102, 25.163, 32.574, 24.982, 25.607],
+    "fastReturnProcessMediansNs": [21.679, 23.283, 24.260, 25.231, 22.946, 21.540, 20.316, 20.186, 24.095, 25.565, 21.287],
+    "historicalMedianAcrossProcessesNs": 25.607,
+    "fastReturnMedianAcrossProcessesNs": 22.946,
+    "candidateWins": 10,
+    "speedup": 1.116,
+    "decision": "accepted"
+  },
+  "localSyncPreparation": [
+    {
+      "paths": 1,
+      "cloneGroupsUs": 0.157,
+      "moveGroupsUs": 0.128,
+      "groupSpeedup": 1.22,
+      "sortParentDirsUs": 0.119,
+      "prefixBitmapDirsUs": 0.088,
+      "directorySpeedup": 1.36
+    },
+    {
+      "paths": 8,
+      "cloneGroupsUs": 0.673,
+      "moveGroupsUs": 0.409,
+      "groupSpeedup": 1.64,
+      "sortParentDirsUs": 1.599,
+      "prefixBitmapDirsUs": 0.902,
+      "directorySpeedup": 1.77
+    },
+    {
+      "paths": 32,
+      "cloneGroupsUs": 3.424,
+      "moveGroupsUs": 2.166,
+      "groupSpeedup": 1.58,
+      "sortParentDirsUs": 4.078,
+      "prefixBitmapDirsUs": 3.318,
+      "directorySpeedup": 1.23
+    },
+    {
+      "paths": 128,
+      "cloneGroupsUs": 5.916,
+      "moveGroupsUs": 3.250,
+      "groupSpeedup": 1.82,
+      "sortParentDirsUs": 12.291,
+      "prefixBitmapDirsUs": 8.333,
+      "directorySpeedup": 1.47
+    },
+    {
+      "paths": 400,
+      "cloneGroupsUs": 17.000,
+      "moveGroupsUs": 8.958,
+      "groupSpeedup": 1.90,
+      "sortParentDirsUs": 97.500,
+      "prefixBitmapDirsUs": 16.958,
+      "directorySpeedup": 5.75
+    },
+    {
+      "paths": 1600,
+      "cloneGroupsUs": 64.541,
+      "moveGroupsUs": 33.083,
+      "groupSpeedup": 1.95,
+      "sortParentDirsUs": 800.708,
+      "prefixBitmapDirsUs": 22.584,
+      "directorySpeedup": 35.45
+    },
+    {
+      "paths": 10000,
+      "cloneGroupsUs": 622.000,
+      "moveGroupsUs": 260.458,
+      "groupSpeedup": 2.39,
+      "sortParentDirsUs": 4006.875,
+      "prefixBitmapDirsUs": 38.125,
+      "directorySpeedup": 105.10
+    },
+    {
+      "paths": 100000,
+      "cloneGroupsUs": 5893.958,
+      "moveGroupsUs": 2856.792,
+      "groupSpeedup": 2.06,
+      "sortParentDirsUs": 45596.041,
+      "prefixBitmapDirsUs": 214.750,
+      "directorySpeedup": 212.32
+    }
+  ]
+}

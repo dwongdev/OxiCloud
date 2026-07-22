@@ -13,7 +13,12 @@ const { goto, pageState, session, ui, confirmDialog, promptDialog } = vi.hoisted
 		loadHomeFolder: vi.fn(async () => 'home'),
 		refresh: vi.fn(async () => {})
 	},
-	ui: { notify: vi.fn() },
+	ui: {
+		notify: vi.fn(),
+		startProgress: vi.fn(() => 1),
+		updateProgress: vi.fn(),
+		finishProgress: vi.fn()
+	},
 	confirmDialog: vi.fn(),
 	promptDialog: vi.fn()
 }));
@@ -24,7 +29,11 @@ vi.mock('$lib/stores/ui.svelte', () => ({ ui }));
 vi.mock('$lib/stores/dialogs.svelte', () => ({ confirmDialog, promptDialog }));
 vi.mock('$lib/api/client', () => ({ apiFetch: vi.fn() }));
 vi.mock('$lib/api/csrf', () => ({ getCsrfHeaders: () => ({}) }));
-vi.mock('$lib/api/endpoints/deltaUpload', () => ({ tryDeltaUpload: vi.fn() }));
+vi.mock('$lib/api/endpoints/deltaUpload', () => ({
+	instantUploadOwned: vi.fn(),
+	resolveOwnedHashes: vi.fn(),
+	tryDeltaUpload: vi.fn()
+}));
 vi.mock('$lib/api/endpoints/favorites', () => ({ addFavorite: vi.fn(), removeFavorite: vi.fn() }));
 vi.mock('$lib/api/endpoints/wopi', () => ({
 	canEditWithWopi: () => false,
@@ -59,7 +68,8 @@ vi.mock('$lib/api/endpoints/folders', () => ({
 }));
 
 import { fetchFolderPage, createFolder, deleteFolder } from '$lib/api/endpoints/folders';
-import { deleteFile } from '$lib/api/endpoints/files';
+import { deleteFile, uploadFileWithProgress } from '$lib/api/endpoints/files';
+import { resolveOwnedHashes, tryDeltaUpload } from '$lib/api/endpoints/deltaUpload';
 import { apiFetch } from '$lib/api/client';
 import { files as filesStore } from '$lib/stores/files.svelte';
 import FilesPage from './[...path]/+page.svelte';
@@ -122,12 +132,46 @@ function folderItem(id: string, name: string) {
 
 beforeEach(() => {
 	vi.clearAllMocks();
+	m(resolveOwnedHashes).mockResolvedValue(new Map());
+	m(tryDeltaUpload).mockResolvedValue(null);
 	// A concrete folder in the path: bare `/files` now canonicalizes to
 	// `/files/<drive-root>` via goto (see the external-user test), so the
 	// listing-oriented tests target a folder directly.
 	pageState.params.path = 'home';
 	// List view renders the select-all header + per-row checkboxes; grid hides them.
 	filesStore.viewMode = 'list';
+});
+
+it('keeps aggregate upload progress exact when one file restarts', async () => {
+	withListing();
+	const pending = new Map<string, { report: (fraction: number) => void; resolve: () => void }>();
+	m(uploadFileWithProgress).mockImplementation(
+		(_folderId: string | null, file: File, report: (fraction: number) => void) =>
+			new Promise<void>((resolve) => pending.set(file.name, { report, resolve }))
+	);
+	render(FilesPage);
+	const input = await screen.findByTestId('files-upload-file-input');
+	const uploads = [new File(['a'], 'a.txt'), new File(['b'], 'b.txt')];
+	Object.defineProperty(input, 'files', { configurable: true, value: uploads });
+
+	const changed = fireEvent.change(input);
+	await waitFor(() => expect(pending.size).toBe(2));
+
+	pending.get('a.txt')!.report(0.5);
+	pending.get('b.txt')!.report(0.25);
+	pending.get('a.txt')!.report(0);
+	pending.get('a.txt')!.report(0.75);
+	expect(ui.updateProgress.mock.calls.map((call) => call[1])).toEqual([25, 38, 13, 50]);
+
+	pending.get('a.txt')!.resolve();
+	await waitFor(() =>
+		expect(ui.updateProgress.mock.calls.map((call) => call[1])).toEqual([25, 38, 13, 50, 63])
+	);
+	pending.get('b.txt')!.resolve();
+	await changed;
+	await waitFor(() =>
+		expect(ui.updateProgress).toHaveBeenLastCalledWith(1, 100, expect.any(String))
+	);
 });
 
 it('loads the home folder listing on mount and renders its contents', async () => {

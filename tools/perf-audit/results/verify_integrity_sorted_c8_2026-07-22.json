@@ -1,0 +1,122 @@
+{
+  "benchmark": "verify_integrity_sorted_borrowed_c8",
+  "date": "2026-07-22",
+  "decision": {
+    "status": "accepted_by_explicit_user_tradeoff",
+    "productionVariant": "fetch_all + exact serial path through 4 occurrences + 256-occurrence sorted borrowed windows + concurrency 8",
+    "reason": "Exact issue order and backend-call gates passed. Real filesystem and remote full-method cases improved materially. After disclosure of a measured peak cost up to 112 KiB, the user explicitly reauthorized retaining the candidate; the final exact BoxFut RSS medians were +112 KiB phase 1 and +80 KiB full method."
+  },
+  "implementation": {
+    "keys": "sorted Vec<&str>",
+    "results": "parallel Vec<Option<u64>>",
+    "lookup": "binary search, at most 8 comparisons for a 256-occurrence window",
+    "scheduler": "bounded FuturesUnordered",
+    "manifest_concurrency": 8,
+    "phase_two_concurrency_unchanged": 16,
+    "occurrence_window": 256,
+    "serial_fast_path_max_occurrences": 4,
+    "manifest_query": "unchanged fetch_all"
+  },
+  "correctness": {
+    "ordered_issues_equal": true,
+    "candidate_backend_calls_not_greater": true,
+    "malformed_manifest_backend_calls": 0,
+    "repeated_occurrences_replayed": true,
+    "large_manifest_sliced": true,
+    "tiny_path_uses_identical_serial_code": true
+  },
+  "real_filesystem_boxfut_c8_31_samples": [
+    {
+      "scenario": "shared",
+      "phase_ms": {
+        "historical": 4.869042,
+        "sorted": 0.458167,
+        "speedup": 10.627221
+      },
+      "full_ms": {
+        "historical": 5.599625,
+        "sorted": 0.971125,
+        "speedup": 5.766122
+      },
+      "phase_calls": [512, 64],
+      "full_calls": [544, 96]
+    },
+    {
+      "scenario": "unique",
+      "phase_ms": {
+        "historical": 2.398167,
+        "sorted": 1.831541,
+        "speedup": 1.309371
+      },
+      "full_ms": {
+        "historical": 6.022667,
+        "sorted": 5.545917,
+        "speedup": 1.085964
+      },
+      "phase_calls": [256, 256],
+      "full_calls": [512, 512]
+    },
+    {
+      "scenario": "mixed_existing_and_missing_unique",
+      "phase_ms": {
+        "historical": 2.369208,
+        "sorted": 1.833333,
+        "speedup": 1.292296
+      },
+      "full_ms": {
+        "historical": 5.755125,
+        "sorted": 5.253833,
+        "speedup": 1.095415
+      },
+      "phase_calls": [256, 256],
+      "full_calls": [496, 496]
+    }
+  ],
+  "remote_boxfut_c8": [
+    {
+      "scenario": "shared",
+      "phase_ms": [1122.720666, 17.170333],
+      "phase_speedup": 65.387239,
+      "full_ms": [1138.407208, 29.148208],
+      "full_speedup": 39.055821,
+      "phase_calls": [192, 24],
+      "full_calls": [216, 48]
+    },
+    {
+      "scenario": "unique",
+      "phase_ms": [769.160459, 96.641416],
+      "phase_speedup": 7.958911,
+      "full_ms": [824.404334, 144.857708],
+      "full_speedup": 5.691132,
+      "phase_calls": [128, 128],
+      "full_calls": [256, 256]
+    }
+  ],
+  "rss_11_fresh_process_medians": {
+    "fixture": "1000 manifests, 250000 unique occurrences, BoxFut backend model",
+    "phase_one": {
+      "historical_bytes": 26771456,
+      "sorted_bytes": 26886144,
+      "delta_bytes": 114688,
+      "delta_kib": 112,
+      "delta_percent": 0.4284
+    },
+    "full_method": {
+      "historical_bytes": 26836992,
+      "sorted_bytes": 26918912,
+      "delta_bytes": 81920,
+      "delta_kib": 80,
+      "delta_percent": 0.3053
+    },
+    "requested_heap_scratch_bytes": {
+      "historical": 144,
+      "sorted": 9360
+    }
+  },
+  "tiny_gate": {
+    "scenarios": ["1x2", "2x1", "1x4"],
+    "implementation": "same serial loop for historical and candidate",
+    "calls_equal": true,
+    "issues_equal": true
+  }
+}

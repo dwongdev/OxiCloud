@@ -1,0 +1,54 @@
+{
+  "benchmark": "verify_integrity_phase1_and_full_method_simulation",
+  "date": "2026-07-21",
+  "decision": {
+    "status": "rejected",
+    "productionVariant": "superseded owned-key candidate: 256-occurrence windows, concurrency 16, unchanged serial path through 4 occurrences",
+    "reason": "This owned-key candidate increased scratch max RSS by 180224 bytes and was not accepted. It was superseded by the sorted borrowed-key concurrency-8 implementation documented in verify_integrity_sorted_c8_2026-07-22.json."
+  },
+  "concurrency": 16,
+  "occurrence_window": 256,
+  "serial_fast_path_max_occurrences": 4,
+  "local_simulated_metadata_latency_us": 250,
+  "local_simulated_hash_latency_ms": 1,
+  "remote_simulated_latency_ms": 4,
+  "acceptance_thresholds": {
+    "ordered_issues": "byte-for-byte equal",
+    "backend_calls": "candidate <= current",
+    "substantive_timing": "candidate strictly faster",
+    "unchanged_serial_fast_path": "candidate/current >= 0.95",
+    "sub_100ns_measurements": "candidate <= current + 20ns",
+    "rss": "candidate <= current unless the user explicitly authorizes a measured regression"
+  },
+  "rejected_zero_latency_before_fast_path": [
+    { "scenario": "1_manifest_x_2", "current_ms": 0.000014, "candidate_ms": 0.000894, "speedup": 0.016 },
+    { "scenario": "2_manifests_x_1", "current_ms": 0.000016, "candidate_ms": 0.001071, "speedup": 0.015 },
+    { "scenario": "1_manifest_x_4", "current_ms": 0.000023, "candidate_ms": 0.001469, "speedup": 0.016 }
+  ],
+  "timing_results": [
+    { "scenario": "immediate_one_manifest_two", "phase1_ms": [0.000013, 0.000013], "phase1_speedup": 1.000, "full_ms": [0.000144, 0.000144], "full_speedup": 1.000, "phase1_calls": [2, 2], "full_calls": [4, 4], "issues_equal": true },
+    { "scenario": "immediate_two_manifests_one", "phase1_ms": [0.000014, 0.000016], "phase1_speedup": 0.875, "full_ms": [0.000145, 0.000146], "full_speedup": 0.993, "phase1_calls": [2, 2], "full_calls": [4, 4], "issues_equal": true },
+    { "scenario": "immediate_one_manifest_four", "phase1_ms": [0.000020, 0.000020], "phase1_speedup": 1.000, "full_ms": [0.000227, 0.000226], "full_speedup": 1.004, "phase1_calls": [4, 4], "full_calls": [8, 8], "issues_equal": true },
+    { "scenario": "local_tiny_empty", "phase1_ms": [0.000004, 0.000004], "phase1_speedup": 1.000, "full_ms": [0.000054, 0.000054], "full_speedup": 1.000, "phase1_calls": [0, 0], "full_calls": [0, 0], "issues_equal": true },
+    { "scenario": "local_tiny_single", "phase1_ms": [1.573850, 1.565981], "phase1_speedup": 1.005, "full_ms": [5.215304, 5.224075], "full_speedup": 0.998, "phase1_calls": [1, 1], "full_calls": [2, 2], "issues_equal": true },
+    { "scenario": "local_small_unique", "phase1_ms": [6.173358, 6.062208], "phase1_speedup": 1.018, "full_ms": [9.635729, 9.577837], "full_speedup": 1.006, "phase1_calls": [4, 4], "full_calls": [8, 8], "issues_equal": true },
+    { "scenario": "local_semantics", "phase1_ms": [19.824417, 1.293583], "phase1_speedup": 15.325, "full_ms": [23.969709, 5.060584], "full_speedup": 4.737, "phase1_calls": [12, 6], "full_calls": [16, 10], "issues_equal": true },
+    { "scenario": "local_shared", "phase1_ms": [771.930083, 5.914542], "phase1_speedup": 130.514, "full_ms": [784.165500, 13.935208], "full_speedup": 56.272, "phase1_calls": [512, 64], "full_calls": [544, 96], "issues_equal": true },
+    { "scenario": "local_unique", "phase1_ms": [417.543458, 26.467917], "phase1_speedup": 15.775, "full_ms": [488.088375, 95.696541], "full_speedup": 5.100, "phase1_calls": [256, 256], "full_calls": [512, 512], "issues_equal": true },
+    { "scenario": "local_hash_dominated", "phase1_ms": [798.974041, 7.262542], "phase1_speedup": 110.013, "full_ms": [947.894292, 142.175417], "full_speedup": 6.667, "phase1_calls": [512, 64], "full_calls": [672, 224], "issues_equal": true },
+    { "scenario": "remote_tiny_single", "phase1_ms": [5.946651, 5.825770], "phase1_speedup": 1.021, "full_ms": [12.171682, 12.221104], "full_speedup": 0.996, "phase1_calls": [1, 1], "full_calls": [2, 2], "issues_equal": true },
+    { "scenario": "remote_shared", "phase1_ms": [1169.103458, 12.549250], "phase1_speedup": 93.161, "full_ms": [1180.397208, 24.700583], "full_speedup": 47.788, "phase1_calls": [192, 24], "full_calls": [216, 48], "issues_equal": true },
+    { "scenario": "remote_unique", "phase1_ms": [777.041833, 48.517459], "phase1_speedup": 16.016, "full_ms": [830.103333, 97.427792], "full_speedup": 8.520, "phase1_calls": [128, 128], "full_calls": [256, 256], "issues_equal": true }
+  ],
+  "remote_tiny_raw_interleaved_samples_ms": {
+    "phase_current": [5.972041, 5.818484, 5.462442, 5.435223, 5.665474, 5.987218, 5.200437, 6.051963, 6.210510, 5.726651, 5.959099, 6.149390, 5.495677, 6.679635, 5.627703, 6.144088, 6.113260, 6.298692, 6.135348, 5.891848, 5.987041, 6.247567, 5.896729, 5.898213, 6.311750, 5.817687, 5.981401, 6.121276, 5.881609, 5.471724, 5.346536],
+    "phase_candidate": [6.001317, 5.968807, 5.718093, 5.810250, 6.000500, 5.637484, 5.424822, 5.745713, 5.803015, 5.814833, 5.826723, 5.668151, 5.499484, 9.238000, 5.809541, 5.574656, 6.025552, 6.049541, 6.057848, 6.021921, 5.848974, 5.975885, 7.049984, 6.100453, 5.605041, 7.276510, 6.775093, 5.816354, 6.165192, 5.580307, 7.048598],
+    "full_current": [11.370567, 11.387697, 11.628140, 11.325437, 11.993604, 11.828640, 11.401380, 11.721067, 12.006802, 12.157614, 18.172244, 12.098177, 12.020255, 11.991437, 11.633375, 12.128099, 12.005609, 11.712333, 16.508307, 11.919135, 12.695625, 12.155364, 11.964682, 11.588708, 11.581765, 11.558296, 12.172546, 12.264661, 12.716224, 12.976911, 11.821093],
+    "full_candidate": [11.236448, 11.087390, 11.242302, 11.993781, 11.755302, 12.211015, 11.805994, 12.096088, 11.946072, 14.495333, 11.964203, 20.616036, 11.523067, 12.436895, 11.837380, 11.973791, 11.760260, 11.998291, 11.962328, 12.284317, 13.261562, 12.181573, 11.943026, 11.878151, 11.673031, 12.429109, 14.424937, 12.314994, 12.130489, 12.200453, 12.130453]
+  },
+  "rss_gate": {
+    "fixture": "1000 manifests, 250000 unique occurrences, separate processes",
+    "rejected_unbounded": { "current_max_rss_bytes": 34783232, "candidate_max_rss_bytes": 69681152, "decision": "rejected and rolled back" },
+    "windowed_owned_keys": { "current_max_rss_bytes": 34897920, "candidate_max_rss_bytes": 35078144, "delta_bytes": 180224, "delta_percent": 0.52, "decision": "rejected and superseded by the sorted borrowed-key concurrency-8 implementation" }
+  }
+}

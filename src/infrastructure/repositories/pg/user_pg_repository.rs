@@ -7,7 +7,7 @@ use crate::application::ports::auth_ports::UserStoragePort;
 use crate::common::errors::DomainError;
 use crate::domain::entities::user::{User, UserFlags, UserRole};
 use crate::domain::repositories::user_repository::{
-    StorageStats, UserRepository, UserRepositoryError, UserRepositoryResult,
+    StorageStats, UserListEntry, UserRepository, UserRepositoryError, UserRepositoryResult,
 };
 use crate::infrastructure::repositories::pg::transaction_utils::with_transaction;
 
@@ -621,7 +621,7 @@ impl UserRepository for UserPgRepository {
                 ui_preferences
             FROM auth.users
             WHERE ($3 OR is_external = FALSE)
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT $1 OFFSET $2
             "#,
         )
@@ -669,6 +669,79 @@ impl UserRepository for UserPgRepository {
             .collect();
 
         Ok(users)
+    }
+
+    async fn list_user_summaries(
+        &self,
+        limit: i64,
+        offset: i64,
+        include_external: bool,
+    ) -> UserRepositoryResult<Vec<UserListEntry>> {
+        let rows = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                Option<String>,
+                String,
+                String,
+                i64,
+                i64,
+                Option<chrono::DateTime<chrono::Utc>>,
+                bool,
+                Option<String>,
+                bool,
+            ),
+        >(
+            r#"
+            SELECT
+                id, username, email, role::text,
+                storage_quota_bytes, storage_used_bytes,
+                last_login_at, active, oidc_provider, is_external
+            FROM auth.users
+            WHERE ($3 OR is_external = FALSE)
+            ORDER BY created_at DESC, id DESC
+            LIMIT $1 OFFSET $2
+            "#,
+        )
+        .bind(limit)
+        .bind(offset)
+        .bind(include_external)
+        .fetch_all(self.pool.as_ref())
+        .await
+        .map_err(Self::map_sqlx_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    id,
+                    username,
+                    email,
+                    role,
+                    storage_quota_bytes,
+                    storage_used_bytes,
+                    last_login_at,
+                    active,
+                    oidc_provider,
+                    is_external,
+                )| UserListEntry {
+                    id,
+                    username,
+                    email,
+                    role: if role == "admin" {
+                        UserRole::Admin
+                    } else {
+                        UserRole::User
+                    },
+                    storage_quota_bytes,
+                    storage_used_bytes,
+                    last_login_at,
+                    active,
+                    oidc_provider,
+                    is_external,
+                },
+            )
+            .collect())
     }
 
     async fn search_users(
@@ -1074,6 +1147,17 @@ impl UserStoragePort for UserPgRepository {
             .map_err(DomainError::from)
     }
 
+    async fn list_user_summaries(
+        &self,
+        limit: i64,
+        offset: i64,
+        include_external: bool,
+    ) -> Result<Vec<UserListEntry>, DomainError> {
+        UserRepository::list_user_summaries(self, limit, offset, include_external)
+            .await
+            .map_err(DomainError::from)
+    }
+
     async fn search_users(
         &self,
         query: &str,
@@ -1224,5 +1308,127 @@ impl UserStoragePort for UserPgRepository {
         UserRepository::count_users(self)
             .await
             .map_err(DomainError::from)
+    }
+}
+
+#[cfg(integration_tests)]
+#[allow(dead_code)]
+mod integration_tests {
+    use super::*;
+    use crate::integration_test_support::{ensure_clean_test_db, test_db_url};
+    use sqlx::postgres::PgPoolOptions;
+
+    async fn test_repo() -> UserPgRepository {
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&test_db_url())
+            .await
+            .expect("connect to integration-test PostgreSQL");
+        ensure_clean_test_db(&pool).await;
+        UserPgRepository::new(Arc::new(pool))
+    }
+
+    async fn insert_summary_fixture(
+        repo: &UserPgRepository,
+        id: Uuid,
+        username: Option<&str>,
+        email: &str,
+        role: &str,
+        is_external: bool,
+    ) {
+        sqlx::query(
+            r#"
+            INSERT INTO auth.users (
+                id, username, email, password_hash, role,
+                storage_quota_bytes, storage_used_bytes,
+                created_at, updated_at, last_login_at, active,
+                oidc_provider, is_external
+            ) VALUES (
+                $1, $2, $3, NULL, $4::auth.userrole,
+                $5, 0,
+                '9999-12-31 23:59:59+00', '9999-12-31 23:59:59+00', NULL, TRUE,
+                $6, $7
+            )
+            "#,
+        )
+        .bind(id)
+        .bind(username)
+        .bind(email)
+        .bind(role)
+        .bind(if is_external {
+            0_i64
+        } else {
+            10_737_418_240_i64
+        })
+        .bind(is_external.then_some("integration-idp"))
+        .bind(is_external)
+        .execute(repo.pool.as_ref())
+        .await
+        .expect("insert compact-list fixture");
+    }
+
+    #[tokio::test]
+    async fn compact_listing_maps_narrow_columns_and_stably_breaks_timestamp_ties() {
+        let repo = test_repo().await;
+        sqlx::query("DELETE FROM auth.users WHERE email LIKE 'perf-summary-%@example.invalid'")
+            .execute(repo.pool.as_ref())
+            .await
+            .expect("clean stale compact-list fixtures");
+        let mut ids = [Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4()];
+        ids.sort_unstable_by(|left, right| right.cmp(left));
+        let username_a = format!("perf-summary-a-{}", ids[0]);
+        let username_b = format!("perf-summary-b-{}", ids[2]);
+
+        insert_summary_fixture(
+            &repo,
+            ids[0],
+            Some(&username_a),
+            &format!("perf-summary-{}@example.invalid", ids[0]),
+            "admin",
+            false,
+        )
+        .await;
+        insert_summary_fixture(
+            &repo,
+            ids[1],
+            None,
+            &format!("perf-summary-{}@example.invalid", ids[1]),
+            "user",
+            true,
+        )
+        .await;
+        insert_summary_fixture(
+            &repo,
+            ids[2],
+            Some(&username_b),
+            &format!("perf-summary-{}@example.invalid", ids[2]),
+            "user",
+            false,
+        )
+        .await;
+
+        let page = UserRepository::list_user_summaries(&repo, 3, 0, true)
+            .await
+            .expect("compact projection query must decode");
+        assert_eq!(page.iter().map(|entry| entry.id).collect::<Vec<_>>(), ids);
+        assert_eq!(page[0].username.as_deref(), Some(username_a.as_str()));
+        assert_eq!(page[0].role, UserRole::Admin);
+        assert_eq!(page[0].storage_quota_bytes, 10_737_418_240);
+        assert_eq!(page[1].username, None);
+        assert!(page[1].is_external);
+        assert_eq!(page[1].oidc_provider.as_deref(), Some("integration-idp"));
+
+        let internal = UserRepository::list_user_summaries(&repo, 10, 0, false)
+            .await
+            .expect("internal compact projection query must decode");
+        assert!(internal.iter().any(|entry| entry.id == ids[0]));
+        assert!(internal.iter().any(|entry| entry.id == ids[2]));
+        assert!(!internal.iter().any(|entry| entry.id == ids[1]));
+
+        sqlx::query("DELETE FROM auth.users WHERE id = ANY($1)")
+            .bind(ids.as_slice())
+            .execute(repo.pool.as_ref())
+            .await
+            .expect("clean compact-list fixtures");
     }
 }

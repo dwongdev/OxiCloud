@@ -199,6 +199,28 @@ export interface User {
 	ui_preferences: Record<string, unknown>;
 }
 
+/** Fields rendered by the paginated admin table. Full account details remain
+ * available from the detail endpoint; this shape keeps avatars and preference
+ * documents off every listing page. */
+export type AdminUserSummary = Pick<
+	User,
+	| 'id'
+	| 'username'
+	| 'email'
+	| 'role'
+	| 'storage_quota_bytes'
+	| 'storage_used_bytes'
+	| 'last_login_at'
+	| 'active'
+	| 'auth_provider'
+	| 'is_external'
+>;
+
+export interface AdminUsersPage {
+	total: number;
+	users: AdminUserSummary[];
+}
+
 export interface AuthResponse {
 	user: User;
 	access_token: string;

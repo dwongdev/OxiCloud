@@ -65,7 +65,7 @@ describe('admin read endpoints', () => {
 	it('call apiJson for the listing/settings reads', async () => {
 		await admin.listUsers(25, 0);
 		expect(jsonMock).toHaveBeenCalledWith(
-			expect.stringContaining('/api/admin/users?limit=25&offset=0'),
+			'/api/admin/users?limit=25&offset=0&summary=true',
 			expect.anything()
 		);
 		await admin.getDashboard();

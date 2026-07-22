@@ -1,0 +1,188 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-21T20:30:20.429Z",
+  "decision": "superseded by queue-memory-process-node26-macos-arm64.json; cursor accepted only by explicit user trade-off after the isolated RSS gate",
+  "environment": {
+    "node": "v26.5.0",
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M4 Pro",
+    "logicalCpus": 14,
+    "gcExposed": true
+  },
+  "config": {
+    "suite": "queue",
+    "warmup": 5,
+    "samples": 25,
+    "queueCounts": [
+      64,
+      256,
+      1024
+    ],
+    "progressCases": [
+      {
+        "items": 1,
+        "updates": 100
+      },
+      {
+        "items": 10,
+        "updates": 500
+      },
+      {
+        "items": 100,
+        "updates": 5000
+      },
+      {
+        "items": 1000,
+        "updates": 10000
+      },
+      {
+        "items": 10000,
+        "updates": 5000
+      }
+    ],
+    "hashCounts": [
+      1000,
+      10000,
+      10001,
+      25000
+    ],
+    "dedupBatchSize": 10000,
+    "dedupConcurrency": 4,
+    "serverLatencyMs": 0,
+    "modeledFileBytes": 65536
+  },
+  "notes": {
+    "heap": "Median heap delta is indicative only; timing is the primary microbenchmark metric.",
+    "dedup": "The current >10k path is faster only because it is rejected and returns no owned hashes."
+  },
+  "suites": {
+    "queue": [
+      {
+        "chunkCount": 64,
+        "repetitions": 3125,
+        "normalizedMedianUsPerDrain": {
+          "current": 3.4471731200000066,
+          "candidate": 0.8570931200000632
+        },
+        "current": {
+          "sampleCount": 25,
+          "medianMs": 10.772416000000021,
+          "p95Ms": 106.93650000000002,
+          "minMs": 3.077792000000045,
+          "maxMs": 155.11179199999992,
+          "medianHeapDeltaBytes": 296368,
+          "medianRssDeltaBytes": 0
+        },
+        "candidate": {
+          "sampleCount": 25,
+          "medianMs": 2.6784160000001975,
+          "p95Ms": 14.533292000000074,
+          "minMs": 1.02737500000012,
+          "maxMs": 21.65000000000009,
+          "medianHeapDeltaBytes": 159376,
+          "medianRssDeltaBytes": 0
+        },
+        "speedup": 4.0219353528351185,
+        "representative": {
+          "current": {
+            "checksum": 2315114185,
+            "chunkCount": 200000,
+            "totalBytes": 29184000000,
+            "batchCount": 6250
+          },
+          "candidate": {
+            "checksum": 2315114185,
+            "chunkCount": 200000,
+            "totalBytes": 29184000000,
+            "batchCount": 6250
+          }
+        }
+      },
+      {
+        "chunkCount": 256,
+        "repetitions": 782,
+        "normalizedMedianUsPerDrain": {
+          "current": 8.675297953964206,
+          "candidate": 2.503888746802898
+        },
+        "current": {
+          "sampleCount": 25,
+          "medianMs": 6.78408300000001,
+          "p95Ms": 32.81195799999978,
+          "minMs": 4.367833000000246,
+          "maxMs": 164.17550000000028,
+          "medianHeapDeltaBytes": 1858520,
+          "medianRssDeltaBytes": 0
+        },
+        "candidate": {
+          "sampleCount": 25,
+          "medianMs": 1.9580409999998665,
+          "p95Ms": 5.698667000000114,
+          "minMs": 0.9418750000004366,
+          "maxMs": 47.76333300000033,
+          "medianHeapDeltaBytes": 1816160,
+          "medianRssDeltaBytes": 0
+        },
+        "speedup": 3.464729798814464,
+        "representative": {
+          "current": {
+            "checksum": 1196738502,
+            "chunkCount": 200192,
+            "totalBytes": 29365764096,
+            "batchCount": 3910
+          },
+          "candidate": {
+            "checksum": 1196738502,
+            "chunkCount": 200192,
+            "totalBytes": 29365764096,
+            "batchCount": 3910
+          }
+        }
+      },
+      {
+        "chunkCount": 1024,
+        "repetitions": 196,
+        "normalizedMedianUsPerDrain": {
+          "current": 52.38349999999813,
+          "candidate": 9.426867346937055
+        },
+        "current": {
+          "sampleCount": 25,
+          "medianMs": 10.267165999999634,
+          "p95Ms": 142.3090830000001,
+          "minMs": 4.935207999999875,
+          "maxMs": 207.7039160000004,
+          "medianHeapDeltaBytes": 1796184,
+          "medianRssDeltaBytes": 0
+        },
+        "candidate": {
+          "sampleCount": 25,
+          "medianMs": 1.8476659999996627,
+          "p95Ms": 13.679167000000234,
+          "minMs": 0.9290839999994205,
+          "maxMs": 14.767958999999792,
+          "medianHeapDeltaBytes": 1775256,
+          "medianRssDeltaBytes": 0
+        },
+        "speedup": 5.556830076432379,
+        "representative": {
+          "current": {
+            "checksum": 1444678356,
+            "chunkCount": 200704,
+            "totalBytes": 29543628800,
+            "batchCount": 3528
+          },
+          "candidate": {
+            "checksum": 1444678356,
+            "chunkCount": 200704,
+            "totalBytes": 29543628800,
+            "batchCount": 3528
+          }
+        }
+      }
+    ]
+  },
+  "blackhole": 0
+}

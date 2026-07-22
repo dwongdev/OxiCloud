@@ -64,6 +64,7 @@
 		type Recipient
 	} from '$lib/api/endpoints/recipients';
 	import type {
+		AdminUserSummary,
 		Drive,
 		DriveMember,
 		DrivePolicies,
@@ -144,7 +145,7 @@
 		deleteUserModal !== null &&
 			deleteUserEmailInput.trim().toLowerCase() === deleteUserModal.email.toLowerCase()
 	);
-	function openDeleteUser(u: User) {
+	function openDeleteUser(u: AdminUserSummary) {
 		deleteUserModal = {
 			userId: u.id,
 			username: u.username || u.email,
@@ -639,7 +640,7 @@
 	}
 
 	// Users
-	let users = $state<User[]>([]);
+	let users = $state<AdminUserSummary[]>([]);
 	let total = $state(0);
 	let pageIndex = $state(0);
 	let usersError = $state<string | null>(null);
@@ -763,19 +764,19 @@
 	}
 
 	/** True for the signed-in admin's own row — guards self-destructive actions. */
-	function isSelf(u: User): boolean {
+	function isSelf(u: AdminUserSummary): boolean {
 		return u.id === currentAdminId;
 	}
 	/** OIDC/SSO-provisioned account (no local password to reset). */
-	function isOidcUser(u: User): boolean {
+	function isOidcUser(u: AdminUserSummary): boolean {
 		return !!u.auth_provider && u.auth_provider !== 'local';
 	}
 	/** Used-quota percentage (0 when unlimited) for the per-user progress bar. */
-	function quotaPct(u: User): number {
+	function quotaPct(u: AdminUserSummary): number {
 		return u.storage_quota_bytes > 0 ? (u.storage_used_bytes / u.storage_quota_bytes) * 100 : 0;
 	}
 
-	async function toggleRole(u: User) {
+	async function toggleRole(u: AdminUserSummary) {
 		if (isSelf(u)) return;
 		const role = u.role === 'admin' ? 'user' : 'admin';
 		if (!(await showConfirm(t('admin.confirm_role', { role }, 'Change role to {{role}}?')))) return;
@@ -787,7 +788,7 @@
 		}
 	}
 
-	async function toggleActive(u: User) {
+	async function toggleActive(u: AdminUserSummary) {
 		if (isSelf(u) && u.active) return;
 		const msg = u.active
 			? t('admin.confirm_deactivate', 'Deactivate this user?')
@@ -801,7 +802,7 @@
 		}
 	}
 
-	function openQuota(u: User) {
+	function openQuota(u: AdminUserSummary) {
 		quotaModalError = null;
 		quotaModal = {
 			userId: u.id,
@@ -829,7 +830,7 @@
 		}
 	}
 
-	function openReset(u: User) {
+	function openReset(u: AdminUserSummary) {
 		resetModal = { userId: u.id, username: u.username || u.email };
 		resetPassword = '';
 		resetError = null;
@@ -854,7 +855,7 @@
 		}
 	}
 
-	function removeUser(u: User) {
+	function removeUser(u: AdminUserSummary) {
 		if (isSelf(u)) return;
 		openDeleteUser(u);
 	}
@@ -863,7 +864,7 @@
 	// provisions a home drive + flips the is_external flag; irreversible
 	// via the admin UI (there's no demote endpoint on purpose). Backend
 	// refuses when magic-link login is disabled — surfaced as a toast.
-	async function promoteExternal(u: User) {
+	async function promoteExternal(u: AdminUserSummary) {
 		if (!u.is_external) return;
 		if (
 			!(await showConfirm(

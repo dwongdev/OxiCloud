@@ -1,0 +1,189 @@
+{
+  "schema_version": 2,
+  "benchmark": "dedup_gc_phase1_manifest_batching",
+  "date": "2026-07-22",
+  "baseline_source": "src/infrastructure/services/dedup_service.rs::garbage_collect_with_grace phase 1",
+  "environment": {
+    "postgres_image": "postgres:18.2-alpine3.23",
+    "container": "oxicloud-postgres-1",
+    "database_isolation": "random throw-away database, dropped by runner trap",
+    "harness_profile": "release",
+    "transport_note": "SQLx used the container private IP because the sandbox could not reach the published host port. Statement-count reduction is transport-independent; medians are specific to this host path.",
+    "ordering": "candidate order rotated every sample; fixture reset and correctness validation excluded from timing"
+  },
+  "fixture": {
+    "batch_size": 500,
+    "chunks_per_manifest": 16,
+    "shared_chunk_percent": 50,
+    "shared_chunk_pool": 512,
+    "duplicate_control": "every 10th manifest repeats one chunk; accounting is one reference per distinct hash per manifest"
+  },
+  "rejected_atomic_cte_idle_gate": [
+    {
+      "orphan_manifests": 0,
+      "live_manifests": 10,
+      "samples": 31,
+      "current_median_ms": 1.950,
+      "cte_median_ms": 2.463,
+      "cte_regression_percent": 26.28,
+      "statements_current_to_cte": "1 -> 1"
+    },
+    {
+      "orphan_manifests": 0,
+      "live_manifests": 500,
+      "samples": 41,
+      "current_median_ms": 1.704,
+      "cte_median_ms": 2.468,
+      "cte_regression_percent": 44.84,
+      "statements_current_to_cte": "1 -> 1"
+    },
+    {
+      "orphan_manifests": 0,
+      "live_manifests": 5000,
+      "samples": 31,
+      "current_median_ms": 1.951,
+      "cte_median_ms": 2.256,
+      "cte_regression_percent": 15.59,
+      "statements_current_to_cte": "1 -> 1"
+    }
+  ],
+  "accepted_hybrid": {
+    "status": "accepted_by_explicit_user_tradeoff",
+    "shape": "simple DELETE/RETURNING always; exact historical serial UPDATE for one manifest; Rust distinct-per-manifest aggregation plus one UPDATE FROM unnest for batches of two or more",
+    "aggregate_threshold": 2,
+    "thresholds_swept": [2, 4, 8, 32, 500],
+    "idle_and_single_no_regression_gate": [
+      {
+        "orphan_manifests": 0,
+        "live_manifests": 500,
+        "warmups": 5,
+        "samples": 31,
+        "current_elapsed_ms": [0.639, 0.611, 0.619, 2.360, 0.770, 0.850, 0.934, 0.985, 0.655, 0.791, 0.708, 0.727, 0.740, 0.674, 1.260, 0.881, 0.877, 0.738, 0.674, 0.753, 0.769, 0.686, 0.652, 0.661, 0.531, 0.876, 0.653, 0.668, 0.674, 0.739, 0.740],
+        "hybrid_elapsed_ms": [0.752, 0.602, 0.711, 1.061, 0.754, 0.868, 0.967, 0.815, 0.741, 0.777, 0.710, 0.869, 0.639, 0.547, 1.141, 1.206, 1.105, 0.692, 0.824, 0.794, 0.721, 0.656, 0.610, 0.632, 0.681, 0.726, 0.519, 0.623, 0.596, 0.679, 0.737],
+        "current_median_ms": 0.738,
+        "hybrid_median_ms": 0.726,
+        "median_speedup_x": 1.02,
+        "statements_current_to_hybrid": "1 -> 1",
+        "correctness": "PASS"
+      },
+      {
+        "orphan_manifests": 1,
+        "live_manifests": 499,
+        "warmups": 5,
+        "samples": 31,
+        "current_elapsed_ms": [5.058, 5.156, 4.205, 223.094, 4.718, 4.605, 3.509, 2.939, 4.250, 4.591, 5.255, 4.127, 5.163, 3.950, 6.076, 5.642, 4.428, 3.392, 4.246, 3.913, 4.708, 4.228, 3.927, 5.702, 4.062, 4.862, 4.540, 3.988, 3.854, 6.148, 4.436],
+        "hybrid_elapsed_ms": [3.713, 4.915, 4.106, 5.162, 5.328, 3.439, 4.279, 3.096, 4.479, 4.595, 5.153, 5.766, 3.427, 7.188, 4.423, 3.684, 3.561, 4.434, 3.777, 3.453, 4.016, 6.334, 4.455, 4.692, 3.840, 3.406, 3.860, 4.336, 4.252, 6.061, 3.809],
+        "current_median_ms": 4.436,
+        "hybrid_median_ms": 4.279,
+        "median_speedup_x": 1.04,
+        "statements_current_to_hybrid": "3 -> 3",
+        "correctness": "PASS"
+      }
+    ],
+    "crossover_gate": [
+      {"orphan_manifests": 2, "samples": 9, "current_median_ms": 6.323, "hybrid_median_ms": 5.806, "median_speedup_x": 1.09, "statements_current_to_hybrid": "4 -> 3", "correctness": "PASS"},
+      {"orphan_manifests": 4, "samples": 9, "current_median_ms": 11.719, "hybrid_median_ms": 5.761, "median_speedup_x": 2.03, "statements_current_to_hybrid": "6 -> 3", "correctness": "PASS"},
+      {"orphan_manifests": 8, "samples": 9, "current_median_ms": 40.489, "hybrid_median_ms": 5.662, "median_speedup_x": 7.15, "statements_current_to_hybrid": "10 -> 3", "correctness": "PASS"},
+      {"orphan_manifests": 32, "samples": 9, "current_median_ms": 212.165, "hybrid_median_ms": 8.117, "median_speedup_x": 26.14, "statements_current_to_hybrid": "34 -> 3", "correctness": "PASS"}
+    ],
+    "large_batch_gate": [
+      {
+        "orphan_manifests": 500,
+        "samples": 5,
+        "current_elapsed_ms": [907.975, 458.300, 1456.096, 1795.532, 1568.453],
+        "hybrid_elapsed_ms": [25.468, 18.753, 20.155, 191.159, 24.255],
+        "current_median_ms": 1456.096,
+        "hybrid_median_ms": 24.255,
+        "median_speedup_x": 60.03,
+        "statements_current_to_hybrid": "502 -> 3",
+        "correctness": "PASS"
+      },
+      {
+        "orphan_manifests": 1000,
+        "samples": 5,
+        "current_elapsed_ms": [4280.878, 3925.644, 3163.190, 1364.115, 1738.119],
+        "hybrid_elapsed_ms": [61.829, 310.179, 49.885, 51.440, 65.973],
+        "current_median_ms": 3163.190,
+        "hybrid_median_ms": 61.829,
+        "median_speedup_x": 51.16,
+        "statements_current_to_hybrid": "1003 -> 5",
+        "correctness": "PASS"
+      }
+    ],
+    "fresh_process_max_rss_vs_serial": [
+      {
+        "orphan_manifests": 2,
+        "runs_per_mode": 5,
+        "serial_bytes": [7733248, 7684096, 7749632, 7766016, 7749632],
+        "hybrid_bytes": [7749632, 7798784, 7782400, 7733248, 7700480],
+        "serial_median_bytes": 7749632,
+        "hybrid_median_bytes": 7749632,
+        "hybrid_delta_bytes": 0
+      },
+      {
+        "orphan_manifests": 500,
+        "runs_per_mode": 5,
+        "serial_bytes": [8503296, 8404992, 8437760, 8519680, 8388608],
+        "hybrid_bytes": [9093120, 9109504, 9175040, 9175040, 9175040],
+        "serial_median_bytes": 8437760,
+        "hybrid_median_bytes": 9175040,
+        "hybrid_delta_bytes": 737280,
+        "hybrid_delta_kib": 720,
+        "hybrid_delta_percent": 8.74
+      },
+      {
+        "orphan_manifests": 1000,
+        "runs_per_mode": 5,
+        "serial_bytes": [8568832, 8585216, 8568832, 8503296, 8536064],
+        "hybrid_bytes": [9486336, 9650176, 9650176, 9601024, 9306112],
+        "serial_median_bytes": 8568832,
+        "hybrid_median_bytes": 9601024,
+        "hybrid_delta_bytes": 1032192,
+        "hybrid_delta_kib": 1008,
+        "hybrid_delta_percent": 12.05
+      }
+    ],
+    "tradeoff": "explicitly accepted by the user: retain 60.03x/51.16x median speedups for +720 KiB/+1008 KiB max RSS at 500/1000 orphan manifests"
+  },
+  "rejected_borrowed_sqlx_bind": {
+    "candidate": "bind Vec<&str> borrowed from the returned manifest batch instead of cloning each unique hash into Vec<String>",
+    "latency_gate": [
+      {"orphan_manifests": 2, "samples": 15, "owned_median_ms": 4.843, "borrowed_median_ms": 4.800, "borrowed_delta_percent": 0.89},
+      {"orphan_manifests": 500, "samples": 15, "owned_median_ms": 24.709, "borrowed_median_ms": 27.459, "borrowed_regression_percent": 11.13},
+      {"orphan_manifests": 1000, "samples": 15, "owned_median_ms": 55.042, "borrowed_median_ms": 56.439, "borrowed_regression_percent": 2.54}
+    ],
+    "fresh_process_max_rss_gate": [
+      {"orphan_manifests": 2, "runs_per_mode": 3, "owned_bytes": [7880704, 7798784, 7897088], "borrowed_bytes": [7700480, 7766016, 7864320], "owned_median_bytes": 7880704, "borrowed_median_bytes": 7766016, "borrowed_saves_bytes": 114688},
+      {"orphan_manifests": 500, "runs_per_mode": 3, "owned_bytes": [9224192, 9191424, 9224192], "borrowed_bytes": [9093120, 9043968, 9011200], "owned_median_bytes": 9224192, "borrowed_median_bytes": 9043968, "borrowed_saves_bytes": 180224},
+      {"orphan_manifests": 1000, "runs_per_mode": 3, "owned_bytes": [9912320, 9584640, 9797632], "borrowed_bytes": [9388032, 9469952, 9240576], "owned_median_bytes": 9797632, "borrowed_median_bytes": 9388032, "borrowed_saves_bytes": 409600}
+    ],
+    "decision": "rejected; it saved 112-400 KiB max RSS but regressed median latency by 11.13% at 500 and 2.54% at 1000"
+  },
+  "rejected_sorted_rle": {
+    "candidate": "borrowed hash references sorted/deduplicated per manifest, then globally sorted and run-length counted",
+    "latency_vs_owned_hashmap": [
+      {"orphan_manifests": 2, "samples": 15, "owned_median_ms": 37.077, "sorted_median_ms": 61.889, "sorted_regression_percent": 66.93},
+      {"orphan_manifests": 500, "samples": 15, "owned_median_ms": 63.912, "sorted_median_ms": 64.707, "sorted_regression_percent": 1.24},
+      {"orphan_manifests": 1000, "samples": 15, "owned_median_ms": 151.758, "sorted_median_ms": 140.429, "sorted_improvement_percent": 7.47}
+    ],
+    "fresh_process_max_rss_vs_serial": [
+      {"orphan_manifests": 2, "runs_per_mode": 5, "serial_median_bytes": 7766016, "sorted_median_bytes": 7782400, "sorted_delta_bytes": 16384},
+      {"orphan_manifests": 500, "runs_per_mode": 5, "serial_median_bytes": 8421376, "sorted_median_bytes": 8978432, "sorted_delta_bytes": 557056},
+      {"orphan_manifests": 1000, "runs_per_mode": 5, "serial_median_bytes": 8503296, "sorted_median_bytes": 9273344, "sorted_delta_bytes": 770048}
+    ],
+    "bounded_followup": "exploratory only and interrupted after the user explicitly selected the faster threshold-2 HashMap implementation; never applied to production",
+    "decision": "rejected; it was not Pareto on latency and still raised max RSS"
+  },
+  "correctness_checks": [
+    "all collectible manifests removed",
+    "file-backed live manifests preserved",
+    "blob ref_count equals the distinct-per-manifest reference model",
+    "repeated chunk hashes within one manifest decrement once",
+    "no ref_count underflow",
+    "new zero-ref blobs receive orphaned_at",
+    "live referenced blobs keep orphaned_at NULL",
+    "statement counts equal the selected algorithm exactly"
+  ],
+  "failure_semantics": "The accepted hybrid retains the historical separate DELETE then UPDATE failure semantics. A failure between them can leave a conservative high ref_count/leak; no transaction was added because BEGIN/COMMIT would require a separate latency gate.",
+  "decision": "accepted_by_explicit_user_tradeoff: keep owned-HashMap threshold 2; 60.03x/51.16x median speedups cost +720 KiB/+1008 KiB max RSS at 500/1000 manifests. Atomic-CTE, borrowed-bind, and sorted/RLE alternatives remain rejected."
+}

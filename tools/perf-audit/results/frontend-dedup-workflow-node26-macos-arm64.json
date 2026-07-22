@@ -1,0 +1,116 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-21T21:22:59.466Z",
+  "environment": {
+    "node": "v26.5.0",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "fixture": {
+    "hashes": 10001,
+    "bytesPerFile": 4096,
+    "uploadConcurrency": 2
+  },
+  "note": "Loopback mock includes every dedup, by-hash and content request. Hashing is excluded. Backend SQL is unmodeled: current rejects before ownership lookup while candidate would execute two accepted queries, so candidate wall time is optimistic.",
+  "cases": [
+    {
+      "hitPercent": 0,
+      "current": {
+        "wallSamplesMs": [
+          13455.567,
+          7274.844,
+          11384.656
+        ],
+        "wallMedianMs": 11384.656,
+        "peakHeapDeltaBytesMedian": 26577840,
+        "peakRssDeltaBytesMedian": 1376256,
+        "protocol": {
+          "ownedCount": 0,
+          "hitPercent": 0,
+          "dedupAccepted": 0,
+          "dedupRejected": 1,
+          "dedupRequestBytes": 670079,
+          "dedupResponseBytes": 27,
+          "uploadRequests": 10001,
+          "uploadContentBytes": 40964096,
+          "byHashRequests": 0,
+          "byHashRequestBytes": 0
+        }
+      },
+      "candidate": {
+        "wallSamplesMs": [
+          12545.523,
+          9374.644,
+          14373.866
+        ],
+        "wallMedianMs": 12545.523,
+        "peakHeapDeltaBytesMedian": 27057808,
+        "peakRssDeltaBytesMedian": 2408448,
+        "protocol": {
+          "ownedCount": 0,
+          "hitPercent": 0,
+          "dedupAccepted": 2,
+          "dedupRejected": 0,
+          "dedupRequestBytes": 670091,
+          "dedupResponseBytes": 24,
+          "uploadRequests": 10001,
+          "uploadContentBytes": 40964096,
+          "byHashRequests": 0,
+          "byHashRequestBytes": 0
+        }
+      },
+      "wallSpeedup": 0.907,
+      "uploadByteReductionPercent": 0
+    },
+    {
+      "hitPercent": 50,
+      "current": {
+        "wallSamplesMs": [
+          8511.511,
+          10370.193,
+          7271.146
+        ],
+        "wallMedianMs": 8511.511,
+        "peakHeapDeltaBytesMedian": 25917352,
+        "peakRssDeltaBytesMedian": 1753088,
+        "protocol": {
+          "ownedCount": 0,
+          "hitPercent": 50,
+          "dedupAccepted": 0,
+          "dedupRejected": 1,
+          "dedupRequestBytes": 670079,
+          "dedupResponseBytes": 27,
+          "uploadRequests": 10001,
+          "uploadContentBytes": 40964096,
+          "byHashRequests": 0,
+          "byHashRequestBytes": 0
+        }
+      },
+      "candidate": {
+        "wallSamplesMs": [
+          8095.953,
+          10204.387,
+          7060.576
+        ],
+        "wallMedianMs": 8095.953,
+        "peakHeapDeltaBytesMedian": 50966480,
+        "peakRssDeltaBytesMedian": 29622272,
+        "protocol": {
+          "ownedCount": 5001,
+          "hitPercent": 50,
+          "dedupAccepted": 2,
+          "dedupRejected": 0,
+          "dedupRequestBytes": 670091,
+          "dedupResponseBytes": 335089,
+          "uploadRequests": 5000,
+          "uploadContentBytes": 20480000,
+          "byHashRequests": 5001,
+          "byHashRequestBytes": 574561
+        }
+      },
+      "wallSpeedup": 1.051,
+      "uploadByteReductionPercent": 50.005
+    }
+  ],
+  "decision": "rejected; production reverted because the all-miss case was 10.2% slower with higher heap/RSS, while the 50%-hit case doubled heap and added about 27.9 MiB RSS"
+}

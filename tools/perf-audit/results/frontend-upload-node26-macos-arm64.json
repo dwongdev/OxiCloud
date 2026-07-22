@@ -1,0 +1,371 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-21T20:09:18.980Z",
+  "decisions": {
+    "progressAccumulator": "accepted",
+    "queueCursor": "superseded by the process-isolated memory gate; accepted only by explicit user trade-off",
+    "dedupAbove10000": "rejected by the full workflow gate; production reverted"
+  },
+  "environment": {
+    "node": "v26.5.0",
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M4 Pro",
+    "logicalCpus": 14,
+    "gcExposed": true
+  },
+  "config": {
+    "suite": "all",
+    "warmup": 3,
+    "samples": 9,
+    "queueCounts": [
+      10000,
+      50000,
+      100000
+    ],
+    "progressCases": [
+      {
+        "items": 1000,
+        "updates": 10000
+      },
+      {
+        "items": 10000,
+        "updates": 5000
+      },
+      {
+        "items": 20000,
+        "updates": 5000
+      }
+    ],
+    "hashCounts": [
+      10001,
+      25000
+    ],
+    "dedupBatchSize": 2048,
+    "dedupConcurrency": 4,
+    "serverLatencyMs": 0,
+    "modeledFileBytes": 65536
+  },
+  "notes": {
+    "heap": "Median heap delta is indicative only; timing is the primary microbenchmark metric.",
+    "dedup": "The current >10k path is faster only because it is rejected and returns no owned hashes."
+  },
+  "suites": {
+    "queue": [
+      {
+        "chunkCount": 10000,
+        "current": {
+          "sampleCount": 9,
+          "medianMs": 0.9245830000000126,
+          "p95Ms": 1.8680839999999819,
+          "minMs": 0.25729200000000674,
+          "maxMs": 1.8680839999999819,
+          "medianHeapDeltaBytes": 292640,
+          "medianRssDeltaBytes": 0
+        },
+        "candidate": {
+          "sampleCount": 9,
+          "medianMs": 0.18579199999999219,
+          "p95Ms": 0.49079100000000153,
+          "minMs": 0.17525000000000546,
+          "maxMs": 0.49079100000000153,
+          "medianHeapDeltaBytes": 295520,
+          "medianRssDeltaBytes": 0
+        },
+        "speedup": 4.976441396831142,
+        "representative": {
+          "current": {
+            "checksum": 4052813061,
+            "chunkCount": 10000,
+            "totalBytes": 1474232320,
+            "batchCount": 175
+          },
+          "candidate": {
+            "checksum": 4052813061,
+            "chunkCount": 10000,
+            "totalBytes": 1474232320,
+            "batchCount": 175,
+            "compactions": 2
+          }
+        }
+      },
+      {
+        "chunkCount": 50000,
+        "current": {
+          "sampleCount": 9,
+          "medianMs": 476.60450000000037,
+          "p95Ms": 780.6920419999997,
+          "minMs": 303.71608300000025,
+          "maxMs": 780.6920419999997,
+          "medianHeapDeltaBytes": 1459600,
+          "medianRssDeltaBytes": 0
+        },
+        "candidate": {
+          "sampleCount": 9,
+          "medianMs": 2.605415999998513,
+          "p95Ms": 9.112084000000323,
+          "minMs": 1.348041999999623,
+          "maxMs": 9.112084000000323,
+          "medianHeapDeltaBytes": 1459608,
+          "medianRssDeltaBytes": 0
+        },
+        "speedup": 182.92836921254508,
+        "representative": {
+          "current": {
+            "checksum": 3209478661,
+            "chunkCount": 50000,
+            "totalBytes": 7372603392,
+            "batchCount": 871
+          },
+          "candidate": {
+            "checksum": 3209478661,
+            "chunkCount": 50000,
+            "totalBytes": 7372603392,
+            "batchCount": 871,
+            "compactions": 4
+          }
+        }
+      },
+      {
+        "chunkCount": 100000,
+        "current": {
+          "sampleCount": 9,
+          "medianMs": 3615.438249999992,
+          "p95Ms": 6469.931125000003,
+          "minMs": 1282.712916999997,
+          "maxMs": 6469.931125000003,
+          "medianHeapDeltaBytes": 68144,
+          "medianRssDeltaBytes": 622592
+        },
+        "candidate": {
+          "sampleCount": 9,
+          "medianMs": 3.6333750000048894,
+          "p95Ms": 5.698041999989073,
+          "minMs": 2.7038749999919673,
+          "maxMs": 5.698041999989073,
+          "medianHeapDeltaBytes": 854600,
+          "medianRssDeltaBytes": 983040
+        },
+        "speedup": 995.0633364282868,
+        "representative": {
+          "current": {
+            "checksum": 725464645,
+            "chunkCount": 100000,
+            "totalBytes": 14745501696,
+            "batchCount": 1741
+          },
+          "candidate": {
+            "checksum": 725464645,
+            "chunkCount": 100000,
+            "totalBytes": 14745501696,
+            "batchCount": 1741,
+            "compactions": 5
+          }
+        }
+      }
+    ],
+    "progress": [
+      {
+        "items": 1000,
+        "updates": 10000,
+        "current": {
+          "sampleCount": 9,
+          "medianMs": 27.865125000011176,
+          "p95Ms": 108.79308299999684,
+          "minMs": 17.72166599999764,
+          "maxMs": 108.79308299999684,
+          "medianHeapDeltaBytes": 1540496,
+          "medianRssDeltaBytes": 16384
+        },
+        "candidate": {
+          "sampleCount": 9,
+          "medianMs": 0.04041699999652337,
+          "p95Ms": 8.611833000002662,
+          "minMs": 0.031541999996989034,
+          "maxMs": 8.611833000002662,
+          "medianHeapDeltaBytes": 24872,
+          "medianRssDeltaBytes": 0
+        },
+        "speedup": 689.4407057032463,
+        "representative": {
+          "current": {
+            "checksum": 220783770,
+            "lastPercent": 51,
+            "finalSum": 509.25390625
+          },
+          "candidate": {
+            "checksum": 220783770,
+            "lastPercent": 51,
+            "finalSum": 509.25390625
+          }
+        }
+      },
+      {
+        "items": 10000,
+        "updates": 5000,
+        "current": {
+          "sampleCount": 9,
+          "medianMs": 104.48600000000442,
+          "p95Ms": 187.45629200000258,
+          "minMs": 73.81195800000569,
+          "maxMs": 187.45629200000258,
+          "medianHeapDeltaBytes": 1456624,
+          "medianRssDeltaBytes": 0
+        },
+        "candidate": {
+          "sampleCount": 9,
+          "medianMs": 0.033750000002328306,
+          "p95Ms": 0.18004200000723358,
+          "minMs": 0.03200000000651926,
+          "maxMs": 0.18004200000723358,
+          "medianHeapDeltaBytes": 240872,
+          "medianRssDeltaBytes": 0
+        },
+        "speedup": 3095.8814812680375,
+        "representative": {
+          "current": {
+            "checksum": 74165188,
+            "lastPercent": 19,
+            "finalSum": 1915.6953125
+          },
+          "candidate": {
+            "checksum": 74165188,
+            "lastPercent": 19,
+            "finalSum": 1915.6953125
+          }
+        }
+      },
+      {
+        "items": 20000,
+        "updates": 5000,
+        "current": {
+          "sampleCount": 9,
+          "medianMs": 282.27433400000155,
+          "p95Ms": 465.90625,
+          "minMs": 188.45816700000432,
+          "maxMs": 465.90625,
+          "medianHeapDeltaBytes": 4189728,
+          "medianRssDeltaBytes": 0
+        },
+        "candidate": {
+          "sampleCount": 9,
+          "medianMs": 0.08487500000046566,
+          "p95Ms": 0.19566700000723358,
+          "minMs": 0.06799999999930151,
+          "maxMs": 0.19566700000723358,
+          "medianHeapDeltaBytes": 680872,
+          "medianRssDeltaBytes": 0
+        },
+        "speedup": 3325.7653490244816,
+        "representative": {
+          "current": {
+            "checksum": 47455232,
+            "lastPercent": 11,
+            "finalSum": 2175.87109375
+          },
+          "candidate": {
+            "checksum": 47455232,
+            "lastPercent": 11,
+            "finalSum": 2175.87109375
+          }
+        }
+      }
+    ],
+    "dedup": [
+      {
+        "hashCount": 10001,
+        "current": {
+          "sampleCount": 9,
+          "medianMs": 4.849792000008165,
+          "p95Ms": 17.9151669999992,
+          "minMs": 1.8024589999986347,
+          "maxMs": 17.9151669999992,
+          "medianHeapDeltaBytes": 2372344,
+          "medianRssDeltaBytes": 671744
+        },
+        "candidate": {
+          "sampleCount": 9,
+          "medianMs": 12.786791999998968,
+          "p95Ms": 75.20012499998847,
+          "minMs": 7.695166999998037,
+          "maxMs": 75.20012499998847,
+          "medianHeapDeltaBytes": 5584440,
+          "medianRssDeltaBytes": 16384
+        },
+        "speedup": 0.3792813709653333,
+        "representative": {
+          "current": {
+            "checksum": 0,
+            "ownedCount": 0,
+            "contentBytesAvoided": 0,
+            "requests": 1,
+            "acceptedRequests": 0,
+            "rejectedRequests": 1,
+            "requestBytes": 670079,
+            "responseBytes": 27,
+            "maxBatchHashes": 10001
+          },
+          "candidate": {
+            "checksum": 25005000,
+            "ownedCount": 5001,
+            "contentBytesAvoided": 327745536,
+            "requests": 5,
+            "acceptedRequests": 5,
+            "rejectedRequests": 0,
+            "requestBytes": 670127,
+            "responseBytes": 335122,
+            "maxBatchHashes": 2048
+          }
+        }
+      },
+      {
+        "hashCount": 25000,
+        "current": {
+          "sampleCount": 9,
+          "medianMs": 5.98787500000617,
+          "p95Ms": 27.3851250000007,
+          "minMs": 3.5451669999893056,
+          "maxMs": 27.3851250000007,
+          "medianHeapDeltaBytes": 4067864,
+          "medianRssDeltaBytes": 1687552
+        },
+        "candidate": {
+          "sampleCount": 9,
+          "medianMs": 19.696374999999534,
+          "p95Ms": 56.47870900000271,
+          "minMs": 15.562999999994645,
+          "maxMs": 56.47870900000271,
+          "medianHeapDeltaBytes": 13599800,
+          "medianRssDeltaBytes": 16384
+        },
+        "speedup": 0.3040089864254875,
+        "representative": {
+          "current": {
+            "checksum": 0,
+            "ownedCount": 0,
+            "contentBytesAvoided": 0,
+            "requests": 1,
+            "acceptedRequests": 0,
+            "rejectedRequests": 1,
+            "requestBytes": 1675012,
+            "responseBytes": 27,
+            "maxBatchHashes": 25000
+          },
+          "candidate": {
+            "checksum": 156237500,
+            "ownedCount": 12500,
+            "contentBytesAvoided": 819200000,
+            "requests": 13,
+            "acceptedRequests": 13,
+            "rejectedRequests": 0,
+            "requestBytes": 1675156,
+            "responseBytes": 837643,
+            "maxBatchHashes": 2048
+          }
+        }
+      }
+    ]
+  },
+  "blackhole": 0
+}

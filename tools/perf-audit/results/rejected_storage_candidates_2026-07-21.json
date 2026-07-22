@@ -1,0 +1,124 @@
+{
+  "date": "2026-07-21",
+  "status": "rejected_all_production_changes_rolled_back",
+  "environment": {
+    "host": "macOS arm64",
+    "database": "disposable PostgreSQL container databases",
+    "note": "Timing samples include visible host/container jitter; correctness and exact operation counts are the decisive gates."
+  },
+  "delta_loose_chunk_prefilter": {
+    "probe_source": "tools/perf-audit/rejected_delta_loose_hit_probe.rs",
+    "fixture": {
+      "frames": 400,
+      "frame_bytes": 262144,
+      "logical_bytes": 104857600
+    },
+    "current_path_measurements": [
+      {
+        "case": "seed",
+        "existing_before": 0,
+        "puts": 400,
+        "physical_put_bytes": 104857600,
+        "sync_hashes": 400,
+        "elapsed_ms": 854.548
+      },
+      {
+        "case": "all_hit",
+        "existing_before": 400,
+        "puts": 400,
+        "physical_put_bytes": 104857600,
+        "sync_hashes": 400,
+        "elapsed_ms": 685.03
+      },
+      {
+        "case": "all_miss",
+        "existing_before": 0,
+        "puts": 400,
+        "physical_put_bytes": 104857600,
+        "sync_hashes": 400,
+        "elapsed_ms": 1050.956
+      },
+      {
+        "case": "half_hit",
+        "existing_before": 200,
+        "puts": 400,
+        "physical_put_bytes": 104857600,
+        "sync_hashes": 400,
+        "elapsed_ms": 236.611
+      }
+    ],
+    "result": "rejected",
+    "rejection_reasons": [
+      "The browser delta protocol already negotiates missing hashes, so all-miss is the normal receive path; a PostgreSQL prefilter would add queries and up to 8 MiB of request buffering there.",
+      "A metadata row does not prove that the backing object still exists. Skipping PUT from PostgreSQL state alone removes the current self-healing behavior for backend-missing objects.",
+      "No candidate established a Pareto improvement across the normal miss path, remote bytes, memory, and repair semantics."
+    ]
+  },
+  "identical_overwrite_refcount_cte": {
+    "probe_source": "tools/perf-audit/rejected_refcount_overwrite_probe.rs",
+    "baseline_correctness": {
+      "legacy_iterations": 1000,
+      "initial_ref_count": 1,
+      "final_ref_count": 1001,
+      "elapsed_ms": 25534.071,
+      "different_hash_old_ref": null,
+      "different_hash_new_ref": 1,
+      "delete_gc_final_ref": null
+    },
+    "candidate_correctness_on_unambiguous_fixtures": {
+      "legacy_same_hash_1000_final_ref": 1,
+      "manifest_same_hash_100_final_manifest_ref": 1,
+      "manifest_same_hash_100_final_chunk_ref": 1,
+      "different_hash_ref_counts": "passed",
+      "delete_and_force_gc": "passed",
+      "missing_file_compensation": "passed",
+      "sql_error_compensation": "passed",
+      "blob_deletion_hooks": "passed"
+    },
+    "roundtrips_per_iteration": {
+      "legacy_same_hash": 3,
+      "manifest_same_hash": 2,
+      "alternating_different_hash": 8,
+      "candidate_changed_roundtrip_count": false
+    },
+    "interleaved_short_samples": {
+      "iterations": {
+        "same_hash": 200,
+        "manifest_same_hash": 100,
+        "alternating_different_hash": 50
+      },
+      "baseline": [
+        {
+          "same_p50_ms": 3.679,
+          "manifest_p50_ms": 1.544,
+          "different_p50_ms": 3.008
+        },
+        {
+          "same_p50_ms": 5.822,
+          "manifest_p50_ms": 7.668,
+          "different_p50_ms": 10.711
+        }
+      ],
+      "candidate": [
+        {
+          "same_p50_ms": 3.7,
+          "manifest_p50_ms": 5.616,
+          "different_p50_ms": 7.565
+        },
+        {
+          "same_p50_ms": 2.156,
+          "manifest_p50_ms": 1.438,
+          "different_p50_ms": 3.804
+        }
+      ],
+      "interpretation": "Large host/container jitter prevents a latency non-regression claim; the mixed-representation correctness failure independently rejects the candidate."
+    },
+    "result": "rejected",
+    "rejection_reasons": [
+      "storage.files stores only a content hash and cannot identify whether that file reference is owned by storage.blobs or storage.chunk_manifests when both rows coexist for the same hash.",
+      "In a mixed legacy-to-CDC transition the CTE can decrement the manifest when the displaced reference was legacy, causing undercount, or preserve the manifest and leak the shadowed legacy reference and bytes.",
+      "The candidate therefore cannot be made correct solely inside FileBlobWriteRepository; representation ownership must first be normalized or made explicit."
+    ],
+    "remaining_baseline_issue": "A normal identical-content overwrite leaks the newly acquired reference (1 becomes N+1). This remains deliberately unfixed rather than replacing it with ambiguous undercount/data-loss risk."
+  }
+}

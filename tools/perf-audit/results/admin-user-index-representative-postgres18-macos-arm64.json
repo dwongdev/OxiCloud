@@ -1,0 +1,771 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-22",
+  "benchmark": "admin user created_at index representative cost gate",
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "cpu": "Apple M4 Pro",
+    "postgresImage": "postgres:18.2-alpine3.23",
+    "container": "oxicloud-postgres-1",
+    "client": "psql through docker exec"
+  },
+  "method": {
+    "rowsPerDistribution": 500000,
+    "independentTransactions": 3,
+    "samplesPerTransactionAndShape": 5,
+    "totalSamplesPerShape": 15,
+    "warmupsPerTransactionAndShape": 1,
+    "order": "A/B for the accepted timestamp-only result; a later A/B/C gate rotated no-index/simple/compound order inside every transaction",
+    "harnessEvolution": "the current representative SQL is the expanded A/B/C version; the top-level distribution samples retain the earlier A/B authorization run, while compoundRepresentativeABC retains the later isolated rerun",
+    "cleanup": "every transaction ended in ROLLBACK",
+    "commonIndexes": "both baseline and candidate tables have the same UUID primary-key index",
+    "insertBatchRows": 10000,
+    "insertValues": "prebuilt identical A/B batches with new timestamps and an indexed sample selector"
+  },
+  "previousTiedFixtureComparison": {
+    "timestampMultiplicity": 100,
+    "indexBytes": 3448832,
+    "uniqueToTiedIndexByteRatio": 3.263,
+    "reasonForFollowup": "PostgreSQL posting-list deduplication compressed repeated created_at keys and understated a normal mostly-unique registration workload"
+  },
+  "uniqueTimestamps": {
+    "distinctTimestamps": 500000,
+    "indexBytesEachRound": [
+      11255808,
+      11255808,
+      11255808
+    ],
+    "indexBytesPerInitialUser": 22.512,
+    "indexBytesAfter50000InsertsEachRound": [
+      13271040,
+      13271040,
+      13271040
+    ],
+    "firstPage": {
+      "noIndexSamplesMs": [
+        98.496,
+        121.451,
+        98.425,
+        81.049,
+        94.833,
+        57.602,
+        62.54,
+        56.785,
+        56.918,
+        55.854,
+        57.217,
+        57.131,
+        54.457,
+        56.319,
+        56.651
+      ],
+      "indexSamplesMs": [
+        0.459,
+        0.454,
+        0.242,
+        0.207,
+        0.215,
+        0.287,
+        0.208,
+        0.225,
+        0.14,
+        0.2,
+        0.232,
+        0.366,
+        0.146,
+        0.207,
+        0.203
+      ],
+      "noIndexMedianMs": 57.217,
+      "indexMedianMs": 0.215,
+      "speedup": 266.13
+    },
+    "offset50000": {
+      "noIndexSamplesMs": [
+        230.025,
+        227.108,
+        191.025,
+        183.211,
+        178.795,
+        126.075,
+        132.155,
+        127.478,
+        120.407,
+        126.377,
+        123.691,
+        115.336,
+        119.425,
+        119.952,
+        120.519
+      ],
+      "indexSamplesMs": [
+        6.437,
+        10.281,
+        11.446,
+        7.55,
+        8.74,
+        5.219,
+        5.244,
+        5.063,
+        5.215,
+        4.835,
+        5.165,
+        5.278,
+        5.169,
+        5.181,
+        4.767
+      ],
+      "noIndexMedianMs": 126.377,
+      "indexMedianMs": 5.219,
+      "speedup": 24.21
+    },
+    "insert10000Rows": {
+      "noIndexSamplesMs": [
+        47.392,
+        56.38,
+        58.991,
+        80.918,
+        46.37,
+        34.132,
+        36.737,
+        37.678,
+        37.218,
+        38.92,
+        32.183,
+        35.237,
+        34.152,
+        36.031,
+        34.256
+      ],
+      "indexSamplesMs": [
+        57.039,
+        65.393,
+        90.559,
+        54.394,
+        67.488,
+        42.624,
+        42.795,
+        44.224,
+        43.115,
+        47.013,
+        44.017,
+        43.637,
+        42.657,
+        43.835,
+        43.25
+      ],
+      "noIndexMedianMs": 37.218,
+      "indexMedianMs": 44.017,
+      "extraMicrosecondsPerUser": 0.68
+    },
+    "correctness": {
+      "initialOrderMatchesEachRound": [
+        true,
+        true,
+        true
+      ],
+      "finalCountsMatchEachRound": [
+        true,
+        true,
+        true
+      ],
+      "finalOrderMatchesEachRound": [
+        true,
+        true,
+        true
+      ]
+    }
+  },
+  "tenUserBursts": {
+    "distinctTimestamps": 50000,
+    "indexBytesEachRound": [
+      4751360,
+      4751360,
+      4751360
+    ],
+    "indexBytesPerInitialUser": 9.503,
+    "indexBytesAfter50000InsertsEachRound": [
+      5603328,
+      5603328,
+      5603328
+    ],
+    "firstPage": {
+      "noIndexSamplesMs": [
+        113.795,
+        129.772,
+        121.759,
+        114.103,
+        107.905,
+        76.321,
+        76.417,
+        74.491,
+        73.517,
+        75.56,
+        75.307,
+        74.247,
+        73.836,
+        74.131,
+        76.213
+      ],
+      "indexSamplesMs": [
+        1.134,
+        0.219,
+        0.24,
+        0.7,
+        0.219,
+        0.286,
+        0.19,
+        0.269,
+        0.244,
+        0.212,
+        0.228,
+        0.196,
+        0.237,
+        0.237,
+        0.191
+      ],
+      "noIndexMedianMs": 76.213,
+      "indexMedianMs": 0.237,
+      "speedup": 321.57
+    },
+    "offset50000": {
+      "noIndexSamplesMs": [
+        221.554,
+        235.467,
+        327.723,
+        220.735,
+        219.383,
+        139.801,
+        142.349,
+        136.331,
+        143.815,
+        149.221,
+        137.129,
+        133.334,
+        133.841,
+        132.927,
+        139.428
+      ],
+      "indexSamplesMs": [
+        14.06,
+        15.705,
+        12.723,
+        12.931,
+        12.787,
+        7.385,
+        7.884,
+        7.219,
+        7.374,
+        7.475,
+        7.951,
+        7.783,
+        7.626,
+        7.465,
+        7.622
+      ],
+      "noIndexMedianMs": 142.349,
+      "indexMedianMs": 7.783,
+      "speedup": 18.29
+    },
+    "insert10000Rows": {
+      "noIndexSamplesMs": [
+        52.854,
+        59.003,
+        62.892,
+        70.446,
+        70.98,
+        32.716,
+        33.745,
+        32.633,
+        34.996,
+        34.804,
+        43.5,
+        33.932,
+        32.596,
+        35.148,
+        34.663
+      ],
+      "indexSamplesMs": [
+        61.26,
+        68.779,
+        58.442,
+        60.291,
+        100.505,
+        38.469,
+        39.399,
+        39.874,
+        39.556,
+        40.619,
+        40.819,
+        42.759,
+        40.281,
+        39.762,
+        41.015
+      ],
+      "noIndexMedianMs": 34.996,
+      "indexMedianMs": 40.819,
+      "extraMicrosecondsPerUser": 0.582
+    },
+    "correctness": {
+      "initialOrderMatchesEachRound": [
+        true,
+        true,
+        true
+      ],
+      "finalCountsMatchEachRound": [
+        true,
+        true,
+        true
+      ],
+      "finalOrderMatchesEachRound": [
+        true,
+        true,
+        true
+      ]
+    }
+  },
+  "decision": {
+    "status": "accepted_by_explicit_user_tradeoff",
+    "productionVariant": "timestamp-only created_at DESC index accepted; compound index rejected and not present in production",
+    "reason": "After seeing the corrected representative cost, the user explicitly accepted 11,255,808 bytes and +0.680 us per inserted user for unique timestamps (24.21x-266.13x read gains), plus 4,751,360 bytes and +0.582 us per user for ten-user bursts (18.29x-321.57x read gains). This decision does not cover the compound index. The isolated representative A/B/C follow-up rejected the compound index: it regressed the unique-timestamp first page and materially increased disk/write cost."
+  },
+  "compoundRepresentativeABC": {
+    "status": "rejected",
+    "candidate": "created_at DESC, id DESC compound index versus the accepted created_at DESC index",
+    "method": {
+      "rowsPerDistribution": 500000,
+      "independentTransactions": 3,
+      "samplesPerTransactionAndShape": 5,
+      "totalSamplesPerShape": 15,
+      "warmupsPerTransactionAndShape": 1,
+      "order": "A/B/C order rotated inside every transaction",
+      "cleanup": "every transaction ended in ROLLBACK",
+      "commonIndexes": "all tables have the same UUID primary-key index",
+      "insertBatchRows": 10000,
+      "timingIsolation": "canonical rerun after other CPU/PostgreSQL benchmark agents stopped"
+    },
+    "indexStorage": {
+      "uniqueTimestamps": {
+        "simpleBytesEachRound": [
+          11255808,
+          11255808,
+          11255808
+        ],
+        "compoundBytesEachRound": [
+          20275200,
+          20275200,
+          20275200
+        ],
+        "compoundMinusSimpleBytes": 9019392,
+        "compoundToSimpleRatio": 1.8013,
+        "compoundIncreasePercent": 80.131,
+        "simpleBytesAfter50000InsertsEachRound": [
+          13271040,
+          13271040,
+          13271040
+        ],
+        "compoundBytesAfter50000InsertsEachRound": [
+          23920640,
+          23920640,
+          23920640
+        ],
+        "afterInsertCompoundIncreasePercent": 80.247
+      },
+      "tenUserBursts": {
+        "simpleBytesEachRound": [
+          4751360,
+          4751360,
+          4751360
+        ],
+        "compoundBytesEachRound": [
+          20324352,
+          20324352,
+          20324352
+        ],
+        "compoundMinusSimpleBytes": 15572992,
+        "compoundToSimpleRatio": 4.2776,
+        "compoundIncreasePercent": 327.759,
+        "simpleBytesAfter50000InsertsEachRound": [
+          5603328,
+          5603328,
+          5603328
+        ],
+        "compoundBytesAfter50000InsertsEachRound": [
+          24068096,
+          24068096,
+          24068096
+        ],
+        "afterInsertCompoundIncreasePercent": 329.532
+      }
+    },
+    "uniqueTimestamps": {
+      "firstPage": {
+        "noIndexSamplesMs": [
+          79.055,
+          63.205,
+          69.033,
+          64.688,
+          66.893,
+          57.082,
+          56,
+          64.918,
+          70.986,
+          74.456,
+          88.976,
+          61.345,
+          56.376,
+          57.135,
+          59.125
+        ],
+        "simpleSamplesMs": [
+          0.237,
+          0.124,
+          0.231,
+          0.256,
+          0.15,
+          0.37,
+          0.138,
+          0.219,
+          0.186,
+          0.141,
+          0.509,
+          0.167,
+          0.279,
+          0.175,
+          0.138
+        ],
+        "compoundSamplesMs": [
+          0.121,
+          0.198,
+          0.164,
+          0.291,
+          0.204,
+          0.151,
+          0.216,
+          0.214,
+          0.118,
+          0.221,
+          0.477,
+          0.214,
+          0.164,
+          0.106,
+          0.194
+        ],
+        "noIndexMedianMs": 64.688,
+        "simpleMedianMs": 0.186,
+        "compoundMedianMs": 0.198,
+        "compoundRegressionVsSimplePercent": 6.452
+      },
+      "offset50000": {
+        "noIndexSamplesMs": [
+          133.653,
+          122.937,
+          165.654,
+          154.255,
+          255.245,
+          124.888,
+          125.983,
+          139.393,
+          140.968,
+          137.235,
+          151.742,
+          143.292,
+          137.627,
+          147.725,
+          137.94
+        ],
+        "simpleSamplesMs": [
+          6.273,
+          5.542,
+          5.288,
+          10.254,
+          6.294,
+          4.821,
+          5.034,
+          5.457,
+          5.628,
+          5.614,
+          15.465,
+          5.859,
+          5.174,
+          5.198,
+          5.096
+        ],
+        "compoundSamplesMs": [
+          5.575,
+          3.119,
+          3.254,
+          8.087,
+          3.706,
+          3.137,
+          3.406,
+          3.505,
+          3.371,
+          4.983,
+          4.168,
+          4.069,
+          2.931,
+          3.018,
+          3.219
+        ],
+        "noIndexMedianMs": 139.393,
+        "simpleMedianMs": 5.542,
+        "compoundMedianMs": 3.406,
+        "compoundSpeedupVsSimple": 1.627
+      },
+      "insert10000Rows": {
+        "noIndexSamplesMs": [
+          41.324,
+          42.365,
+          34.69,
+          37.787,
+          38.282,
+          49.078,
+          54.823,
+          58.893,
+          40.822,
+          56.537,
+          45.011,
+          38.21,
+          42.21,
+          35.842,
+          36.346
+        ],
+        "simpleSamplesMs": [
+          54.828,
+          48.465,
+          42.161,
+          45.736,
+          58.347,
+          102.65,
+          71.567,
+          64.681,
+          56.949,
+          55.432,
+          55.426,
+          46.866,
+          47.472,
+          46.171,
+          46.097
+        ],
+        "compoundSamplesMs": [
+          53.643,
+          51.835,
+          69.438,
+          44.606,
+          45.863,
+          65.229,
+          55.378,
+          56.733,
+          48.836,
+          47.771,
+          66.354,
+          47.254,
+          58.389,
+          44.03,
+          43.741
+        ],
+        "noIndexMedianMs": 41.324,
+        "simpleMedianMs": 54.828,
+        "compoundMedianMs": 51.835,
+        "simpleExtraMicrosecondsPerUserVsNoIndex": 1.3504,
+        "compoundExtraMicrosecondsPerUserVsNoIndex": 1.0511,
+        "compoundDeltaMicrosecondsPerUserVsSimple": -0.2993
+      }
+    },
+    "tenUserBursts": {
+      "firstPage": {
+        "noIndexSamplesMs": [
+          97.536,
+          83.007,
+          82.563,
+          77.801,
+          81.854,
+          80.281,
+          84.272,
+          86.625,
+          117.336,
+          91.597,
+          78.241,
+          100.035,
+          73.378,
+          76.37,
+          73.884
+        ],
+        "simpleSamplesMs": [
+          0.22,
+          0.124,
+          0.238,
+          0.371,
+          0.146,
+          0.231,
+          0.157,
+          0.612,
+          0.368,
+          0.436,
+          0.276,
+          0.133,
+          0.545,
+          0.224,
+          0.154
+        ],
+        "compoundSamplesMs": [
+          0.11,
+          0.163,
+          0.343,
+          0.156,
+          0.192,
+          0.132,
+          0.206,
+          0.24,
+          0.175,
+          0.486,
+          0.134,
+          0.158,
+          0.137,
+          0.106,
+          0.235
+        ],
+        "noIndexMedianMs": 82.563,
+        "simpleMedianMs": 0.231,
+        "compoundMedianMs": 0.163,
+        "compoundSpeedupVsSimple": 1.417
+      },
+      "offset50000": {
+        "noIndexSamplesMs": [
+          181.149,
+          185.834,
+          155.003,
+          151.478,
+          153.175,
+          139.144,
+          140.267,
+          213.158,
+          188.745,
+          190.545,
+          184.289,
+          159.779,
+          156.309,
+          160.642,
+          157.767
+        ],
+        "simpleSamplesMs": [
+          8.038,
+          8.418,
+          7.489,
+          7.892,
+          9.026,
+          7.378,
+          7.724,
+          8.3,
+          8.486,
+          11.09,
+          10.755,
+          7.569,
+          7.527,
+          7.927,
+          7.424
+        ],
+        "compoundSamplesMs": [
+          4.191,
+          3.245,
+          3.386,
+          3.44,
+          3.327,
+          3.745,
+          3.893,
+          4.017,
+          4.171,
+          4.551,
+          7.326,
+          3.198,
+          3.402,
+          3.314,
+          3.317
+        ],
+        "noIndexMedianMs": 159.779,
+        "simpleMedianMs": 7.927,
+        "compoundMedianMs": 3.44,
+        "compoundSpeedupVsSimple": 2.304
+      },
+      "insert10000Rows": {
+        "noIndexSamplesMs": [
+          56.852,
+          67.311,
+          35.277,
+          41.769,
+          38.984,
+          43.076,
+          40.612,
+          46.572,
+          41.514,
+          38.331,
+          56.728,
+          39.23,
+          36.724,
+          36.912,
+          36.015
+        ],
+        "simpleSamplesMs": [
+          75.665,
+          73.424,
+          43.871,
+          43.275,
+          43.638,
+          59.345,
+          50.214,
+          44.475,
+          40.879,
+          46.694,
+          65.48,
+          42.844,
+          44.616,
+          44.221,
+          42.984
+        ],
+        "compoundSamplesMs": [
+          48.496,
+          59.438,
+          42.891,
+          43.67,
+          45.941,
+          70.587,
+          57.743,
+          49.954,
+          48.921,
+          57.737,
+          58.111,
+          45.346,
+          49.969,
+          43.602,
+          45.851
+        ],
+        "noIndexMedianMs": 40.612,
+        "simpleMedianMs": 44.475,
+        "compoundMedianMs": 48.921,
+        "simpleExtraMicrosecondsPerUserVsNoIndex": 0.3863,
+        "compoundExtraMicrosecondsPerUserVsNoIndex": 0.8309,
+        "compoundDeltaMicrosecondsPerUserVsSimple": 0.4446
+      }
+    },
+    "correctness": {
+      "initialOrderMatchesEachRound": [
+        true,
+        true,
+        true
+      ],
+      "finalCountsMatchEachRound": [
+        true,
+        true,
+        true
+      ],
+      "finalOrderMatchesEachRound": [
+        true,
+        true,
+        true
+      ]
+    },
+    "decision": "rejected: versus the accepted narrow index, the compound index regressed the common unique-timestamp first page by 6.45%, enlarged the btree by 80.13%-327.76%, and added 0.445 us/user to burst inserts. Its 1.63x-2.30x deep-page gains do not pass the no-regression resource gate."
+  }
+}

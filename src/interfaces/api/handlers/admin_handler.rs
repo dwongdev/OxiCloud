@@ -21,7 +21,7 @@ use crate::application::dtos::settings_dto::{
     SmtpTestResultDto, StartMigrationDto, TestOidcConnectionDto, TestStorageConnectionDto,
     UpdateUserActiveDto, UpdateUserQuotaDto, UpdateUserRoleDto, VerifyMigrationDto,
 };
-use crate::application::dtos::user_dto::UserDto;
+use crate::application::dtos::user_dto::{AdminUserSummaryDto, UserDto};
 use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::plugin_ports::{LogQuery, PluginManagementPort, PluginMgmtError};
 use crate::application::ports::storage_ports::StorageUsagePort;
@@ -34,6 +34,21 @@ use crate::interfaces::errors::AppError;
 use crate::interfaces::middleware::auth::AuthUser;
 use std::sync::Arc;
 use uuid::Uuid;
+
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum AdminUsersPayload {
+    Full(Vec<UserDto>),
+    Summary(Vec<AdminUserSummaryDto>),
+}
+
+#[derive(serde::Serialize)]
+struct AdminUsersPageResponse {
+    users: AdminUsersPayload,
+    total: i64,
+    limit: i64,
+    offset: i64,
+}
 
 /// Admin API routes — all require admin role.
 pub fn admin_routes() -> Router<Arc<AppState>> {
@@ -747,7 +762,8 @@ pub async fn get_dashboard_stats(
     path = "/api/admin/users",
     params(
         ("limit" = Option<i64>, Query, description = "Max users to return (default 100, max 500)"),
-        ("offset" = Option<i64>, Query, description = "Pagination offset")
+        ("offset" = Option<i64>, Query, description = "Pagination offset"),
+        ("summary" = Option<bool>, Query, description = "Return the compact management-table projection")
     ),
     responses(
         (status = 200, description = "List of users"),
@@ -759,6 +775,7 @@ pub async fn get_dashboard_stats(
 )]
 pub async fn list_users(
     State(state): State<Arc<AppState>>,
+    auth_user: AuthUser,
     Query(query): Query<ListUsersQueryDto>,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = state
@@ -774,11 +791,31 @@ pub async fn list_users(
     // internal-only variant is used by system address book / sharee
     // search, where surfacing externals would leak identities. See
     // `auth_application_service::list_users` doc for the split.
-    let users = auth
-        .auth_application_service
-        .list_users_including_external(limit, offset)
-        .await
-        .map_err(|e| AppError::internal_error(format!("Failed to list users: {}", e)))?;
+    let users = if query.summary.unwrap_or(false) {
+        AdminUsersPayload::Summary(
+            auth.auth_application_service
+                .list_user_summaries_including_external_with_perms(
+                    state.authorization.as_ref(),
+                    auth_user.id,
+                    limit,
+                    offset,
+                )
+                .await
+                .map_err(AppError::from)?,
+        )
+    } else {
+        AdminUsersPayload::Full(
+            auth.auth_application_service
+                .list_users_including_external_with_perms(
+                    state.authorization.as_ref(),
+                    auth_user.id,
+                    limit,
+                    offset,
+                )
+                .await
+                .map_err(AppError::from)?,
+        )
+    };
 
     let total = auth
         .auth_application_service
@@ -786,12 +823,12 @@ pub async fn list_users(
         .await
         .unwrap_or(0);
 
-    Ok(Json(serde_json::json!({
-        "users": users,
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-    })))
+    Ok(Json(AdminUsersPageResponse {
+        users,
+        total,
+        limit,
+        offset,
+    }))
 }
 
 /// GET /api/admin/users/:id — get single user

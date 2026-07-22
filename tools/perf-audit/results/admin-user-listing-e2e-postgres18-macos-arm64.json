@@ -1,0 +1,272 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-22",
+  "benchmark": "admin user listing full component-path A/B",
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "cpu": "Apple M4 Pro",
+    "postgresImage": "postgres:18.2-alpine3.23",
+    "container": "oxicloud-postgres-1",
+    "client": "release Rust/sqlx harness over the local container bridge"
+  },
+  "scope": {
+    "historical": "full-row SQL -> full DTO -> COUNT SQL -> Serde JSON",
+    "candidate": "hot Moka user-flags lookup -> system-admin policy check -> narrow summary SQL -> summary DTO -> COUNT SQL -> Serde JSON",
+    "commonWork": "one sqlx connection, identical 100-user ordering/count/pagination, identical temporary fixture and JSON page envelope",
+    "excluded": "Axum routing, JWT parsing, socket-level HTTP framing and browser parsing; the historical side also omits the old handler's intermediate serde_json::Value materialization, making its baseline optimistic. This is a conservative component-path gate, not a whole HTTP-stack claim"
+  },
+  "method": {
+    "users": 100,
+    "limit": 100,
+    "offset": 0,
+    "minimalProfile": "small ordinary account-detail fields",
+    "heavyProfile": "512 KiB image and 8 KiB UI-preference payload per user",
+    "timing": "interleaved/alternating paths after three warmups; isolated from other benchmark agents",
+    "rss": "three fresh client processes per path/profile using /usr/bin/time -l; process setup is common and included in max RSS",
+    "databaseState": "per-process PostgreSQL TEMP table; no persistent rows or indexes"
+  },
+  "minimal": {
+    "timing": {
+      "samples": 31,
+      "warmups": 3,
+      "order": "interleaved and alternated",
+      "historicalFullSamplesMs": [
+        4.4581669999999995,
+        0.8505,
+        0.9585,
+        0.808334,
+        0.865125,
+        0.867916,
+        0.8726670000000001,
+        0.937375,
+        1.013833,
+        1.114166,
+        5.163166,
+        206.010333,
+        208.088916,
+        4.949625,
+        1.5272919999999999,
+        2.3782080000000003,
+        0.9502090000000001,
+        8.851790999999999,
+        3.048167,
+        1.546792,
+        1.5305410000000002,
+        1.380125,
+        1.295833,
+        1.279625,
+        1.33425,
+        0.9305410000000001,
+        8.786916,
+        1.217792,
+        5.245125,
+        0.967917,
+        1.1993749999999999
+      ],
+      "candidateSummaryHotAuthzSamplesMs": [
+        1.0223330000000002,
+        0.7933330000000001,
+        0.829875,
+        0.793083,
+        0.86025,
+        0.7274160000000001,
+        5.1122499999999995,
+        0.9088339999999999,
+        0.707833,
+        0.746458,
+        0.8647079999999999,
+        10.13475,
+        1.094375,
+        206.91925,
+        1.455792,
+        1.13725,
+        0.791542,
+        4.578875,
+        1.0007499999999998,
+        1.060708,
+        1.033833,
+        0.9833330000000001,
+        1.194166,
+        0.917292,
+        0.966334,
+        5.308375,
+        0.965333,
+        1.058333,
+        0.804084,
+        0.829,
+        0.885375
+      ],
+      "historicalFullMedianMs": 1.295833,
+      "candidateSummaryHotAuthzMedianMs": 0.966334,
+      "medianSpeedup": 1.3409783780763174,
+      "historicalFullP95Ms": 206.010333,
+      "candidateSummaryHotAuthzP95Ms": 10.13475,
+      "p95Speedup": 20.327125286760896,
+      "historicalJsonBytes": 43759,
+      "candidateJsonBytes": 28726,
+      "byteReductionPercent": 34.35407573299207,
+      "summaryProjectionEqual": true,
+      "totalEqual": true
+    },
+    "freshProcessMemory": {
+      "runsPerMode": 3,
+      "historical": [
+        {
+          "maxRssBytes": 7782400,
+          "responseElapsedMs": 1.56875,
+          "jsonBytes": 43759,
+          "exitCode": 0
+        },
+        {
+          "maxRssBytes": 7782400,
+          "responseElapsedMs": 204.553417,
+          "jsonBytes": 43759,
+          "exitCode": 0
+        },
+        {
+          "maxRssBytes": 7782400,
+          "responseElapsedMs": 2.007917,
+          "jsonBytes": 43759,
+          "exitCode": 0
+        }
+      ],
+      "candidate": [
+        {
+          "maxRssBytes": 7651328,
+          "responseElapsedMs": 3.949834,
+          "jsonBytes": 28726,
+          "exitCode": 0
+        },
+        {
+          "maxRssBytes": 7667712,
+          "responseElapsedMs": 1.091208,
+          "jsonBytes": 28726,
+          "exitCode": 0
+        },
+        {
+          "maxRssBytes": 7684096,
+          "responseElapsedMs": 0.982916,
+          "jsonBytes": 28726,
+          "exitCode": 0
+        }
+      ],
+      "historicalMedianMaxRssBytes": 7782400,
+      "candidateMedianMaxRssBytes": 7667712,
+      "candidateMinusHistoricalRssBytes": -114688,
+      "rssReductionPercent": 1.473684210526316,
+      "historicalColdMedianElapsedMs": 2.007917,
+      "candidateColdMedianElapsedMs": 1.091208,
+      "coldMedianSpeedup": 1.8400863996598267
+    }
+  },
+  "heavy": {
+    "timing": {
+      "samples": 11,
+      "warmups": 3,
+      "order": "interleaved and alternated",
+      "historicalFullSamplesMs": [
+        3519.616458,
+        4157.738708,
+        870.990208,
+        301.8805,
+        1296.212125,
+        1141.4217500000002,
+        60.022708,
+        297.898916,
+        2261.6492089999997,
+        1438.1172920000001,
+        398.208167
+      ],
+      "candidateSummaryHotAuthzSamplesMs": [
+        4.283292,
+        0.9297500000000001,
+        0.933166,
+        0.719,
+        219.19591699999998,
+        16.399291,
+        0.919209,
+        0.654208,
+        0.965792,
+        5.121874999999999,
+        1.2095
+      ],
+      "historicalFullMedianMs": 1141.4217500000002,
+      "candidateSummaryHotAuthzMedianMs": 0.965792,
+      "medianSpeedup": 1181.8504916172428,
+      "historicalFullP95Ms": 4157.738708,
+      "candidateSummaryHotAuthzP95Ms": 219.19591699999998,
+      "p95Speedup": 18.96813939285192,
+      "historicalJsonBytes": 53306743,
+      "candidateJsonBytes": 28726,
+      "byteReductionPercent": 99.9461118830689,
+      "summaryProjectionEqual": true,
+      "totalEqual": true
+    },
+    "freshProcessMemory": {
+      "runsPerMode": 3,
+      "historical": [
+        {
+          "maxRssBytes": 151683072,
+          "responseElapsedMs": 4506.601708,
+          "jsonBytes": 53306743,
+          "exitCode": 0
+        },
+        {
+          "maxRssBytes": 144162816,
+          "responseElapsedMs": 2585.629333,
+          "jsonBytes": 53306743,
+          "exitCode": 0
+        },
+        {
+          "maxRssBytes": 146292736,
+          "responseElapsedMs": 6410.820542,
+          "jsonBytes": 53306743,
+          "exitCode": 0
+        }
+      ],
+      "candidate": [
+        {
+          "maxRssBytes": 7667712,
+          "responseElapsedMs": 1.080875,
+          "jsonBytes": 28726,
+          "exitCode": 0
+        },
+        {
+          "maxRssBytes": 7651328,
+          "responseElapsedMs": 1.061042,
+          "jsonBytes": 28726,
+          "exitCode": 0
+        },
+        {
+          "maxRssBytes": 7667712,
+          "responseElapsedMs": 2.09175,
+          "jsonBytes": 28726,
+          "exitCode": 0
+        }
+      ],
+      "historicalMedianMaxRssBytes": 146292736,
+      "candidateMedianMaxRssBytes": 7667712,
+      "candidateMinusHistoricalRssBytes": -138625024,
+      "rssReductionPercent": 94.75865158472394,
+      "historicalColdMedianElapsedMs": 4506.601708,
+      "candidateColdMedianElapsedMs": 1.080875,
+      "coldMedianSpeedup": 4169.401372036545
+    }
+  },
+  "correctness": {
+    "exactRenderedFieldProjectionAndOrder": true,
+    "exactTotalCount": true,
+    "hotAuthorizationFlagsAsserted": {
+      "role": "admin",
+      "isExternal": false,
+      "active": true
+    },
+    "allProcessesExitedSuccessfully": true
+  },
+  "decision": {
+    "status": "accepted",
+    "productionVariant": "summary=true compact admin listing with authoritative service-layer AuthZ",
+    "reason": "The representative minimal profile improved median component latency 1.296 -> 0.966 ms, reduced JSON 34.35%, and saved 112 KiB median max RSS. The heavy profile improved median latency 1141.422 -> 0.966 ms, reduced JSON 99.946%, and saved 138,625,024 bytes median max RSS. Exact projected fields, order, and counts matched."
+  }
+}

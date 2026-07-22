@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-21T20:30:43.534Z",
+  "decision": "accepted; repeated tiny-case gate improved with identical output",
+  "environment": {
+    "node": "v26.5.0",
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M4 Pro",
+    "logicalCpus": 14,
+    "gcExposed": true
+  },
+  "config": {
+    "suite": "progress",
+    "warmup": 7,
+    "samples": 41,
+    "queueCounts": [
+      64,
+      256,
+      1024,
+      10000,
+      50000
+    ],
+    "progressCases": [
+      {
+        "items": 1,
+        "updates": 100
+      }
+    ],
+    "hashCounts": [
+      1000,
+      10000,
+      10001,
+      25000
+    ],
+    "dedupBatchSize": 10000,
+    "dedupConcurrency": 4,
+    "serverLatencyMs": 0,
+    "modeledFileBytes": 65536
+  },
+  "notes": {
+    "heap": "Median heap delta is indicative only; timing is the primary microbenchmark metric.",
+    "dedup": "The current >10k path is faster only because it is rejected and returns no owned hashes."
+  },
+  "suites": {
+    "progress": [
+      {
+        "items": 1,
+        "updates": 100,
+        "repetitions": 1000,
+        "normalizedMedianUsPerRun": {
+          "current": 0.7972500000000764,
+          "candidate": 0.28862500000002456
+        },
+        "current": {
+          "sampleCount": 41,
+          "medianMs": 0.7972500000000764,
+          "p95Ms": 14.158166000000165,
+          "minMs": 0.4542079999998805,
+          "maxMs": 34.321249999999964,
+          "medianHeapDeltaBytes": 1768864,
+          "medianRssDeltaBytes": 0
+        },
+        "candidate": {
+          "sampleCount": 41,
+          "medianMs": 0.28862500000002456,
+          "p95Ms": 6.337833000000046,
+          "minMs": 0.2605829999999969,
+          "maxMs": 20.904042000000004,
+          "medianHeapDeltaBytes": 168848,
+          "medianRssDeltaBytes": 0
+        },
+        "speedup": 2.7622347336509607,
+        "representative": {
+          "current": {
+            "checksum": 8562000,
+            "lastPercent": 22,
+            "finalSum": 215.8203125
+          },
+          "candidate": {
+            "checksum": 8562000,
+            "lastPercent": 22,
+            "finalSum": 215.8203125
+          }
+        }
+      }
+    ]
+  },
+  "blackhole": 0
+}

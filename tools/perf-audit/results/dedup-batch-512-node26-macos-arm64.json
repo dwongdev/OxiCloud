@@ -1,0 +1,99 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-21T20:11:34.135Z",
+  "decision": "evidence only; the above-10000 batching candidate was rejected by the full workflow gate and reverted",
+  "environment": {
+    "node": "v26.5.0",
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M4 Pro",
+    "logicalCpus": 14,
+    "gcExposed": true
+  },
+  "config": {
+    "suite": "dedup",
+    "warmup": 3,
+    "samples": 15,
+    "queueCounts": [
+      10000,
+      50000
+    ],
+    "progressCases": [
+      {
+        "items": 1000,
+        "updates": 10000
+      },
+      {
+        "items": 10000,
+        "updates": 5000
+      },
+      {
+        "items": 20000,
+        "updates": 5000
+      }
+    ],
+    "hashCounts": [
+      25000
+    ],
+    "dedupBatchSize": 512,
+    "dedupConcurrency": 4,
+    "serverLatencyMs": 0,
+    "modeledFileBytes": 65536
+  },
+  "notes": {
+    "heap": "Median heap delta is indicative only; timing is the primary microbenchmark metric.",
+    "dedup": "The current >10k path is faster only because it is rejected and returns no owned hashes."
+  },
+  "suites": {
+    "dedup": [
+      {
+        "hashCount": 25000,
+        "current": {
+          "sampleCount": 15,
+          "medianMs": 21.21845900000062,
+          "p95Ms": 263.2436670000002,
+          "minMs": 5.763707999999951,
+          "maxMs": 263.2436670000002,
+          "medianHeapDeltaBytes": 4066384,
+          "medianRssDeltaBytes": 1687552
+        },
+        "candidate": {
+          "sampleCount": 15,
+          "medianMs": 294.9569169999995,
+          "p95Ms": 607.8072920000004,
+          "minMs": 39.99287500000037,
+          "maxMs": 607.8072920000004,
+          "medianHeapDeltaBytes": 16555112,
+          "medianRssDeltaBytes": 49152
+        },
+        "speedup": 0.07193748570405845,
+        "representative": {
+          "current": {
+            "checksum": 0,
+            "ownedCount": 0,
+            "contentBytesAvoided": 0,
+            "requests": 1,
+            "acceptedRequests": 0,
+            "rejectedRequests": 1,
+            "requestBytes": 1675012,
+            "responseBytes": 27,
+            "maxBatchHashes": 25000
+          },
+          "candidate": {
+            "checksum": 156237500,
+            "ownedCount": 12500,
+            "contentBytesAvoided": 819200000,
+            "requests": 49,
+            "acceptedRequests": 49,
+            "rejectedRequests": 0,
+            "requestBytes": 1675588,
+            "responseBytes": 838039,
+            "maxBatchHashes": 512
+          }
+        }
+      }
+    ]
+  },
+  "blackhole": 0
+}

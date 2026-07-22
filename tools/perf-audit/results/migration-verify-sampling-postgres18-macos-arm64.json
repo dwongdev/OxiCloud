@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-21",
+  "environment": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "cpu": "Apple M4 Pro",
+    "postgres": "18.2 local Docker container"
+  },
+  "fixture": {
+    "blobs": 1000000,
+    "sampleSize": 100,
+    "hashShape": "two concatenated MD5 hex digests",
+    "middleSampleCount": 100,
+    "wraparoundSampleCount": 100
+  },
+  "orderByRandom": {
+    "samplesMs": [111.796, 103.906, 93.862, 88.090, 100.442],
+    "medianMs": 100.442
+  },
+  "indexedHashRing": {
+    "samplesMs": [0.474, 0.323, 0.376, 0.267, 0.491],
+    "medianMs": 0.376
+  },
+  "speedup": 267.13,
+  "statisticalReview": {
+    "orderedHashFailureRangePercent": 1,
+    "contiguousWindowDetectionProbabilityPercent": 1,
+    "independentSamplesDetectionProbabilityPercent": 63.4,
+    "reason": "A single random-pivot successor window is gap-biased and its 100 rows are correlated. It does not preserve ORDER BY random() detection power for localized or prefix/backend failures."
+  },
+  "decision": "rejected; production reverted despite 267.13x query speed because verification semantics regressed"
+}

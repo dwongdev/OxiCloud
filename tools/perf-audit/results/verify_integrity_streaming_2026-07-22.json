@@ -1,0 +1,128 @@
+{
+  "benchmark": "verify_integrity_sqlx_streaming",
+  "date": "2026-07-22",
+  "decision": {
+    "status": "rejected",
+    "reason": "The bounded producer/channel variant reduced RSS by 74.23% and accelerated phase 1, but the same-round full-method median was 4.17% slower than the historical implementation. No streaming code was applied to production."
+  },
+  "fixture": {
+    "database": "fresh disposable PostgreSQL database",
+    "manifest_rows": 1000,
+    "manifest_occurrences": 250000,
+    "blob_rows": 250000,
+    "query_count": {
+      "phase_one": 1,
+      "full_method": 2
+    },
+    "prefetch_rows": 16,
+    "normal_prefetch_occurrence_bound": 4000,
+    "window_occurrences": 256,
+    "large_manifest_occurrences": 1024,
+    "samples_per_mode": 7,
+    "fresh_processes": true,
+    "rotated_order": true
+  },
+  "semantic_gates": [
+    {
+      "scenario": "empty",
+      "rows": 0,
+      "phase_calls": [0, 0, 0, 0],
+      "full_calls": [0, 0, 0, 0],
+      "issues_equal": true
+    },
+    {
+      "scenario": "one",
+      "rows": 1,
+      "phase_calls": [1, 1, 1, 1],
+      "full_calls": [2, 2, 2, 2],
+      "issues_equal": true
+    },
+    {
+      "scenario": "four",
+      "rows": 1,
+      "phase_calls": [4, 4, 4, 4],
+      "full_calls": [8, 8, 8, 8],
+      "issues_equal": true
+    },
+    {
+      "scenario": "semantics_with_malformed",
+      "rows": 4,
+      "issues": 8,
+      "checksum": 1417964566409558305,
+      "phase_calls_historical_materialized_direct_prefetch": [6, 4, 4, 4],
+      "full_calls_historical_materialized_direct_prefetch": [10, 8, 8, 8],
+      "malformed_probe_suppressed": true,
+      "issues_equal_and_ordered": true
+    },
+    {
+      "scenario": "shared",
+      "phase_calls_historical_materialized_direct_prefetch": [512, 64, 64, 64],
+      "full_calls_historical_materialized_direct_prefetch": [544, 96, 96, 96],
+      "issues_equal": true
+    },
+    {
+      "scenario": "unique",
+      "phase_calls": [256, 256, 256, 256],
+      "full_calls": [512, 512, 512, 512],
+      "issues_equal": true
+    },
+    {
+      "scenario": "large_manifest_sliced",
+      "phase_calls": [1024, 1024, 1024, 1024],
+      "full_calls": [2048, 2048, 2048, 2048],
+      "issues_equal": true
+    }
+  ],
+  "final_same_round_abc_medians": {
+    "historical": {
+      "phase_ms": 638.057167,
+      "full_ms": 1146.865750,
+      "max_rss_bytes": 32620544
+    },
+    "materialized_owned": {
+      "phase_ms": 754.104000,
+      "full_ms": 1507.712417,
+      "max_rss_bytes": 32751616
+    },
+    "streaming_prefetch": {
+      "phase_ms": 370.620500,
+      "full_ms": 1194.661583,
+      "max_rss_bytes": 8404992
+    },
+    "prefetch_vs_historical": {
+      "phase_speedup": 1.721592,
+      "full_speedup": 0.959992,
+      "full_regression_percent": 4.1675,
+      "rss_reduction_percent": 74.2341
+    },
+    "prefetch_vs_materialized_owned": {
+      "phase_speedup": 2.034707,
+      "full_speedup": 1.262041,
+      "rss_reduction_percent": 74.3372
+    }
+  },
+  "raw_final_abc_samples": {
+    "historical": {
+      "phase_ms": [638.057167, 302.385875, 473.900417, 774.089833, 632.479584, 1075.826334, 1435.878333],
+      "full_ms": [1146.865750, 630.661958, 1089.854458, 1794.876250, 885.336625, 1857.877417, 1657.854292],
+      "max_rss_bytes": [32669696, 32538624, 32620544, 32636928, 32620544, 32669696, 32604160]
+    },
+    "materialized_owned": {
+      "phase_ms": [299.143625, 704.092708, 657.428250, 1017.416708, 1391.611125, 754.104000, 1051.222917],
+      "full_ms": [774.324375, 1370.037708, 1230.500333, 1860.589583, 1635.081625, 1507.712417, 1900.343500],
+      "max_rss_bytes": [32833536, 32751616, 32899072, 32800768, 32555008, 32555008, 32718848]
+    },
+    "streaming_prefetch": {
+      "phase_ms": [276.988833, 370.693334, 1387.695584, 370.620500, 219.138375, 637.540250, 332.878083],
+      "full_ms": [581.776666, 870.599875, 1666.224584, 1194.661583, 923.753250, 2379.057125, 1565.068625],
+      "max_rss_bytes": [8339456, 8404992, 8617984, 8667136, 8552448, 8372224, 8290304]
+    }
+  },
+  "connection_lifecycle": {
+    "pool_max_connections": 1,
+    "held_during_nonempty_stream": true,
+    "released_before_phase_two": true,
+    "extra_queries": 0,
+    "temporary_database_removed": true
+  }
+}

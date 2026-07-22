@@ -1,0 +1,110 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-21T20:31:30.847Z",
+  "decision": "evidence only; confirms the unchanged <=10000 fast path, while the above-10000 batching candidate was rejected and reverted",
+  "environment": {
+    "node": "v26.5.0",
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M4 Pro",
+    "logicalCpus": 14,
+    "gcExposed": true
+  },
+  "config": {
+    "suite": "dedup",
+    "warmup": 7,
+    "samples": 41,
+    "queueCounts": [
+      64,
+      256,
+      1024,
+      10000,
+      50000
+    ],
+    "progressCases": [
+      {
+        "items": 1,
+        "updates": 100
+      },
+      {
+        "items": 10,
+        "updates": 500
+      },
+      {
+        "items": 100,
+        "updates": 5000
+      },
+      {
+        "items": 1000,
+        "updates": 10000
+      },
+      {
+        "items": 10000,
+        "updates": 5000
+      }
+    ],
+    "hashCounts": [
+      1000
+    ],
+    "dedupBatchSize": 10000,
+    "dedupConcurrency": 4,
+    "serverLatencyMs": 0,
+    "modeledFileBytes": 65536
+  },
+  "notes": {
+    "heap": "Median heap delta is indicative only; timing is the primary microbenchmark metric.",
+    "dedup": "The current >10k path is faster only because it is rejected and returns no owned hashes."
+  },
+  "suites": {
+    "dedup": [
+      {
+        "hashCount": 1000,
+        "current": {
+          "sampleCount": 41,
+          "medianMs": 5.374666999999988,
+          "p95Ms": 30.969750000000204,
+          "minMs": 1.3017919999999776,
+          "maxMs": 59.26037499999984,
+          "medianHeapDeltaBytes": 575104,
+          "medianRssDeltaBytes": 0
+        },
+        "candidate": {
+          "sampleCount": 41,
+          "medianMs": 4.9794579999999655,
+          "p95Ms": 42.28670899999997,
+          "minMs": 1.1001249999999345,
+          "maxMs": 125.80937499999999,
+          "medianHeapDeltaBytes": 574760,
+          "medianRssDeltaBytes": 0
+        },
+        "speedup": 1.0793678749775628,
+        "representative": {
+          "current": {
+            "checksum": 249500,
+            "ownedCount": 500,
+            "contentBytesAvoided": 32768000,
+            "requests": 1,
+            "acceptedRequests": 1,
+            "rejectedRequests": 0,
+            "requestBytes": 67012,
+            "responseBytes": 33511,
+            "maxBatchHashes": 1000
+          },
+          "candidate": {
+            "checksum": 249500,
+            "ownedCount": 500,
+            "contentBytesAvoided": 32768000,
+            "requests": 1,
+            "acceptedRequests": 1,
+            "rejectedRequests": 0,
+            "requestBytes": 67012,
+            "responseBytes": 33511,
+            "maxBatchHashes": 1000
+          }
+        }
+      }
+    ]
+  },
+  "blackhole": 0
+}

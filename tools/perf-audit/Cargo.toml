@@ -1,0 +1,53 @@
+[package]
+name = "oxicloud-perf-audit"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "gc_manifest_batch"
+path = "gc_manifest_batch.rs"
+
+[[bin]]
+name = "verify_integrity_phase1"
+path = "verify_integrity_phase1.rs"
+
+[[bin]]
+name = "verify_integrity_borrowed"
+path = "verify_integrity_borrowed.rs"
+
+[[bin]]
+name = "verify_integrity_streaming"
+path = "verify_integrity_streaming.rs"
+
+[[bin]]
+name = "migration_workset"
+path = "migration_workset.rs"
+
+[[bin]]
+name = "cached_range_ab"
+path = "cached_range_ab.rs"
+
+[[bin]]
+name = "admin_user_listing_e2e"
+path = "admin_user_listing_e2e.rs"
+
+[dependencies]
+chrono = { version = "0.4", features = ["serde"] }
+foldhash = "0.2"
+futures = "0.3.32"
+moka = { version = "0.12.15", features = ["future"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sqlx = { version = "0.8.6", default-features = false, features = ["chrono", "json", "postgres", "runtime-tokio", "uuid"] }
+tokio = { version = "1.52.3", features = ["fs", "macros", "rt-multi-thread", "sync", "time"] }
+uuid = { version = "1", features = ["serde", "v4"] }
+
+# This audit utility is intentionally independent of the repository package:
+# compiling it must not build or link the OxiCloud server just to issue SQL.
+[workspace]
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+opt-level = 3

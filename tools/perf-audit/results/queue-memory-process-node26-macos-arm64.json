@@ -1,0 +1,693 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-21T21:43:54.899Z",
+  "environment": {
+    "node": "v26.5.0",
+    "platform": "darwin",
+    "arch": "arm64"
+  },
+  "fixture": {
+    "chunks": 100000,
+    "samples": 5,
+    "uploadBatchBytes": 8388608
+  },
+  "note": "Each row is a fresh process; maxRSS is process.resourceUsage().maxRSS. The ordered chunks table remains live through final GC.",
+  "decision": {
+    "status": "accepted_by_explicit_user_tradeoff",
+    "productionMode": "cursor-clear-4096",
+    "reason": "The candidate is not Pareto-superior: the user explicitly accepted the measured RSS cost in exchange for the CPU/wall-time reduction.",
+    "currentVsProduction": {
+      "prefilled": {
+        "wallSpeedup": 246.783,
+        "maxRssDeltaBytes": 458752,
+        "peakRssDeltaDeltaBytes": 131072,
+        "retainedRssDeltaDeltaBytes": 458752,
+        "retainedHeapDeltaDeltaBytes": -3080
+      },
+      "streamingAhead": {
+        "wallSpeedup": 37.137,
+        "maxRssDeltaBytes": 491520,
+        "peakRssDeltaDeltaBytes": 507904,
+        "retainedRssDeltaDeltaBytes": 1032192,
+        "retainedHeapDeltaDeltaBytes": -3576
+      },
+      "streamingBalanced": {
+        "wallSpeedup": 1.184,
+        "maxRssDeltaBytes": 114688,
+        "peakRssDeltaDeltaBytes": 163840,
+        "retainedRssDeltaDeltaBytes": 0,
+        "retainedHeapDeltaDeltaBytes": 3168
+      }
+    }
+  },
+  "results": [
+    {
+      "shape": "prefilled",
+      "mode": "current-shift",
+      "wallMedianMs": 3526.774,
+      "maxRssBytesMedian": 71516160,
+      "peakRssDeltaBytesMedian": 606208,
+      "retainedRssDeltaBytesMedian": 180224,
+      "retainedHeapDeltaBytesMedian": 265536,
+      "maxRssSamplesBytes": [
+        71335936,
+        71516160,
+        71974912,
+        71368704,
+        72220672
+      ],
+      "peakRssDeltaSamplesBytes": [
+        557056,
+        81920,
+        606208,
+        622592,
+        622592
+      ],
+      "compactions": 0
+    },
+    {
+      "shape": "prefilled",
+      "mode": "cursor-clear-1024",
+      "wallMedianMs": 11.252,
+      "maxRssBytesMedian": 71745536,
+      "peakRssDeltaBytesMedian": 606208,
+      "retainedRssDeltaBytesMedian": 475136,
+      "retainedHeapDeltaBytesMedian": 262240,
+      "maxRssSamplesBytes": [
+        71172096,
+        72105984,
+        71974912,
+        71745536,
+        71680000
+      ],
+      "peakRssDeltaSamplesBytes": [
+        671744,
+        1015808,
+        540672,
+        606208,
+        540672
+      ],
+      "compactions": 7
+    },
+    {
+      "shape": "prefilled",
+      "mode": "cursor-clear-4096",
+      "wallMedianMs": 14.291,
+      "maxRssBytesMedian": 71974912,
+      "peakRssDeltaBytesMedian": 737280,
+      "retainedRssDeltaBytesMedian": 638976,
+      "retainedHeapDeltaBytesMedian": 262456,
+      "maxRssSamplesBytes": [
+        71991296,
+        71516160,
+        70926336,
+        71974912,
+        72007680
+      ],
+      "peakRssDeltaSamplesBytes": [
+        933888,
+        622592,
+        720896,
+        737280,
+        802816
+      ],
+      "compactions": 5
+    },
+    {
+      "shape": "prefilled",
+      "mode": "cursor-clear-16384",
+      "wallMedianMs": 13.354,
+      "maxRssBytesMedian": 71794688,
+      "peakRssDeltaBytesMedian": 573440,
+      "retainedRssDeltaBytesMedian": 262144,
+      "retainedHeapDeltaBytesMedian": 262264,
+      "maxRssSamplesBytes": [
+        71794688,
+        72417280,
+        71909376,
+        71434240,
+        71794688
+      ],
+      "peakRssDeltaSamplesBytes": [
+        573440,
+        720896,
+        524288,
+        573440,
+        638976
+      ],
+      "compactions": 3
+    },
+    {
+      "shape": "prefilled",
+      "mode": "cursor-no-clear-4096",
+      "wallMedianMs": 22.188,
+      "maxRssBytesMedian": 71942144,
+      "peakRssDeltaBytesMedian": 737280,
+      "retainedRssDeltaBytesMedian": 589824,
+      "retainedHeapDeltaBytesMedian": 262432,
+      "maxRssSamplesBytes": [
+        71942144,
+        73351168,
+        71335936,
+        71647232,
+        72433664
+      ],
+      "peakRssDeltaSamplesBytes": [
+        786432,
+        802816,
+        737280,
+        622592,
+        720896
+      ],
+      "compactions": 5
+    },
+    {
+      "shape": "prefilled",
+      "mode": "cursor-splice-4096",
+      "wallMedianMs": 11.975,
+      "maxRssBytesMedian": 72417280,
+      "peakRssDeltaBytesMedian": 1589248,
+      "retainedRssDeltaBytesMedian": 1392640,
+      "retainedHeapDeltaBytesMedian": 262456,
+      "maxRssSamplesBytes": [
+        72646656,
+        72220672,
+        72269824,
+        72417280,
+        72679424
+      ],
+      "peakRssDeltaSamplesBytes": [
+        1441792,
+        1605632,
+        1474560,
+        1589248,
+        1589248
+      ],
+      "compactions": 5
+    },
+    {
+      "shape": "prefilled",
+      "mode": "cursor-splice-16384",
+      "wallMedianMs": 9.151,
+      "maxRssBytesMedian": 72286208,
+      "peakRssDeltaBytesMedian": 1441792,
+      "retainedRssDeltaBytesMedian": 1441792,
+      "retainedHeapDeltaBytesMedian": 263584,
+      "maxRssSamplesBytes": [
+        72138752,
+        75939840,
+        71516160,
+        72318976,
+        72286208
+      ],
+      "peakRssDeltaSamplesBytes": [
+        1310720,
+        1474560,
+        1441792,
+        1441792,
+        1294336
+      ],
+      "compactions": 3
+    },
+    {
+      "shape": "prefilled",
+      "mode": "cursor-slice-4096",
+      "wallMedianMs": 9.405,
+      "maxRssBytesMedian": 72548352,
+      "peakRssDeltaBytesMedian": 1540096,
+      "retainedRssDeltaBytesMedian": 1540096,
+      "retainedHeapDeltaBytesMedian": 262456,
+      "maxRssSamplesBytes": [
+        72187904,
+        72548352,
+        72744960,
+        72843264,
+        72286208
+      ],
+      "peakRssDeltaSamplesBytes": [
+        1556480,
+        1540096,
+        1556480,
+        1523712,
+        1523712
+      ],
+      "compactions": 5
+    },
+    {
+      "shape": "prefilled",
+      "mode": "cursor-reset-4096",
+      "wallMedianMs": 14.182,
+      "maxRssBytesMedian": 71729152,
+      "peakRssDeltaBytesMedian": 704512,
+      "retainedRssDeltaBytesMedian": 475136,
+      "retainedHeapDeltaBytesMedian": 261768,
+      "maxRssSamplesBytes": [
+        71778304,
+        71729152,
+        71696384,
+        71581696,
+        71761920
+      ],
+      "peakRssDeltaSamplesBytes": [
+        999424,
+        638976,
+        737280,
+        704512,
+        655360
+      ],
+      "compactions": 5
+    },
+    {
+      "shape": "streaming-ahead",
+      "mode": "current-shift",
+      "wallMedianMs": 616.473,
+      "maxRssBytesMedian": 74153984,
+      "peakRssDeltaBytesMedian": 3948544,
+      "retainedRssDeltaBytesMedian": 4145152,
+      "retainedHeapDeltaBytesMedian": 1066792,
+      "maxRssSamplesBytes": [
+        74219520,
+        76283904,
+        74153984,
+        73383936,
+        74006528
+      ],
+      "peakRssDeltaSamplesBytes": [
+        3997696,
+        3964928,
+        3850240,
+        3948544,
+        3932160
+      ],
+      "compactions": 0
+    },
+    {
+      "shape": "streaming-ahead",
+      "mode": "cursor-clear-1024",
+      "wallMedianMs": 12.093,
+      "maxRssBytesMedian": 74661888,
+      "peakRssDeltaBytesMedian": 4374528,
+      "retainedRssDeltaBytesMedian": 4915200,
+      "retainedHeapDeltaBytesMedian": 1063520,
+      "maxRssSamplesBytes": [
+        73924608,
+        74661888,
+        74235904,
+        74809344,
+        74727424
+      ],
+      "peakRssDeltaSamplesBytes": [
+        4194304,
+        4374528,
+        4390912,
+        4308992,
+        4505600
+      ],
+      "compactions": 7
+    },
+    {
+      "shape": "streaming-ahead",
+      "mode": "cursor-clear-4096",
+      "wallMedianMs": 16.6,
+      "maxRssBytesMedian": 74645504,
+      "peakRssDeltaBytesMedian": 4456448,
+      "retainedRssDeltaBytesMedian": 5177344,
+      "retainedHeapDeltaBytesMedian": 1063216,
+      "maxRssSamplesBytes": [
+        74645504,
+        74334208,
+        73891840,
+        74678272,
+        75120640
+      ],
+      "peakRssDeltaSamplesBytes": [
+        4440064,
+        4505600,
+        4456448,
+        4407296,
+        4489216
+      ],
+      "compactions": 5
+    },
+    {
+      "shape": "streaming-ahead",
+      "mode": "cursor-clear-16384",
+      "wallMedianMs": 19.843,
+      "maxRssBytesMedian": 74612736,
+      "peakRssDeltaBytesMedian": 4358144,
+      "retainedRssDeltaBytesMedian": 5242880,
+      "retainedHeapDeltaBytesMedian": 1063784,
+      "maxRssSamplesBytes": [
+        75186176,
+        74350592,
+        74760192,
+        74465280,
+        74612736
+      ],
+      "peakRssDeltaSamplesBytes": [
+        4653056,
+        4390912,
+        4308992,
+        4325376,
+        4358144
+      ],
+      "compactions": 3
+    },
+    {
+      "shape": "streaming-ahead",
+      "mode": "cursor-no-clear-4096",
+      "wallMedianMs": 16.406,
+      "maxRssBytesMedian": 74629120,
+      "peakRssDeltaBytesMedian": 4390912,
+      "retainedRssDeltaBytesMedian": 5423104,
+      "retainedHeapDeltaBytesMedian": 1063640,
+      "maxRssSamplesBytes": [
+        74530816,
+        74940416,
+        74629120,
+        74645504,
+        74383360
+      ],
+      "peakRssDeltaSamplesBytes": [
+        4489216,
+        4489216,
+        4325376,
+        4374528,
+        4390912
+      ],
+      "compactions": 5
+    },
+    {
+      "shape": "streaming-ahead",
+      "mode": "cursor-splice-4096",
+      "wallMedianMs": 12.952,
+      "maxRssBytesMedian": 75218944,
+      "peakRssDeltaBytesMedian": 5292032,
+      "retainedRssDeltaBytesMedian": 5718016,
+      "retainedHeapDeltaBytesMedian": 1063216,
+      "maxRssSamplesBytes": [
+        75087872,
+        75382784,
+        75218944,
+        75317248,
+        75038720
+      ],
+      "peakRssDeltaSamplesBytes": [
+        5292032,
+        5210112,
+        5308416,
+        5242880,
+        5341184
+      ],
+      "compactions": 5
+    },
+    {
+      "shape": "streaming-ahead",
+      "mode": "cursor-splice-16384",
+      "wallMedianMs": 10.851,
+      "maxRssBytesMedian": 75661312,
+      "peakRssDeltaBytesMedian": 5210112,
+      "retainedRssDeltaBytesMedian": 5914624,
+      "retainedHeapDeltaBytesMedian": 1063704,
+      "maxRssSamplesBytes": [
+        76627968,
+        75399168,
+        75661312,
+        75726848,
+        75022336
+      ],
+      "peakRssDeltaSamplesBytes": [
+        5357568,
+        5210112,
+        5193728,
+        5193728,
+        5275648
+      ],
+      "compactions": 3
+    },
+    {
+      "shape": "streaming-ahead",
+      "mode": "cursor-slice-4096",
+      "wallMedianMs": 11.689,
+      "maxRssBytesMedian": 75792384,
+      "peakRssDeltaBytesMedian": 5242880,
+      "retainedRssDeltaBytesMedian": 6111232,
+      "retainedHeapDeltaBytesMedian": 1064056,
+      "maxRssSamplesBytes": [
+        75792384,
+        75923456,
+        75644928,
+        75218944,
+        76185600
+      ],
+      "peakRssDeltaSamplesBytes": [
+        5324800,
+        5242880,
+        5177344,
+        5242880,
+        5586944
+      ],
+      "compactions": 5
+    },
+    {
+      "shape": "streaming-ahead",
+      "mode": "cursor-reset-4096",
+      "wallMedianMs": 15.48,
+      "maxRssBytesMedian": 75005952,
+      "peakRssDeltaBytesMedian": 4390912,
+      "retainedRssDeltaBytesMedian": 5095424,
+      "retainedHeapDeltaBytesMedian": 1062848,
+      "maxRssSamplesBytes": [
+        75005952,
+        75005952,
+        75448320,
+        74498048,
+        74743808
+      ],
+      "peakRssDeltaSamplesBytes": [
+        4489216,
+        4325376,
+        4702208,
+        4390912,
+        4341760
+      ],
+      "compactions": 5
+    },
+    {
+      "shape": "streaming-balanced",
+      "mode": "current-shift",
+      "wallMedianMs": 12.637,
+      "maxRssBytesMedian": 72941568,
+      "peakRssDeltaBytesMedian": 2752512,
+      "retainedRssDeltaBytesMedian": 3571712,
+      "retainedHeapDeltaBytesMedian": 1066272,
+      "maxRssSamplesBytes": [
+        72941568,
+        72941568,
+        72876032,
+        76644352,
+        73334784
+      ],
+      "peakRssDeltaSamplesBytes": [
+        2752512,
+        2785280,
+        2736128,
+        2752512,
+        2834432
+      ],
+      "compactions": 0
+    },
+    {
+      "shape": "streaming-balanced",
+      "mode": "cursor-clear-1024",
+      "wallMedianMs": 11.721,
+      "maxRssBytesMedian": 73302016,
+      "peakRssDeltaBytesMedian": 2932736,
+      "retainedRssDeltaBytesMedian": 3506176,
+      "retainedHeapDeltaBytesMedian": 1068736,
+      "maxRssSamplesBytes": [
+        74792960,
+        73662464,
+        73302016,
+        73187328,
+        73170944
+      ],
+      "peakRssDeltaSamplesBytes": [
+        2818048,
+        2949120,
+        2899968,
+        2932736,
+        3047424
+      ],
+      "compactions": 0
+    },
+    {
+      "shape": "streaming-balanced",
+      "mode": "cursor-clear-4096",
+      "wallMedianMs": 10.671,
+      "maxRssBytesMedian": 73056256,
+      "peakRssDeltaBytesMedian": 2916352,
+      "retainedRssDeltaBytesMedian": 3571712,
+      "retainedHeapDeltaBytesMedian": 1069440,
+      "maxRssSamplesBytes": [
+        73875456,
+        72695808,
+        73891840,
+        73056256,
+        72990720
+      ],
+      "peakRssDeltaSamplesBytes": [
+        2850816,
+        2916352,
+        2932736,
+        2981888,
+        2834432
+      ],
+      "compactions": 0
+    },
+    {
+      "shape": "streaming-balanced",
+      "mode": "cursor-clear-16384",
+      "wallMedianMs": 12.458,
+      "maxRssBytesMedian": 73498624,
+      "peakRssDeltaBytesMedian": 2998272,
+      "retainedRssDeltaBytesMedian": 3637248,
+      "retainedHeapDeltaBytesMedian": 1068720,
+      "maxRssSamplesBytes": [
+        73252864,
+        74465280,
+        73498624,
+        74334208,
+        72941568
+      ],
+      "peakRssDeltaSamplesBytes": [
+        2981888,
+        3047424,
+        2998272,
+        3129344,
+        2736128
+      ],
+      "compactions": 0
+    },
+    {
+      "shape": "streaming-balanced",
+      "mode": "cursor-no-clear-4096",
+      "wallMedianMs": 11.249,
+      "maxRssBytesMedian": 72744960,
+      "peakRssDeltaBytesMedian": 2916352,
+      "retainedRssDeltaBytesMedian": 3457024,
+      "retainedHeapDeltaBytesMedian": 1068272,
+      "maxRssSamplesBytes": [
+        73154560,
+        72417280,
+        73334784,
+        72744960,
+        72728576
+      ],
+      "peakRssDeltaSamplesBytes": [
+        2932736,
+        2785280,
+        2850816,
+        2916352,
+        2916352
+      ],
+      "compactions": 0
+    },
+    {
+      "shape": "streaming-balanced",
+      "mode": "cursor-splice-4096",
+      "wallMedianMs": 10.396,
+      "maxRssBytesMedian": 73007104,
+      "peakRssDeltaBytesMedian": 2932736,
+      "retainedRssDeltaBytesMedian": 3670016,
+      "retainedHeapDeltaBytesMedian": 1068080,
+      "maxRssSamplesBytes": [
+        73449472,
+        72810496,
+        73007104,
+        72679424,
+        73121792
+      ],
+      "peakRssDeltaSamplesBytes": [
+        2981888,
+        2932736,
+        2834432,
+        2867200,
+        2932736
+      ],
+      "compactions": 0
+    },
+    {
+      "shape": "streaming-balanced",
+      "mode": "cursor-splice-16384",
+      "wallMedianMs": 15.18,
+      "maxRssBytesMedian": 72974336,
+      "peakRssDeltaBytesMedian": 2965504,
+      "retainedRssDeltaBytesMedian": 3473408,
+      "retainedHeapDeltaBytesMedian": 1068248,
+      "maxRssSamplesBytes": [
+        72974336,
+        72925184,
+        73351168,
+        73334784,
+        72925184
+      ],
+      "peakRssDeltaSamplesBytes": [
+        2998272,
+        2965504,
+        2834432,
+        2850816,
+        3063808
+      ],
+      "compactions": 0
+    },
+    {
+      "shape": "streaming-balanced",
+      "mode": "cursor-slice-4096",
+      "wallMedianMs": 14.668,
+      "maxRssBytesMedian": 73400320,
+      "peakRssDeltaBytesMedian": 2965504,
+      "retainedRssDeltaBytesMedian": 3604480,
+      "retainedHeapDeltaBytesMedian": 1069208,
+      "maxRssSamplesBytes": [
+        74842112,
+        72531968,
+        73646080,
+        73400320,
+        73367552
+      ],
+      "peakRssDeltaSamplesBytes": [
+        5406720,
+        3063808,
+        2916352,
+        2965504,
+        2883584
+      ],
+      "compactions": 0
+    },
+    {
+      "shape": "streaming-balanced",
+      "mode": "cursor-reset-4096",
+      "wallMedianMs": 10.535,
+      "maxRssBytesMedian": 72941568,
+      "peakRssDeltaBytesMedian": 3014656,
+      "retainedRssDeltaBytesMedian": 3489792,
+      "retainedHeapDeltaBytesMedian": 1068896,
+      "maxRssSamplesBytes": [
+        72892416,
+        72941568,
+        72810496,
+        73515008,
+        73269248
+      ],
+      "peakRssDeltaSamplesBytes": [
+        3031040,
+        3014656,
+        2719744,
+        3031040,
+        2916352
+      ],
+      "compactions": 0
+    }
+  ]
+}

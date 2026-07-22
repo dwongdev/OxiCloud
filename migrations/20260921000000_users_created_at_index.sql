@@ -1,0 +1,28 @@
+-- no-transaction
+-- Paginated admin user listings sort newest-first with `id` as a stable
+-- tiebreaker. PostgreSQL 13+ uses this timestamp index plus an incremental
+-- sort only within equal-timestamp groups. Without the index,
+-- PostgreSQL scans and top-N sorts the entire user directory for every page.
+-- Keep the index narrow: the compact response fetches at most 500 heap rows,
+-- while INCLUDE-ing profile columns would bloat both RAM and write I/O.
+-- The initial 500k-row fixture with 100-way timestamp ties was superseded for
+-- resource accounting because B-tree posting-list dedup compressed its keys.
+-- Three independent representative A/B transactions (15 samples/shape, common
+-- UUID PK) measured mostly-unique timestamps at 11,255,808 bytes and +0.680 us
+-- per inserted user; first/deep pages improved 266.13x/24.21x. Ten-user bursts
+-- used 4,751,360 bytes and +0.582 us/user, improving reads 321.57x/18.29x.
+-- (`tools/perf-audit/admin_user_order_index_representative.sql`). The user
+-- explicitly accepted those corrected costs. This migration deliberately
+-- remains one-column. A later isolated representative A/B/C gate rejected the
+-- compound index: it regressed the common unique-timestamp first page by 6.45%,
+-- increased index bytes by 80.13%-327.76%, and added 0.445 us/user to burst
+-- inserts despite improving deep pages by 1.63x-2.30x.
+-- Build online: a regular CREATE INDEX would block INSERT/UPDATE/DELETE on
+-- auth.users (including the last_login_at write) for the full build.  Keep this
+-- as the migration's only statement: PostgreSQL wraps multiple statements from
+-- one simple-query message in an implicit transaction, where CONCURRENTLY is
+-- forbidden. If a failed build leaves this name INVALID, operators must run
+-- `DROP INDEX CONCURRENTLY auth.idx_users_created_at_desc` before retrying;
+-- deliberately omit IF NOT EXISTS so an invalid index is never accepted.
+CREATE INDEX CONCURRENTLY idx_users_created_at_desc
+    ON auth.users (created_at DESC);

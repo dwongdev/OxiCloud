@@ -11,6 +11,7 @@
 use uuid::Uuid;
 
 use crate::common::errors::DomainError;
+use crate::domain::entities::user::UserRole;
 use crate::domain::services::authorization::{
     Grant, GrantCursor, IncomingGrantSummary, OutgoingResourceSummary, Permission, Resource,
     ResourceKind, Role, Subject,
@@ -29,6 +30,21 @@ pub enum AuthzDenialVisibility {
     Hidden,
 }
 
+fn system_admin_denial_reason(
+    subject: Subject,
+    role: UserRole,
+    is_external: bool,
+    active: bool,
+) -> Option<&'static str> {
+    match subject {
+        Subject::User(_) if !active => Some("inactive"),
+        Subject::User(_) if is_external => Some("external_account"),
+        Subject::User(_) if role != UserRole::Admin => Some("not_admin"),
+        Subject::User(_) => None,
+        _ => Some("unsupported_subject"),
+    }
+}
+
 impl AuthzDenialVisibility {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -39,6 +55,44 @@ impl AuthzDenialVisibility {
 }
 
 pub trait AuthorizationEngine: Send + Sync + 'static {
+    /// Require the authenticated principal to hold the deployment-wide admin
+    /// role.  System administration has no resource UUID, so it cannot be
+    /// represented by [`Resource`]; it still belongs in this policy port rather
+    /// than in an HTTP handler or an application-service role shortcut.
+    ///
+    /// The application authentication service supplies its already cached,
+    /// image-free live flags.  This avoids a second database query/cache for the
+    /// same caller while keeping the authorization decision and denial audit in
+    /// the engine's single policy surface.
+    fn require_system_admin(
+        &self,
+        subject: Subject,
+        role: UserRole,
+        is_external: bool,
+        active: bool,
+    ) -> Result<(), DomainError> {
+        let reason = system_admin_denial_reason(subject, role, is_external, active);
+        let Some(reason) = reason else {
+            return Ok(());
+        };
+
+        tracing::info!(
+            target: "audit",
+            event = "authz.admin_denied",
+            reason,
+            subject_type = subject.type_str(),
+            caller_id = %subject.id(),
+            role = role.as_str(),
+            is_external,
+            active,
+            "👮🏻‍♂️ system-administrator permission denied"
+        );
+        Err(DomainError::access_denied(
+            "System",
+            "Admin access required",
+        ))
+    }
+
     /// Returns true if `subject` has `permission` on `resource`, considering
     /// owner short-circuit AND cascading from folder ancestors.
     ///
@@ -303,4 +357,34 @@ pub trait AuthorizationEngine: Send + Sync + 'static {
     /// succeeds to keep the two tables in sync during dual-write; after
     /// cleanup this is the canonical role-revocation entry point.
     async fn clear_role(&self, subject: Subject, resource: Resource) -> Result<(), DomainError>;
+}
+
+#[cfg(test)]
+mod system_admin_tests {
+    use super::*;
+
+    #[test]
+    fn only_active_internal_admin_users_pass_the_system_gate() {
+        let id = Uuid::new_v4();
+        assert_eq!(
+            system_admin_denial_reason(Subject::User(id), UserRole::Admin, false, true),
+            None
+        );
+        assert_eq!(
+            system_admin_denial_reason(Subject::User(id), UserRole::User, false, true),
+            Some("not_admin")
+        );
+        assert_eq!(
+            system_admin_denial_reason(Subject::User(id), UserRole::Admin, true, true),
+            Some("external_account")
+        );
+        assert_eq!(
+            system_admin_denial_reason(Subject::User(id), UserRole::Admin, false, false),
+            Some("inactive")
+        );
+        assert_eq!(
+            system_admin_denial_reason(Subject::Token(id), UserRole::Admin, false, true),
+            Some("unsupported_subject")
+        );
+    }
 }

@@ -1,11 +1,12 @@
 use crate::application::dtos::user_dto::{
-    AuthResponseDto, ChangePasswordDto, LoginDto, RefreshTokenDto, RegisterDto,
-    UpgradeToInternalDto, UserDto,
+    AdminUserSummaryDto, AuthResponseDto, ChangePasswordDto, LoginDto, RefreshTokenDto,
+    RegisterDto, UpgradeToInternalDto, UserDto,
 };
 use crate::application::ports::auth_ports::{
     OidcIdClaims, OidcServicePort, PasswordHasherPort, SessionStoragePort, TokenServicePort,
     UserStoragePort,
 };
+use crate::application::ports::authorization_ports::AuthorizationEngine;
 use crate::application::ports::user_lifecycle::{DeletionMode, LogoutReason};
 use crate::application::services::user_lifecycle_service::UserLifecycleService;
 use crate::common::config::{AuthMethod, OidcConfig};
@@ -14,6 +15,7 @@ use crate::domain::entities::magic_link_token::{MagicLinkResourceKind, MagicLink
 use crate::domain::entities::session::Session;
 use crate::domain::entities::user::{User, UserFlags, UserRole};
 use crate::domain::repositories::magic_link_token_repository::MagicLinkTokenRepository;
+use crate::domain::services::authorization::Subject;
 use crate::infrastructure::repositories::pg::SessionPgRepository;
 use crate::infrastructure::repositories::pg::UserPgRepository;
 use crate::infrastructure::services::jwt_service::JwtTokenService;
@@ -2129,7 +2131,7 @@ impl AuthApplicationService {
     /// out so that internal-user surfaces — system address book, OCS
     /// sharee search, etc. — never expose external identities. Admin
     /// surfaces that need the full list should call
-    /// [`list_users_including_external`] instead.
+    /// [`list_users_including_external_with_perms`] instead.
     pub async fn list_users(&self, limit: i64, offset: i64) -> Result<Vec<UserDto>, DomainError> {
         let users = self.user_storage.list_users(limit, offset, false).await?;
         Ok(users.into_iter().map(UserDto::from).collect())
@@ -2137,13 +2139,53 @@ impl AuthApplicationService {
 
     /// Admin-only: lists users including external (grant-only) recipients.
     /// Used by the admin user-management UI.
-    pub async fn list_users_including_external(
+    pub async fn list_users_including_external_with_perms<A: AuthorizationEngine>(
         &self,
+        authorization: &A,
+        caller_id: Uuid,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<UserDto>, DomainError> {
+        self.require_admin_caller(authorization, caller_id).await?;
         let users = self.user_storage.list_users(limit, offset, true).await?;
         Ok(users.into_iter().map(UserDto::from).collect())
+    }
+
+    /// Admin-only compact listing.  The detail endpoint retains the complete
+    /// [`UserDto`]; this path projects only what the management table renders so
+    /// PostgreSQL never detoasts or transfers avatars/preferences for a page.
+    pub async fn list_user_summaries_including_external_with_perms<A: AuthorizationEngine>(
+        &self,
+        authorization: &A,
+        caller_id: Uuid,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<AdminUserSummaryDto>, DomainError> {
+        self.require_admin_caller(authorization, caller_id).await?;
+        let users = self
+            .user_storage
+            .list_user_summaries(limit, offset, true)
+            .await?;
+        Ok(users.into_iter().map(AdminUserSummaryDto::from).collect())
+    }
+
+    /// Service-layer gate for administrator-scoped user-directory operations.
+    /// The route middleware remains a cheap first line of defence, but the
+    /// application service is authoritative so alternate callers cannot bypass
+    /// policy.  The lookup is the existing single-flight, image-free flags
+    /// cache; a hot authorization check does not hydrate the user profile.
+    async fn require_admin_caller<A: AuthorizationEngine>(
+        &self,
+        authorization: &A,
+        caller_id: Uuid,
+    ) -> Result<(), DomainError> {
+        let flags = self.get_user_flags(caller_id).await?;
+        authorization.require_system_admin(
+            Subject::User(caller_id),
+            flags.role,
+            flags.is_external,
+            flags.active,
+        )
     }
 
     /// Searches internal users only. See [`list_users`] for the rationale.

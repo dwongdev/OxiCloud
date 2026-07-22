@@ -5,7 +5,14 @@
  */
 import { apiFetch, apiJson } from '$lib/api/client';
 import { getCsrfHeaders } from '$lib/api/csrf';
-import type { Drive, DriveMember, DriveMemberSubject, DriveRole, User } from '$lib/api/types';
+import type {
+	AdminUsersPage,
+	Drive,
+	DriveMember,
+	DriveMemberSubject,
+	DriveRole,
+	User
+} from '$lib/api/types';
 
 const JSON_HEADERS = { 'Content-Type': 'application/json' };
 
@@ -232,13 +239,10 @@ export async function deleteDriveAdmin(driveId: string): Promise<void> {
 
 // ── Users ───────────────────────────────────────────────────────────────
 
-export interface AdminUsersPage {
-	total: number;
-	users: User[];
-}
-
+/** List the compact rows rendered by the management table; full account
+ * details remain available through {@link getUserAdmin}. */
 export function listUsers(limit: number, offset: number): Promise<AdminUsersPage> {
-	return apiJson<AdminUsersPage>(`/api/admin/users?limit=${limit}&offset=${offset}`, {
+	return apiJson<AdminUsersPage>(`/api/admin/users?limit=${limit}&offset=${offset}&summary=true`, {
 		credentials: 'same-origin'
 	});
 }

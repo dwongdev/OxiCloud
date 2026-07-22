@@ -1,0 +1,179 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-21T20:30:26.794Z",
+  "decision": "evidence_only_superseded_by_focused_gate; exact output and all medians improved, but the one-file p95 was noisy and regressed, so acceptance relies on the later 41-sample focused gate",
+  "environment": {
+    "node": "v26.5.0",
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M4 Pro",
+    "logicalCpus": 14,
+    "gcExposed": true
+  },
+  "config": {
+    "suite": "progress",
+    "warmup": 5,
+    "samples": 25,
+    "queueCounts": [
+      64,
+      256,
+      1024,
+      10000,
+      50000
+    ],
+    "progressCases": [
+      {
+        "items": 1,
+        "updates": 100
+      },
+      {
+        "items": 10,
+        "updates": 500
+      },
+      {
+        "items": 100,
+        "updates": 5000
+      }
+    ],
+    "hashCounts": [
+      1000,
+      10000,
+      10001,
+      25000
+    ],
+    "dedupBatchSize": 10000,
+    "dedupConcurrency": 4,
+    "serverLatencyMs": 0,
+    "modeledFileBytes": 65536
+  },
+  "notes": {
+    "heap": "Median heap delta is indicative only; timing is the primary microbenchmark metric.",
+    "dedup": "The current >10k path is faster only because it is rejected and returns no owned hashes."
+  },
+  "suites": {
+    "progress": [
+      {
+        "items": 1,
+        "updates": 100,
+        "repetitions": 1000,
+        "normalizedMedianUsPerRun": {
+          "current": 1.069250000000011,
+          "candidate": 0.32845800000006875
+        },
+        "current": {
+          "sampleCount": 25,
+          "medianMs": 1.069250000000011,
+          "p95Ms": 2.1355839999999944,
+          "minMs": 0.47479199999997945,
+          "maxMs": 2.813957999999957,
+          "medianHeapDeltaBytes": 1768864,
+          "medianRssDeltaBytes": 0
+        },
+        "candidate": {
+          "sampleCount": 25,
+          "medianMs": 0.32845800000006875,
+          "p95Ms": 11.240291999999954,
+          "minMs": 0.2692909999999529,
+          "maxMs": 35.88008300000001,
+          "medianHeapDeltaBytes": 168848,
+          "medianRssDeltaBytes": 0
+        },
+        "speedup": 3.255362938335456,
+        "representative": {
+          "current": {
+            "checksum": 8562000,
+            "lastPercent": 22,
+            "finalSum": 215.8203125
+          },
+          "candidate": {
+            "checksum": 8562000,
+            "lastPercent": 22,
+            "finalSum": 215.8203125
+          }
+        }
+      },
+      {
+        "items": 10,
+        "updates": 500,
+        "repetitions": 200,
+        "normalizedMedianUsPerRun": {
+          "current": 17.718959999999697,
+          "candidate": 3.242289999999457
+        },
+        "current": {
+          "sampleCount": 25,
+          "medianMs": 3.5437919999999394,
+          "p95Ms": 15.97524999999996,
+          "minMs": 1.7652080000000296,
+          "maxMs": 239.03012499999977,
+          "medianHeapDeltaBytes": 1099512,
+          "medianRssDeltaBytes": 0
+        },
+        "candidate": {
+          "sampleCount": 25,
+          "medianMs": 0.6484579999998914,
+          "p95Ms": 3.759457999999995,
+          "minMs": 0.22216699999989942,
+          "maxMs": 35.765333000000055,
+          "medianHeapDeltaBytes": 77648,
+          "medianRssDeltaBytes": 0
+        },
+        "speedup": 5.464952240546856,
+        "representative": {
+          "current": {
+            "checksum": 27254400,
+            "lastPercent": 44,
+            "finalSum": 871.2890625
+          },
+          "candidate": {
+            "checksum": 27254400,
+            "lastPercent": 44,
+            "finalSum": 871.2890625
+          }
+        }
+      },
+      {
+        "items": 100,
+        "updates": 5000,
+        "repetitions": 20,
+        "normalizedMedianUsPerRun": {
+          "current": 6256.843750000007,
+          "candidate": 13.327049999998053
+        },
+        "current": {
+          "sampleCount": 25,
+          "medianMs": 125.13687500000015,
+          "p95Ms": 234.41116699999975,
+          "minMs": 33.03545800000029,
+          "maxMs": 246.10770900000034,
+          "medianHeapDeltaBytes": 1590568,
+          "medianRssDeltaBytes": 0
+        },
+        "candidate": {
+          "sampleCount": 25,
+          "medianMs": 0.26654099999996106,
+          "p95Ms": 2.754667000000154,
+          "minMs": 0.2102919999997539,
+          "maxMs": 4.791457999999693,
+          "medianHeapDeltaBytes": 51728,
+          "medianRssDeltaBytes": 0
+        },
+        "speedup": 469.48452583286786,
+        "representative": {
+          "current": {
+            "checksum": 240082660,
+            "lastPercent": 51,
+            "finalSum": 1024.8828125
+          },
+          "candidate": {
+            "checksum": 240082660,
+            "lastPercent": 51,
+            "finalSum": 1024.8828125
+          }
+        }
+      }
+    ]
+  },
+  "blackhole": 0
+}

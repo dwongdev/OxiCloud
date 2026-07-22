@@ -1,0 +1,76 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-21",
+  "benchmark": "run_migration_workset_materialization",
+  "baseline": "one ordered SQL stream collected into Vec before backend work",
+  "candidates": [
+    "keyset pages of 65536 rows, each page released after consumption",
+    "keyset pages of 262144 rows, each page released after consumption"
+  ],
+  "environment": {
+    "clientPlatform": "macOS 26.5.2 arm64, Apple M4 Pro",
+    "postgres": "18.2-alpine3.23 in oxicloud-postgres-1",
+    "transport": "SQLx over the container private IP because the published localhost port refused connections",
+    "profile": "release",
+    "processIsolation": "one fresh client process per sample; connection and COUNT warm-up precede the timer"
+  },
+  "fixture": {
+    "rows": 1000000,
+    "rowShape": "64-byte lowercase hexadecimal hash plus bigint size",
+    "expectedChecksum": 4156242879243796640,
+    "order": "ORDER BY hash",
+    "measuredCompleteRounds": 5,
+    "plannedRounds": 7,
+    "executionOrder": [
+      ["current", "paged65536", "paged262144"],
+      ["paged262144", "paged65536", "current"],
+      ["paged65536", "current", "paged262144"],
+      ["current", "paged65536", "paged262144"],
+      ["paged262144", "paged65536", "current"]
+    ]
+  },
+  "results": {
+    "current": {
+      "elapsedMs": [644.398, 964.231, 261.508, 1175.821, 265.14],
+      "medianElapsedMs": 644.398,
+      "maxToMinElapsedRatio": 4.5,
+      "rssBytes": [106020864, 106070016, 106004480, 106053632, 106053632],
+      "medianRssBytes": 106053632,
+      "peakRows": 1000000
+    },
+    "paged65536": {
+      "elapsedMs": [1198.549, 4080.427, 1622.317, 2558.891, 1508.613],
+      "medianElapsedMs": 1622.317,
+      "elapsedRatioVsCurrent": 2.5176,
+      "medianElapsedRegressionPercent": 151.76,
+      "maxToMinElapsedRatio": 3.4,
+      "rssBytes": [18366464, 16236544, 16236544, 18350080, 18300928],
+      "medianRssBytes": 18300928,
+      "medianRssReductionPercent": 82.74,
+      "peakRows": 65536
+    },
+    "paged262144": {
+      "elapsedMs": [320.191, 1297.052, 2871.904, 2333.342, 1928.731],
+      "medianElapsedMs": 1928.731,
+      "elapsedRatioVsCurrent": 2.9931,
+      "medianElapsedRegressionPercent": 199.31,
+      "maxToMinElapsedRatio": 8.97,
+      "rssBytes": [60833792, 60866560, 58703872, 63012864, 58654720],
+      "medianRssBytes": 60833792,
+      "medianRssReductionPercent": 42.64,
+      "peakRows": 262144
+    }
+  },
+  "correctness": {
+    "allMeasuredSamplesReturnedRows": 1000000,
+    "allMeasuredSamplesReturnedChecksum": 4156242879243796640,
+    "orderedRowEquivalence": "PASS"
+  },
+  "invalidAttempts": [
+    "The first host-private-IP run stopped after four samples with PoolTimedOut and was discarded.",
+    "The recorded run stopped after five complete three-way rounds when the Docker bridge failed again; its complete rounds are retained because every mode is present in each round.",
+    "A final attempt compiled the harness inside a preinstalled Rust container sharing PostgreSQL's network namespace, but the build container exited before producing any benchmark sample."
+  ],
+  "decision": "rejected; production unchanged",
+  "reason": "Both bounded-memory candidates reduced RSS, but neither passed the no-material-latency-regression gate. Production run_migration remains unchanged."
+}

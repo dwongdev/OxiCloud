@@ -1,0 +1,251 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-21T20:31:04.178Z",
+  "decision": "evidence only; the above-10000 batching candidate was rejected by the full workflow gate and reverted",
+  "environment": {
+    "node": "v26.5.0",
+    "platform": "darwin",
+    "release": "25.5.0",
+    "arch": "arm64",
+    "cpu": "Apple M4 Pro",
+    "logicalCpus": 14,
+    "gcExposed": true
+  },
+  "config": {
+    "suite": "dedup",
+    "warmup": 5,
+    "samples": 15,
+    "queueCounts": [
+      64,
+      256,
+      1024,
+      10000,
+      50000
+    ],
+    "progressCases": [
+      {
+        "items": 1,
+        "updates": 100
+      },
+      {
+        "items": 10,
+        "updates": 500
+      },
+      {
+        "items": 100,
+        "updates": 5000
+      },
+      {
+        "items": 1000,
+        "updates": 10000
+      },
+      {
+        "items": 10000,
+        "updates": 5000
+      }
+    ],
+    "hashCounts": [
+      1000,
+      10000,
+      10001,
+      25000
+    ],
+    "dedupBatchSize": 10000,
+    "dedupConcurrency": 4,
+    "serverLatencyMs": 0,
+    "modeledFileBytes": 65536
+  },
+  "notes": {
+    "heap": "Median heap delta is indicative only; timing is the primary microbenchmark metric.",
+    "dedup": "The current >10k path is faster only because it is rejected and returns no owned hashes."
+  },
+  "suites": {
+    "dedup": [
+      {
+        "hashCount": 1000,
+        "current": {
+          "sampleCount": 15,
+          "medianMs": 4.66216600000007,
+          "p95Ms": 23.915542000000016,
+          "minMs": 1.9842080000000237,
+          "maxMs": 23.915542000000016,
+          "medianHeapDeltaBytes": 583320,
+          "medianRssDeltaBytes": 0
+        },
+        "candidate": {
+          "sampleCount": 15,
+          "medianMs": 5.586167000000046,
+          "p95Ms": 22.62520799999993,
+          "minMs": 3.662083999999993,
+          "maxMs": 22.62520799999993,
+          "medianHeapDeltaBytes": 578504,
+          "medianRssDeltaBytes": 0
+        },
+        "speedup": 0.8345912322349174,
+        "representative": {
+          "current": {
+            "checksum": 249500,
+            "ownedCount": 500,
+            "contentBytesAvoided": 32768000,
+            "requests": 1,
+            "acceptedRequests": 1,
+            "rejectedRequests": 0,
+            "requestBytes": 67012,
+            "responseBytes": 33511,
+            "maxBatchHashes": 1000
+          },
+          "candidate": {
+            "checksum": 249500,
+            "ownedCount": 500,
+            "contentBytesAvoided": 32768000,
+            "requests": 1,
+            "acceptedRequests": 1,
+            "rejectedRequests": 0,
+            "requestBytes": 67012,
+            "responseBytes": 33511,
+            "maxBatchHashes": 1000
+          }
+        }
+      },
+      {
+        "hashCount": 10000,
+        "current": {
+          "sampleCount": 15,
+          "medianMs": 12.211541000000125,
+          "p95Ms": 138.27816600000006,
+          "minMs": 5.708917000000156,
+          "maxMs": 138.27816600000006,
+          "medianHeapDeltaBytes": 4629728,
+          "medianRssDeltaBytes": 671744
+        },
+        "candidate": {
+          "sampleCount": 15,
+          "medianMs": 10.960124999999834,
+          "p95Ms": 68.23608400000012,
+          "minMs": 7.660417000000052,
+          "maxMs": 68.23608400000012,
+          "medianHeapDeltaBytes": 4629608,
+          "medianRssDeltaBytes": 671744
+        },
+        "speedup": 1.1141789897469516,
+        "representative": {
+          "current": {
+            "checksum": 24995000,
+            "ownedCount": 5000,
+            "contentBytesAvoided": 327680000,
+            "requests": 1,
+            "acceptedRequests": 1,
+            "rejectedRequests": 0,
+            "requestBytes": 670012,
+            "responseBytes": 335011,
+            "maxBatchHashes": 10000
+          },
+          "candidate": {
+            "checksum": 24995000,
+            "ownedCount": 5000,
+            "contentBytesAvoided": 327680000,
+            "requests": 1,
+            "acceptedRequests": 1,
+            "rejectedRequests": 0,
+            "requestBytes": 670012,
+            "responseBytes": 335011,
+            "maxBatchHashes": 10000
+          }
+        }
+      },
+      {
+        "hashCount": 10001,
+        "current": {
+          "sampleCount": 15,
+          "medianMs": 5.437792000000172,
+          "p95Ms": 10.699207999999999,
+          "minMs": 2.1932090000000244,
+          "maxMs": 10.699207999999999,
+          "medianHeapDeltaBytes": 2370176,
+          "medianRssDeltaBytes": 0
+        },
+        "candidate": {
+          "sampleCount": 15,
+          "medianMs": 10.77975000000015,
+          "p95Ms": 13.00845900000013,
+          "minMs": 7.553665999999794,
+          "maxMs": 13.00845900000013,
+          "medianHeapDeltaBytes": 5290256,
+          "medianRssDeltaBytes": 0
+        },
+        "speedup": 0.5044450938101623,
+        "representative": {
+          "current": {
+            "checksum": 0,
+            "ownedCount": 0,
+            "contentBytesAvoided": 0,
+            "requests": 1,
+            "acceptedRequests": 0,
+            "rejectedRequests": 1,
+            "requestBytes": 670079,
+            "responseBytes": 27,
+            "maxBatchHashes": 10001
+          },
+          "candidate": {
+            "checksum": 25005000,
+            "ownedCount": 5001,
+            "contentBytesAvoided": 327745536,
+            "requests": 2,
+            "acceptedRequests": 2,
+            "rejectedRequests": 0,
+            "requestBytes": 670091,
+            "responseBytes": 335089,
+            "maxBatchHashes": 10000
+          }
+        }
+      },
+      {
+        "hashCount": 25000,
+        "current": {
+          "sampleCount": 15,
+          "medianMs": 9.382499999999709,
+          "p95Ms": 19.153124999999818,
+          "minMs": 5.52666599999975,
+          "maxMs": 19.153124999999818,
+          "medianHeapDeltaBytes": 4065728,
+          "medianRssDeltaBytes": 1687552
+        },
+        "candidate": {
+          "sampleCount": 15,
+          "medianMs": 31.40979100000004,
+          "p95Ms": 122.20316700000058,
+          "minMs": 10.393082999999933,
+          "maxMs": 122.20316700000058,
+          "medianHeapDeltaBytes": 12853840,
+          "medianRssDeltaBytes": 0
+        },
+        "speedup": 0.29871258933240585,
+        "representative": {
+          "current": {
+            "checksum": 0,
+            "ownedCount": 0,
+            "contentBytesAvoided": 0,
+            "requests": 1,
+            "acceptedRequests": 0,
+            "rejectedRequests": 1,
+            "requestBytes": 1675012,
+            "responseBytes": 27,
+            "maxBatchHashes": 25000
+          },
+          "candidate": {
+            "checksum": 156237500,
+            "ownedCount": 12500,
+            "contentBytesAvoided": 819200000,
+            "requests": 3,
+            "acceptedRequests": 3,
+            "rejectedRequests": 0,
+            "requestBytes": 1675036,
+            "responseBytes": 837533,
+            "maxBatchHashes": 10000
+          }
+        }
+      }
+    ]
+  },
+  "blackhole": 0
+}
