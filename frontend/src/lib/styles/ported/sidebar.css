@@ -155,6 +155,17 @@
        on every row so removing the accent causes no horizontal text shift. */
 }
 
+/* Drop-target highlight for the Favorites / Trash sidebar links —
+   applied only while a row-drag with the `application/x-oxi-item`
+   MIME is hovering the item. Matches the `.file-item.drop-target`
+   scrim used inside the resource list, so drag-drop feedback reads
+   as one consistent visual language. */
+.nav-item.nav-item--drop-target {
+    background-color: var(--color-warning-ring);
+    outline: 2px dashed var(--color-warning-border);
+    outline-offset: -2px;
+}
+
 .nav-item i,
 .nav-item .nav-icon,
 .nav-item .oxi-icon {

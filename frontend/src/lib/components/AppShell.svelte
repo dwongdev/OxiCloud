@@ -5,8 +5,10 @@
 	import { page } from '$app/state';
 	import { logout } from '$lib/api/endpoints/auth';
 	import { searchFiles } from '$lib/api/endpoints/search';
-	import { fileInlineUrl } from '$lib/api/endpoints/files';
-	import type { FileItem, FolderItem } from '$lib/api/types';
+	import { fileInlineUrl, deleteFile } from '$lib/api/endpoints/files';
+	import { deleteFolder } from '$lib/api/endpoints/folders';
+	import { addFavorite } from '$lib/api/endpoints/favorites';
+	import type { FileItem, FolderItem, ItemType } from '$lib/api/types';
 	import { lazyComponent } from '$lib/composables/lazyComponent.svelte';
 	import DrivePicker from '$lib/components/DrivePicker.svelte';
 	import Icon from '$lib/icons/Icon.svelte';
@@ -14,10 +16,12 @@
 	import { userInitials, avatarColorIndex } from '$lib/utils/avatar';
 	import { i18n, LANGUAGES, setLocale, t, type Locale } from '$lib/i18n/index.svelte';
 	import { apiFetch } from '$lib/api/client';
+	import { dialogs } from '$lib/stores/dialogs.svelte';
 	import { preferences } from '$lib/stores/preferences.svelte';
 	import { session } from '$lib/stores/session.svelte';
 	import { theme, type Theme } from '$lib/stores/theme.svelte';
 	import { ui } from '$lib/stores/ui.svelte';
+	import { errorToast } from '$lib/utils/errors';
 	import { formatBytes } from '$lib/utils/format';
 
 	let { children }: { children: Snippet } = $props();
@@ -68,6 +72,119 @@
 
 	function active(href: string): boolean {
 		return page.url.pathname === href || page.url.pathname.startsWith(`${href}/`);
+	}
+
+	// ── Sidebar drop targets ─────────────────────────────────────────────────
+	// The row-drag on `/files` (and other resource surfaces) sets a
+	// `application/x-oxi-item` MIME with a JSON array of `{ id, name, kind }`.
+	// The Favorites and Trash sidebar links accept a drop of that shape:
+	//   – Favorites: batch-add each item as a favorite (idempotent server-side).
+	//   – Trash: yes/no confirm dialog, then batch-delete on approval.
+	// Every other sidebar link stays inert (no dragover ⇒ no drop cursor).
+	const SIDEBAR_DRAG_TYPE = 'application/x-oxi-item';
+	interface DragItem {
+		id: string;
+		name: string;
+		kind: ItemType;
+	}
+	let sidebarDropHref = $state<string | null>(null);
+
+	function sidebarOnDragOver(e: DragEvent, href: string) {
+		if (!e.dataTransfer?.types.includes(SIDEBAR_DRAG_TYPE)) return;
+		e.preventDefault();
+		// Favorites is a pure add — signal "copy". Trash is destructive — signal
+		// "move" so the cursor doesn't imply a benign copy for something that
+		// actually removes the row from its source view.
+		e.dataTransfer.dropEffect = href === '/favorites' ? 'copy' : 'move';
+		sidebarDropHref = href;
+	}
+
+	function sidebarOnDragLeave(href: string) {
+		if (sidebarDropHref === href) sidebarDropHref = null;
+	}
+
+	function parseDragItems(e: DragEvent): DragItem[] {
+		const raw = e.dataTransfer?.getData(SIDEBAR_DRAG_TYPE);
+		if (!raw) return [];
+		try {
+			const parsed = JSON.parse(raw) as unknown;
+			if (!Array.isArray(parsed)) return [];
+			return parsed.filter(
+				(it): it is DragItem =>
+					!!it &&
+					typeof it === 'object' &&
+					typeof (it as DragItem).id === 'string' &&
+					typeof (it as DragItem).name === 'string' &&
+					((it as DragItem).kind === 'file' || (it as DragItem).kind === 'folder')
+			);
+		} catch {
+			return [];
+		}
+	}
+
+	// Small bounded fan-out — same shape as `/files`'s `mapLimit` but
+	// inlined so AppShell doesn't grow a shared-util dependency for two
+	// call sites. A drop is usually small (single row or a page of
+	// selection), so 6 concurrent requests is plenty.
+	async function fanout<T>(items: T[], limit: number, fn: (item: T) => Promise<void>) {
+		let next = 0;
+		const worker = async () => {
+			while (next < items.length) {
+				const i = next++;
+				try {
+					await fn(items[i]);
+				} catch (e) {
+					errorToast(e);
+				}
+			}
+		};
+		await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+	}
+
+	async function sidebarOnDrop(e: DragEvent, href: string) {
+		// Narrow the sidebar-link href to the two accepting targets. Called
+		// from the row template, which can't type-narrow the loop variable
+		// through the arrow-function closure without a local capture.
+		if (href !== '/favorites' && href !== '/trash') return;
+		sidebarDropHref = null;
+		if (!e.dataTransfer?.types.includes(SIDEBAR_DRAG_TYPE)) return;
+		e.preventDefault();
+		const items = parseDragItems(e);
+		if (items.length === 0) return;
+
+		if (href === '/favorites') {
+			await fanout(items, 6, async (it) => {
+				await addFavorite(it.kind, it.id);
+				// Broadcast so a mounted resource-list source page (e.g. /files,
+				// /recent, /shared-with-me) can flip the row's `is_favorite` in
+				// place without a re-fetch. ResourceList listens for the same
+				// event and patches its `items` prop. Uses the existing
+				// window-event pattern (see `oxicloud:upload-files`).
+				window.dispatchEvent(
+					new CustomEvent('oxicloud:favorite-changed', {
+						detail: { id: it.id, is_favorite: true }
+					})
+				);
+			});
+			ui.notify(
+				t('favorites.added_n', { n: items.length }, 'Added {{n}} item(s) to favorites'),
+				'success'
+			);
+			return;
+		}
+
+		// Trash: destructive → gate on confirm.
+		const ok = await dialogs.confirm({
+			title: t('files.batch_delete', 'Delete selected'),
+			message:
+				items.length === 1
+					? t('files.confirm_delete', { name: items[0].name }, 'Move "{{name}}" to trash?')
+					: t('files.confirm_batch_delete', { n: items.length }, 'Move {{n}} items to trash?'),
+			confirmText: t('common.delete', 'Delete'),
+			danger: true
+		});
+		if (!ok) return;
+		await fanout(items, 6, (it) => (it.kind === 'file' ? deleteFile(it.id) : deleteFolder(it.id)));
 	}
 
 	let sidebarOpen = $state(false);
@@ -332,13 +449,18 @@
 
 	<nav class="nav-menu" aria-label={t('nav.primary', 'Primary')}>
 		{#each LINKS as link (link.href)}
+			{@const isDropTarget = link.href === '/favorites' || link.href === '/trash'}
 			<a
 				class="nav-item"
 				class:active={active(link.href)}
+				class:nav-item--drop-target={isDropTarget && sidebarDropHref === link.href}
 				href={resolve(link.href)}
 				data-section={link.section}
 				data-testid={`appshell-nav-${link.href.replace(/^\//, '')}-link`}
 				onclick={() => (sidebarOpen = false)}
+				ondragover={isDropTarget ? (e) => sidebarOnDragOver(e, link.href) : undefined}
+				ondragleave={isDropTarget ? () => sidebarOnDragLeave(link.href) : undefined}
+				ondrop={isDropTarget ? (e) => void sidebarOnDrop(e, link.href) : undefined}
 			>
 				<Icon name={link.icon} />
 				<span>{link.label}</span>

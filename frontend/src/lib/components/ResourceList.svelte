@@ -799,6 +799,24 @@
 		return picked.map((p) => p.item);
 	});
 
+	// Listen for out-of-band `is_favorite` changes broadcast by other
+	// surfaces — the sidebar drop-on-Favorites target in `AppShell` is
+	// today's only emitter, but any future "toggle from elsewhere"
+	// (bulk import, notification action, …) can dispatch the same
+	// event and every mounted resource list will patch its row without
+	// needing the source page to re-fetch. Matches the existing
+	// `oxicloud:upload-files` window-event pattern.
+	$effect(() => {
+		function onFavoriteChanged(e: Event) {
+			const detail = (e as CustomEvent<{ id: string; is_favorite: boolean }>).detail;
+			if (!detail) return;
+			const item = items.find((i) => i.id === detail.id);
+			if (item) item.is_favorite = detail.is_favorite;
+		}
+		window.addEventListener('oxicloud:favorite-changed', onFavoriteChanged);
+		return () => window.removeEventListener('oxicloud:favorite-changed', onFavoriteChanged);
+	});
+
 	// Drop selection ids that are no longer present after a reload.
 	$effect(() => {
 		// With nothing selected (the common case) the loop never runs — skip
