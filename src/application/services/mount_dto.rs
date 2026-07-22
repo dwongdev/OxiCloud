@@ -67,6 +67,11 @@ pub fn mount_folder_dto(cfg: &MountConfig, parent_id: &str, stat: &MountStat) ->
         category: Arc::from("Folder"),
         created_by: Some(cfg.owner_id),
         updated_by: Some(cfg.owner_id),
+        // Mount entries carry synthetic `ext:*` ids that don't exist in
+        // `auth.user_favorites` or `storage.role_grants`, so both flags
+        // are always false — they can't be favorited or grant-listed.
+        is_favorite: false,
+        is_shared: false,
     }
 }
 
@@ -88,6 +93,8 @@ pub fn mount_entry_folder_dto(cfg: &MountConfig, parent_id: &str, entry: &MountE
         category: Arc::from("Folder"),
         created_by: Some(cfg.owner_id),
         updated_by: Some(cfg.owner_id),
+        is_favorite: false,
+        is_shared: false,
     }
 }
 
@@ -115,6 +122,8 @@ pub fn mount_entry_file_dto(cfg: &MountConfig, parent_id: &str, entry: &MountEnt
         etag: virtual_file_etag(entry.size, entry.modified_at),
         created_by: Some(cfg.owner_id),
         updated_by: Some(cfg.owner_id),
+        is_favorite: false,
+        is_shared: false,
     }
 }
 
@@ -141,5 +150,7 @@ pub fn mount_file_dto(cfg: &MountConfig, parent_id: &str, stat: &MountStat) -> F
         etag: virtual_file_etag(stat.size, stat.modified_at),
         created_by: Some(cfg.owner_id),
         updated_by: Some(cfg.owner_id),
+        is_favorite: false,
+        is_shared: false,
     }
 }

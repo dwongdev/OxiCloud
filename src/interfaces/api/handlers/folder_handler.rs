@@ -686,6 +686,10 @@ fn mount_entry_to_item(
             category: Arc::from("Folder"),
             created_by: Some(cfg.owner_id),
             updated_by: Some(cfg.owner_id),
+            // Mount entries use synthetic `ext:*` ids — no favorites /
+            // grants rows can ever key against them.
+            is_favorite: false,
+            is_shared: false,
         };
         FolderResourceItemDto {
             resource_type: ResourceTypeDto::Folder,
@@ -713,6 +717,8 @@ fn mount_entry_to_item(
             etag: virtual_file_etag(entry.size, entry.modified_at),
             created_by: Some(cfg.owner_id),
             updated_by: Some(cfg.owner_id),
+            is_favorite: false,
+            is_shared: false,
         };
         FolderResourceItemDto {
             resource_type: ResourceTypeDto::File,
